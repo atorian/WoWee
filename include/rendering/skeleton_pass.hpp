@@ -89,7 +89,7 @@ public:
     void destroy();
 
     /// The draws' set: binding 0 the frame's bones, binding 1 each request's
-    /// model matrix. Vertex stage.
+    /// model matrix. Vertex stage. Valid from initialize() on, posed or not.
     [[nodiscard]] VkDescriptorSetLayout drawSetLayout() const { return drawSetLayout_; }
     [[nodiscard]] VkDescriptorSet drawSet(uint32_t slot) const { return slots_[slot].drawSet; }
 
@@ -112,6 +112,8 @@ private:
         std::vector<std::pair<uint32_t, uint16_t>> readOf;
     };
     bool ensure(Slot& slot, uint32_t requests, uint32_t bones, uint32_t reads);
+    /// The slot's sets over its buffers and the pool's pages as they are.
+    void writeSets(Slot& slot, const std::vector<::VkBuffer>& pages, uint32_t pagesVersion);
 
     VkContext* context_ = nullptr;
     const char* owner_ = "";

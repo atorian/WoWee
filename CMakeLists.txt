@@ -1148,7 +1148,6 @@ set(WOWEE_SOURCES
     src/rendering/wmo_model_prep.cpp
     src/rendering/imgui_texture.cpp
     src/rendering/interface_frame.cpp
-    src/rendering/bone_slots.cpp
     src/rendering/normal_map.cpp
     src/rendering/m2_renderer.cpp
     src/rendering/m2_renderer_render.cpp
@@ -2545,6 +2544,11 @@ if(WOWEE_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_m2_skinning.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/m2-skinning)
         set_tests_properties(scene_m2_skinning PROPERTIES SKIP_RETURN_CODE 77)
+        # A billboard card faces the camera whichever way its model faces.
+        wowee_add_gpu_test(scene_m2_billboard
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_m2_billboard.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/m2-billboard)
+        set_tests_properties(scene_m2_billboard PROPERTIES SKIP_RETURN_CODE 77)
         # A doodad moved after it was placed is drawn where it went, and only there.
         wowee_add_gpu_test(scene_m2_moved
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_m2_moved.py

@@ -298,9 +298,6 @@ void M2Renderer::restartInstanceAnimation(uint32_t instanceId) {
     if (idxIt == scene_->instanceIndexById.end()) return;
     auto& inst = scene_->instances[idxIt->second];
     setAnimTime(inst, 0.0f);
-    if (inst.cachedModel) {
-        computeBoneMatrices(*inst.cachedModel, inst, animTimeOf(inst), globalSequenceTimeOf(inst), &cachedView_);
-    }
 }
 
 void M2Renderer::setInstanceAnimationHeld(uint32_t instanceId, uint32_t animationId,
@@ -542,8 +539,6 @@ void M2Renderer::removeInstance(uint32_t instanceId) {
         }
     }
 
-    destroyInstanceBones(inst, /*defer=*/true);
-
     // Swap-remove: move last element to the hole and pop_back to avoid O(n) shift
     scene_->instanceIndexById.erase(instanceId);
     scene_->cullGrid_.removeSwapLast(static_cast<uint32_t>(idx));
@@ -695,7 +690,6 @@ void M2Renderer::removeInstances(const std::vector<uint32_t>& instanceIds) {
                 scene_->instanceDedupMap_.erase(dedupIt);
             }
         }
-        destroyInstanceBones(inst, /*defer=*/true);
         scene_->instanceIndexById.erase(idxIt);
     }
     if (holes.empty()) return;
@@ -729,11 +723,7 @@ void M2Renderer::clear() {
         for (auto& [id, modelResource] : models) {
             destroyModelGPU(id, modelResource);
         }
-        for (auto& inst : scene_->instances) {
-            destroyInstanceBones(inst);
-        }
-        // Each retired model/instance returns its own sets after the fences.
-        // Keep the pools and persistent glow/dummy/mega-bone sets alive.
+        // Each retired model returns its own sets after the fences.
     }
     models.clear();
     pinnedModelIds_.clear();
@@ -761,7 +751,6 @@ void M2Renderer::clearInstances() {
     scene_->slots.clear();
     scene_->indexOfSlot.clear();
     ++instanceLayoutRevision_;
-    for (auto& inst : scene_->instances) destroyInstanceBones(inst);
     *scene_ = InstanceState{};
     if (collision_) collision_->clearM2();
 }

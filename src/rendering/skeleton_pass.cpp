@@ -110,8 +110,46 @@ bool SkeletonPass::initialize(VkContext& context, const char* owner) {
         }
         slot.computeSet = sets[0];
         slot.drawSet = sets[1];
+        // Buffers and sets from the start, so a draw may bind the set of a
+        // frame that posed nothing.
+        if (!ensure(slot, 1, 1, 1)) return false;
+        writeSets(slot, {}, 0);
     }
     return true;
+}
+
+void SkeletonPass::writeSets(Slot& slot, const std::vector<::VkBuffer>& framePages, uint32_t pagesVersion) {
+    std::vector<VkDescriptorBufferInfo> pages;
+    std::vector<uint32_t> pageAt;
+    for (size_t p = 0; p < framePages.size() && p < SkeletonPool::kMaxPages; ++p) {
+        if (!framePages[p]) continue;
+        pages.push_back({.buffer = framePages[p], .offset = 0, .range = VK_WHOLE_SIZE});
+        pageAt.push_back(static_cast<uint32_t>(p));
+    }
+    const VkDescriptorBufferInfo requests{.buffer = slot.requests.buffer, .offset = 0, .range = VK_WHOLE_SIZE};
+    const VkDescriptorBufferInfo bones{.buffer = slot.bones.buffer, .offset = 0, .range = VK_WHOLE_SIZE};
+    const VkDescriptorBufferInfo models{.buffer = slot.models.buffer, .offset = 0, .range = VK_WHOLE_SIZE};
+    std::vector<VkWriteDescriptorSet> writes;
+    const auto write = [&](VkDescriptorSet set, uint32_t binding, uint32_t element,
+                           const VkDescriptorBufferInfo* info) {
+        VkWriteDescriptorSet w{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w.dstSet = set;
+        w.dstBinding = binding;
+        w.dstArrayElement = element;
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        w.pBufferInfo = info;
+        writes.push_back(w);
+    };
+    for (size_t p = 0; p < pages.size(); ++p) write(slot.computeSet, 0, pageAt[p], &pages[p]);
+    write(slot.computeSet, 1, 0, &requests);
+    write(slot.computeSet, 2, 0, &bones);
+    write(slot.computeSet, 3, 0, &models);
+    write(slot.drawSet, 0, 0, &bones);
+    write(slot.drawSet, 1, 0, &models);
+    vkUpdateDescriptorSets(context_->getDevice(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    slot.setsCurrent = true;
+    slot.pagesVersion = pagesVersion;
 }
 
 void SkeletonPass::destroy() {
@@ -185,40 +223,7 @@ bool SkeletonPass::record(VkCommandBuffer cmd, uint32_t slotIndex, const Skeleto
     vmaFlushAllocation(context_->getAllocator(), slot.requests.allocation, 0, VK_WHOLE_SIZE);
 
     // The sets, after the slot's fence, when a buffer or the pages changed.
-    if (!slot.setsCurrent || slot.pagesVersion != frame.pagesVersion) {
-        std::vector<VkDescriptorBufferInfo> pages;
-        std::vector<uint32_t> pageAt;
-        for (size_t p = 0; p < frame.pages.size() && p < SkeletonPool::kMaxPages; ++p) {
-            if (!frame.pages[p]) continue;
-            pages.push_back({.buffer = frame.pages[p], .offset = 0, .range = VK_WHOLE_SIZE});
-            pageAt.push_back(static_cast<uint32_t>(p));
-        }
-        const VkDescriptorBufferInfo requests{.buffer = slot.requests.buffer, .offset = 0, .range = VK_WHOLE_SIZE};
-        const VkDescriptorBufferInfo bones{.buffer = slot.bones.buffer, .offset = 0, .range = VK_WHOLE_SIZE};
-        const VkDescriptorBufferInfo models{.buffer = slot.models.buffer, .offset = 0, .range = VK_WHOLE_SIZE};
-        std::vector<VkWriteDescriptorSet> writes;
-        const auto write = [&](VkDescriptorSet set, uint32_t binding, uint32_t element,
-                               const VkDescriptorBufferInfo* info) {
-            VkWriteDescriptorSet w{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            w.dstSet = set;
-            w.dstBinding = binding;
-            w.dstArrayElement = element;
-            w.descriptorCount = 1;
-            w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            w.pBufferInfo = info;
-            writes.push_back(w);
-        };
-        for (size_t p = 0; p < pages.size(); ++p) write(slot.computeSet, 0, pageAt[p], &pages[p]);
-        write(slot.computeSet, 1, 0, &requests);
-        write(slot.computeSet, 2, 0, &bones);
-        write(slot.computeSet, 3, 0, &models);
-        write(slot.drawSet, 0, 0, &bones);
-        write(slot.drawSet, 1, 0, &models);
-        vkUpdateDescriptorSets(context_->getDevice(), static_cast<uint32_t>(writes.size()), writes.data(), 0,
-                               nullptr);
-        slot.setsCurrent = true;
-        slot.pagesVersion = frame.pagesVersion;
-    }
+    if (!slot.setsCurrent || slot.pagesVersion != frame.pagesVersion) writeSets(slot, frame.pages, frame.pagesVersion);
 
     // A dispatch a level: a request reads what the level before posed.
     const auto barrier = [&](VkPipelineStageFlags2 src, VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dst,

@@ -18,7 +18,6 @@
 #include "pipeline/heap_bytes.hpp"
 #include "rendering/character_renderer.hpp"
 #include <stdexcept>
-#include "rendering/m2_billboard.hpp"
 #include "rendering/m2_blend_mode.hpp"
 #include "rendering/m2_combiner.hpp"
 #include "rendering/m2_material.hpp"

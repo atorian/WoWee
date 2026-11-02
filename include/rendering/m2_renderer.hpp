@@ -16,6 +16,8 @@
 #include "rendering/instance_random.hpp"
 #include "rendering/m2_cull_grid.hpp"
 #include "rendering/shadow_params.hpp"
+#include "rendering/skeleton_pass.hpp"
+#include "rendering/skeleton_pool.hpp"
 
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/blp_loader.hpp"
@@ -185,6 +187,13 @@ struct M2ModelGPU {
 
     std::string name;
 
+    /// Where its bones and keys are in the renderer's SkeletonPool, for an
+    /// animated model; the GPU poses it from there and nowhere else.
+    SkeletonPool::Skeleton skeleton;
+    /// The bones the CPU reads - its emitters', ribbons', lights' and glow
+    /// cards' - sorted; copied back for an instance each frame it is posed.
+    std::vector<uint16_t> readBones;
+
     // Skeletal animation data (kept from M2Model for bone computation)
     std::vector<pipeline::M2Bone> bones;
     std::vector<pipeline::M2Sequence> sequences;
@@ -326,6 +335,9 @@ struct M2Instance {
     float animSpeed = 1.0f;      // Animation playback speed
     int currentSequenceIndex = 0;// Index into sequences array
     float animDuration = 0.0f;   // Duration of current animation (ms)
+    /// Its model's readBones as the GPU last posed them, two frames late,
+    /// in model space; the other bones are at rest. Empty until a pose comes
+    /// back: every bone is at rest (the identity) then.
     std::vector<glm::mat4> boneMatrices;
 
     // Idle variation state
@@ -437,16 +449,6 @@ struct M2Instance {
 
     void recomputeCachedCullFactors();
 
-    /// The animation clock when its bones were last posed: a distant one is
-    /// posed again only once the clock has moved on far enough.
-    double bonesPosedAtMs = 0.0;
-
-    // Per-instance bone SSBO (double-buffered) - legacy; see mega bone SSBO in M2Renderer
-    ::VkBuffer boneBuffer[2] = {};
-    VmaAllocation boneAlloc[2] = {};
-    void* boneMapped[2] = {};
-    VkDescriptorSet boneSet[2] = {};
-
     void updateModelMatrix();
 };
 
@@ -504,7 +506,7 @@ public:
     // in the ray-traced scene.
 
     /// What the owner of the skeleton says about it this frame. `bones` are
-    /// in the same model-space convention as computeBoneMatrices; an empty
+    /// in model space, as skeleton.comp poses them; an empty
     /// list leaves every bone at rest. Not `posed`: the owner did not move the
     /// skeleton this frame (out of its animation range, or hidden), so
     /// nothing new is emitted and what is out there plays out.
@@ -554,14 +556,13 @@ public:
     /// point: the caller has it now, the instance from then on.
     uint32_t reserveInstanceId() { return nextInstanceId++; }
 
-    /// Animate, emit and cull for this frame's camera: its view (which
-    /// billboard bones turn against) and projection.
+    /// Animate, emit and cull for this frame's camera: its view and
+    /// projection.
     void update(float deltaTime, const glm::mat4& view, const glm::mat4& projection);
 
     /**
      * Render all visible instances (Vulkan)
      */
-    /** Pre-allocate GPU resources (bone SSBOs, descriptors) on main thread before parallel render. */
     struct Frame;
     /// Each step is timed in the game thread's frame profile under
     /// `stageGroup` ("extract/M2"), so the stage the caller times has its parts.
@@ -570,7 +571,14 @@ public:
                                          const glm::mat4* overheadMatrix = nullptr, float overheadRadius = 1.0f,
                                          const glm::mat4* strikeMatrix = nullptr, float strikeRadius = 1.0f);
     void useFrame(std::shared_ptr<const Frame> frame) { recording_ = std::move(frame); }
+    /// The slot's instance storage grown to the frame, on the main thread
+    /// before the parallel recording.
     void prepareRender(uint32_t frameIndex, const Camera& camera);
+    /// Record into `cmd`, outside a render pass and before any pass draws
+    /// the extracted frame (its shadows included), the posing of its
+    /// skeletons; the bones the slot's last frame copied back are kept for
+    /// update() to take.
+    void poseSkeletons(VkCommandBuffer cmd, uint32_t frameIndex);
     /// Record into `cmd`, outside a render pass, the GPU cull of the
     /// extracted frame's guard (cull_guard.hpp) over the whole cull table.
     void dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex);
@@ -1052,37 +1060,20 @@ private:
     /// runs long after that call and needs the same one.
     VkDescriptorSetLayout perFrameLayout_ = VK_NULL_HANDLE;
 
-    // Descriptor set layouts (set 1 is the texture table's)
-    VkDescriptorSetLayout boneSetLayout_ = VK_NULL_HANDLE;      // set 2
+    // Descriptor set layouts (set 1 is the texture table's, set 2 the
+    // skeleton pass's)
     VkDescriptorSetLayout particleTexLayout_ = VK_NULL_HANDLE;  // particle set 1 (texture only)
 
     // Descriptor pools
     VkDescriptorPool materialDescPool_ = VK_NULL_HANDLE;
-    VkDescriptorPool boneDescPool_ = VK_NULL_HANDLE;
-    std::shared_ptr<std::atomic<uint64_t>> boneDescPoolGeneration_ =
-        std::make_shared<std::atomic<uint64_t>>(0);
     static constexpr uint32_t MAX_MATERIAL_SETS = 16384;
-    static constexpr uint32_t MAX_BONE_SETS = 16384;
 
-    // Dummy identity bone buffer + descriptor set for non-animated models.
-    // The pipeline layout declares set 2 (bones) and some drivers (Intel ANV)
-    // require all declared sets to be bound even when the shader doesn't access them.
-    ::VkBuffer dummyBoneBuffer_ = VK_NULL_HANDLE;
-    VmaAllocation dummyBoneAlloc_ = VK_NULL_HANDLE;
-    VkDescriptorSet dummyBoneSet_ = VK_NULL_HANDLE;
-
-    // Mega bone SSBO - consolidates all per-instance bone matrices into a single buffer per frame.
-    // Replaces per-instance bone SSBOs for fewer descriptor binds and enables GPU instancing.
-    static constexpr uint32_t MEGA_BONE_MAX_INSTANCES = 4096;
-    // Per-instance bone ranges are packed at their model's true bone count
-    // rather than at a fixed stride, so the buffer is sized in matrices. The
-    // budget matches the old 4096 x 128 slots; models under the old stride
-    // now leave room for the ones above it.
-    static constexpr uint32_t MEGA_BONE_MATRIX_CAPACITY = MEGA_BONE_MAX_INSTANCES * 128;
-    ::VkBuffer megaBoneBuffer_[2] = {};
-    VmaAllocation megaBoneAlloc_[2] = {};
-    void* megaBoneMapped_[2] = {};
-    VkDescriptorSet megaBoneSet_[2] = {};
+    /// The animated models' skeletons, and the pass that poses the frame's
+    /// on the GPU into the bones the draws read (set 2). posed_: whether the
+    /// slot's frame was posed; a skinned draw of one that was not is left out.
+    SkeletonPool skeletons_;
+    SkeletonPass skeletonPass_;
+    bool posed_[2] = {};
 
     // GPU instance data SSBO - per-instance transforms, fade, bones for instanced draws.
     // Shader reads instanceData[push.instanceDataOffset + gl_InstanceIndex].
@@ -1531,11 +1522,11 @@ private:
         float animTime = 0.0f;
         float globalSequenceTime = 0.0f;
         int sequenceIndex = 0;
-        /// Where its bones start in the frame's bone buffer; 0, the identity
-        /// slot, for a model that is not skinned or whose bones did not fit.
-        uint32_t megaBoneOffset = 0;
-        /// How many bones it has posed; none yet for an animated model is
-        /// an instance whose bones are still to come, and is not drawn.
+        /// Where its bones start in the frame's posed bones (SkeletonFrame).
+        uint32_t boneBase = 0;
+        /// How many bones the GPU poses for it; none for a model that is
+        /// not animated or whose skeleton has no place in the pool, which is
+        /// drawn in its bind pose.
         uint32_t boneCount = 0;
         bool afloat = false;
     };
@@ -1558,14 +1549,17 @@ private:
         std::vector<VisibleEntry> opaque, transparent;
         std::vector<DrawInstance> draws;
         std::vector<GlowSprite> glows;
-        /// The bones of the skinned draws kept, in draw order, and which draws
-        /// those are; each one's megaBoneOffset counts from the chunk's first
-        /// bone until the chunks are joined.
-        std::vector<glm::mat4> bones;
+        /// The skeletons of the skinned draws kept, in draw order, the bones
+        /// read back of them, and which draws those are; each one's boneBase,
+        /// a request's outBase and a read's source count from the chunk's
+        /// first bone until the chunks are joined.
+        std::vector<SkeletonRequestGPU> requests;
+        std::vector<SkeletonFrame::Read> reads;
         std::vector<uint32_t> skinned;
+        uint32_t boneCount = 0;
         void clear() noexcept {
             opaque.clear(); transparent.clear(); draws.clear(); glows.clear();
-            bones.clear(); skinned.clear();
+            requests.clear(); reads.clear(); skinned.clear(); boneCount = 0;
         }
     };
     // Producer-only scratch; workers write disjoint chunks and finish before
@@ -1574,9 +1568,9 @@ private:
 
     /// The view's half of render(): folds the GPU's cull verdicts into the
     /// instances, keeps what the camera sees, copies it into drawInstances_,
-    /// sorts the two lists and makes the glow sprites, and puts the bones of
-    /// the skinned ones it keeps - and no others - into the frame's bone
-    /// buffer. Reads the scene and writes only the verdicts into it.
+    /// sorts the two lists and makes the glow sprites, and asks the GPU to
+    /// pose the skinned ones it keeps - and no others. Reads the scene and
+    /// writes only the verdicts into it.
     void cullView(const Camera& camera, Frame& frame);
     /// cullView's last step: the chunks it classified on the workers joined
     /// into the frame's lists in order, each skinned draw's bones placed in
@@ -1767,9 +1761,8 @@ private:
     uint32_t skyDiagLastOpaque_ = 0xFFFFFFFFu;
     uint32_t skyDiagLastTransparent_ = 0xFFFFFFFFu;
 
-    // Cached camera state from update() for frustum-culling bones
+    // Cached camera state from update(), for the particles' distances
     glm::vec3 cachedCamPos_ = glm::vec3(0.0f);
-    glm::mat4 cachedView_ = glm::mat4(1.0f);
     /// The camera update() last saw, for the particle draw to cull by: only
     /// what is in view goes into the particle buffer.
     glm::mat4 cachedViewProjection_{1.0f};
@@ -1791,9 +1784,6 @@ private:
     float particleDensity_ = 1.0f;
     float furthestDrawnSq_ = 0.0f;
     bool forceNoCull_ = false;
-
-    // Thread count for parallel bone animation
-    uint32_t numAnimThreads_ = 1;
 
     float interpFloat(const pipeline::M2AnimationTrack& track, float animTime,
                       float globalTime, int seqIdx,
@@ -1821,20 +1811,20 @@ private:
     void setupEmitterResources(M2ModelGPU& gpuModel, const pipeline::M2Model& model,
                                const std::vector<VkTexture*>& allTextures);
 
-    // Helper to allocate descriptor sets
-    VkDescriptorSet allocateBoneSet();
-
     // Helper to destroy model GPU resources
     void destroyModelGPU(uint32_t modelId, std::shared_ptr<M2ModelGPU> model);
-    // Helper to destroy instance bone buffers.
-    // When defer=true, destruction is scheduled via deferAfterAllFrameFences so
-    // in-flight command buffers are not invalidated (use for streaming unload).
-    /// Starts a new instance's animation and computes its bones, so it draws
-    /// on the frame it spawns. Both spawn paths need it.
+    /// Starts a new instance's animation at a random point of its first
+    /// sequence. Both spawn paths need it.
     void startInstanceAnimation(const M2ModelGPU& model, M2Instance& instance);
     void seedUnanimatedSequence(const M2ModelGPU& model, M2Instance& instance);
-
-    void destroyInstanceBones(M2Instance& inst, bool defer = true);
+    /// The bones the skeleton pass copied back, into their instances.
+    void takeReadBones();
+    /// The GPU's request to pose an animated instance whose model has a
+    /// skeleton, its bones from `outBase` of the frame's.
+    [[nodiscard]] SkeletonRequestGPU skeletonRequest(const M2Instance& instance, uint32_t outBase) const;
+    /// Asks the GPU to pose, for their bones read back alone, the instances
+    /// whose emitters or lights run unseen (near the camera) this frame.
+    void poseUnseen(const Camera& camera, Frame& frame) const;
     inline static std::atomic<uint64_t> nextSceneIdentity_{1};
     struct InstanceState {
         uint64_t identity = nextSceneIdentity_.fetch_add(1, std::memory_order_relaxed);
@@ -1862,8 +1852,6 @@ private:
         std::vector<uint32_t> pendingAfloatIds_;
         InstanceIndexSet particleInstanceIndices_;     // ALL instances with particle emitters
         InstanceIndexSet lightInstanceIndices_;        // models that can throw a local light
-        std::vector<size_t> boneWorkIndices_;        // Reused each frame
-        std::vector<std::future<void>> animFutures_; // Reused each frame
     };
     InstanceState defaultInstances_;
     InstanceState* scene_ = &defaultInstances_;
@@ -1879,7 +1867,9 @@ public:
         std::vector<ParticleRun> particleRuns_;
         std::vector<float> ribbonVertices;
         std::vector<M2ParticleQuad> particleVertices;
-        std::vector<glm::mat4> bones;
+        /// The skeletons the GPU poses for this frame: the skinned draws',
+        /// then those only read back (poseUnseen).
+        SkeletonFrame skeleton;
         /// The tables' changes this frame carries, as they stand: the rows
         /// of the slots changed and not yet known to be on the GPU, one of
         /// each table per slot, the cull table cleared first when it starts
@@ -1913,8 +1903,8 @@ public:
         glm::vec3 cameraPosition{0};
         float skyHour = 12;
         bool suppressStars = false, skipDetail = false;
-        /// Draws whose bones were placed, and instances changed since the
-        /// frame before (fileInCullGrid calls), by why.
+        /// Draws posed by the GPU, and instances changed since the frame
+        /// before (fileInCullGrid calls), by why.
         uint32_t skinnedDraws = 0;
         std::array<uint32_t, static_cast<size_t>(InstanceChange::Count)> changesBy{};
     };

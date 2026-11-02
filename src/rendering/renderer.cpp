@@ -1989,7 +1989,17 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
         m2Renderer->uploadSlotTables(currentCmd, frame);
         m2Renderer->dispatchCullCompute(currentCmd, frame);
     }
-    if (skyboxModelRenderer_ && vkCtx) skyboxModelRenderer_->uploadSlotTables(currentCmd, vkCtx->getCurrentFrame());
+    // The doodads' skeletons, posed before the shadow maps and the view
+    // draw them.
+    if (m2Renderer && vkCtx) {
+        CpuStage stage(stages, "beginFrame", "M2 skeletons");
+        GpuPass pass(*vkCtx, currentCmd, "M2 skeletons");
+        m2Renderer->poseSkeletons(currentCmd, vkCtx->getCurrentFrame());
+    }
+    if (skyboxModelRenderer_ && vkCtx) {
+        skyboxModelRenderer_->uploadSlotTables(currentCmd, vkCtx->getCurrentFrame());
+        skyboxModelRenderer_->poseSkeletons(currentCmd, vkCtx->getCurrentFrame());
+    }
     // The terrain's chunk rows, before the bake and every pass that draws
     // the ground reads them.
     if (terrainRenderer && vkCtx && frameInputs_.scene) {

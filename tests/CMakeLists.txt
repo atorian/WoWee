@@ -2466,19 +2466,6 @@ wowee_add_test(test_m2_combiner
 wowee_add_test(test_local_lights
     SOURCES test_local_lights.cpp)
 
-# ── test_m2_billboard_model ─────────────────────────────────
-# Mana Shield's card through the renderer's own bone update.
-wowee_add_test(test_m2_billboard_model
-    SOURCES test_m2_billboard_model.cpp
-            ${TEST_COMMON_SOURCES})
-target_link_libraries(test_m2_billboard_model PRIVATE wowee_pipeline wowee_render)
-target_compile_definitions(test_m2_billboard_model PRIVATE WOWEE_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
-
-# ── test_m2_billboard ───────────────────────────────────────
-# Billboard bones, spherical and locked to one axis, as the client turns them.
-wowee_add_test(test_m2_billboard
-    SOURCES test_m2_billboard.cpp)
-
 # ── test_m2_star_layer ──────────────────────────────────────
 # Which batch of a sky model is its stars. The clouds, planets and nebulae
 # of the same dome sit in the same directory, one texture holds both stars

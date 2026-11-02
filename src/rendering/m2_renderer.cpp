@@ -18,7 +18,6 @@
 #include "rendering/render_constants.hpp"
 #include "pipeline/m2_model_classifier.hpp"
 #include "rendering/vk_context.hpp"
-#include "rendering/bone_slots.hpp"
 #include "rendering/vk_buffer.hpp"
 #include "rendering/vk_texture.hpp"
 #include "rendering/vk_pipeline.hpp"
@@ -522,33 +521,16 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
              " skinning=", core::envFlagEnabled("WOWEE_M2_NO_SKINNING") ? "OFF" : "on",
              " maxBonesPerInstance=", kMaxBonesPerInstance);
 
-    const unsigned hc = std::thread::hardware_concurrency();
-    const size_t availableCores = (hc > 1u) ? static_cast<size_t>(hc - 1u) : 1ull;
-    // Keep headroom for other frame tasks: M2 gets about half of non-main cores by default.
-    const size_t defaultAnimThreads = std::max<size_t>(1, availableCores / 2);
-    numAnimThreads_ = static_cast<uint32_t>(std::max<size_t>(
-        1, envSizeOrDefault("WOWEE_M2_ANIM_THREADS", defaultAnimThreads)));
-    LOG_INFO("Initializing M2 renderer (Vulkan, ", numAnimThreads_, " anim threads)...");
+    LOG_INFO("Initializing M2 renderer (Vulkan)...");
 
     VkDevice device = vkCtx_->getDevice();
 
     // --- Descriptor set layouts ---
     // Set 1 is the device's texture table (TextureTable); a batch's
-    // textures are handles in its material row.
-
-    // Bone set layout (set 2): binding 0 = STORAGE_BUFFER (bone matrices)
-    {
-        VkDescriptorSetLayoutBinding binding{};
-        binding.binding = 0;
-        binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        binding.descriptorCount = 1;
-        binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-
-        VkDescriptorSetLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        ci.bindingCount = 1;
-        ci.pBindings = &binding;
-        vkCreateDescriptorSetLayout(device, &ci, nullptr, &boneSetLayout_);
-    }
+    // textures are handles in its material row. Set 2 is the skeleton
+    // pass's: the frame's posed bones.
+    skeletons_.initialize(*vkCtx_);
+    if (!skeletonPass_.initialize(*vkCtx_, skyMode_ ? "M2Renderer (sky)" : "M2Renderer")) return false;
 
     // Instance data set layout (set 3): binding 0 = this frame's per-draw
     // instance records, binding 1 = the instance table (by slot), binding 2
@@ -596,92 +578,6 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
         ci.pPoolSizes = sizes;
         ci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
         vkCreateDescriptorPool(device, &ci, nullptr, &materialDescPool_);
-    }
-    {
-        VkDescriptorPoolSize sizes[] = {
-            {.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = MAX_BONE_SETS},
-        };
-        VkDescriptorPoolCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-        ci.maxSets = MAX_BONE_SETS;
-        ci.poolSizeCount = 1;
-        ci.pPoolSizes = sizes;
-        ci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-        vkCreateDescriptorPool(device, &ci, nullptr, &boneDescPool_);
-    }
-
-    // Create a small identity-bone SSBO + descriptor set so that non-animated
-    // draws always have a valid set 2 bound.  The Intel ANV driver segfaults
-    // on vkCmdDrawIndexed when a declared descriptor set slot is unbound.
-    {
-        // Single identity matrix (bone 0 = identity)
-        glm::mat4 identity(1.0f);
-        VkBufferCreateInfo bci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-        bci.size = sizeof(glm::mat4);
-        bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-        VmaAllocationCreateInfo aci{};
-        aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-        aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
-        VmaAllocationInfo allocInfo{};
-        gpuCreateBuffer(ctx->getAllocator(), &bci, &aci,
-                        &dummyBoneBuffer_, &dummyBoneAlloc_, &allocInfo);
-        if (allocInfo.pMappedData) {
-            memcpy(allocInfo.pMappedData, &identity, sizeof(identity));
-        }
-
-        dummyBoneSet_ = allocateBoneSet();
-        if (dummyBoneSet_) {
-            VkDescriptorBufferInfo bufInfo{};
-            bufInfo.buffer = dummyBoneBuffer_;
-            bufInfo.offset = 0;
-            bufInfo.range = sizeof(glm::mat4);
-            VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            write.dstSet = dummyBoneSet_;
-            write.dstBinding = 0;
-            write.descriptorCount = 1;
-            write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            write.pBufferInfo = &bufInfo;
-            vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
-        }
-    }
-
-    // Mega bone SSBO - consolidates all animated instance bones into one buffer per frame.
-    // Slot 0 = identity matrix (for non-animated instances), slots 1..N = animated instances.
-    {
-        const VkDeviceSize megaSize = VkDeviceSize(MEGA_BONE_MATRIX_CAPACITY) * sizeof(glm::mat4);
-        glm::mat4 identity(1.0f);
-        for (int i = 0; i < 2; i++) {
-            VkBufferCreateInfo bci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-            bci.size = megaSize;
-            bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-            VmaAllocationCreateInfo aci{};
-            aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-            aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
-            VmaAllocationInfo allocInfo{};
-            gpuCreateBuffer(ctx->getAllocator(), &bci, &aci,
-                            &megaBoneBuffer_[i], &megaBoneAlloc_[i], &allocInfo);
-            megaBoneMapped_[i] = allocInfo.pMappedData;
-
-            // Slot 0: identity matrix (for non-animated instances)
-            if (megaBoneMapped_[i]) {
-                memcpy(megaBoneMapped_[i], &identity, sizeof(identity));
-            }
-
-            megaBoneSet_[i] = allocateBoneSet();
-            if (megaBoneSet_[i]) {
-                VkDescriptorBufferInfo bufInfo{};
-                bufInfo.buffer = megaBoneBuffer_[i];
-                bufInfo.offset = 0;
-                bufInfo.range = megaSize;
-                VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-                write.dstSet = megaBoneSet_[i];
-                write.dstBinding = 0;
-                write.descriptorCount = 1;
-                write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                write.pBufferInfo = &bufInfo;
-                vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
-            }
-        }
-
     }
 
     // Instance data SSBO - per-frame buffer holding per-instance transforms, fade, bones.
@@ -809,11 +705,11 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     // --- Pipeline layouts ---
 
     // Main M2 pipeline layout: set 0 = perFrame, set 1 = the texture table,
-    // set 2 = bones, set 3 = instances and materials
+    // set 2 = the posed bones, set 3 = instances and materials
     // Push constant: M2PushConstants, m2.vert's Push block
     {
-        VkDescriptorSetLayout setLayouts[] = {perFrameLayout, ctx->textureTable().layout(), boneSetLayout_,
-                                              instanceSetLayout_};
+        VkDescriptorSetLayout setLayouts[] = {perFrameLayout, ctx->textureTable().layout(),
+                                              skeletonPass_.drawSetLayout(), instanceSetLayout_};
         VkPushConstantRange pushRange{};
         pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
         pushRange.offset = 0;
@@ -933,17 +829,13 @@ void M2Renderer::shutdown() {
     pinnedModelIds_.clear();
     destroyPosedEmitterModels();
 
-    // Destroy instance bone buffers
-    for (auto& inst : scene_->instances) {
-        destroyInstanceBones(inst);
-    }
     ++instanceLayoutRevision_;
     scene_->instances.clear();
     if (collision_) collision_->clearM2();
     scene_->instanceIndexById.clear();
     scene_->cullGrid_.clear();
     scene_->instanceDedupMap_.clear();
-    // Model and bone destruction above is deferred; drain it now while the
+    // Model destruction above is deferred; drain it now while the
     // descriptor pools are still alive.
     vkCtx_->flushDeferredCleanup();
     // Every model's rows came back with it; the next scene's are given anew.
@@ -974,21 +866,11 @@ void M2Renderer::shutdown() {
     destroy(device, ribbonPipelineLayout_);
 
     // Destroy descriptor pools and layouts
-    destroy(alloc, dummyBoneBuffer_, dummyBoneAlloc_);
-    // dummyBoneSet_ is freed implicitly when boneDescPool_ is destroyed
-    dummyBoneSet_ = VK_NULL_HANDLE;
-    // Mega bone SSBO cleanup (sets freed implicitly with boneDescPool_)
-    for (int i = 0; i < 2; i++) {
-        destroy(alloc, megaBoneBuffer_[i], megaBoneAlloc_[i]);
-        megaBoneMapped_[i] = nullptr;
-        megaBoneSet_[i] = VK_NULL_HANDLE;
-    }
     destroy(device, materialDescPool_);
-    if (boneDescPool_) {
-        if (boneDescPoolGeneration_) boneDescPoolGeneration_->fetch_add(1, std::memory_order_relaxed);
-        vkDestroyDescriptorPool(device, boneDescPool_, nullptr);
-        boneDescPool_ = VK_NULL_HANDLE;
-    }
+    // The skeleton pass, and the skeletons (every model's came back above).
+    skeletonPass_.destroy();
+    skeletons_.destroy();
+    posed_[0] = posed_[1] = false;
     // Instance data SSBO cleanup (sets freed with instanceDescPool_)
     for (int i = 0; i < 2; i++) {
         destroy(alloc, instanceBuffer_[i], instanceAlloc_[i]);
@@ -1025,7 +907,6 @@ void M2Renderer::shutdown() {
     destroy(device, cullDescPool_);
     destroy(device, cullSetLayout_);
 
-    destroy(device, boneSetLayout_);
     destroy(device, instanceSetLayout_);
     destroy(device, particleTexLayout_);
 
@@ -1056,27 +937,9 @@ void M2Renderer::destroyModelGPU(uint32_t modelId, std::shared_ptr<M2ModelGPU> r
     // Its ranges and material rows come back after the frames that may draw
     // it, and it holds its textures until then.
     geometry_.release(retired->geometry);
+    skeletons_.release(retired->skeleton);
     for (const auto& batch : retired->batches) releaseMaterialRow(batch.materialRow);
     vkCtx_->deferAfterAllFrameFences([retired] {});
-}
-
-void M2Renderer::destroyInstanceBones(M2Instance& inst, bool defer) {
-    if (!vkCtx_) return;
-    releaseInstanceBones(*vkCtx_, boneDescPool_, boneDescPoolGeneration_, inst, defer);
-}
-
-VkDescriptorSet M2Renderer::allocateBoneSet() {
-    VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    ai.descriptorPool = boneDescPool_;
-    ai.descriptorSetCount = 1;
-    ai.pSetLayouts = &boneSetLayout_;
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    VkResult result = vkCtx_->allocateDescriptorSets(ai, &set);
-    if (result != VK_SUCCESS) {
-        LOG_ERROR("M2Renderer: bone descriptor set allocation failed (", result, ")");
-        return VK_NULL_HANDLE;
-    }
-    return set;
 }
 
 bool M2Renderer::hasModel(uint32_t modelId) const {
@@ -2185,6 +2048,12 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
     // it ships.
     if (gpuModel.isInvisibleTrap || gpuModel.isSpellEffect) gpuModel.collision.reset();
 
+    // Its skeleton, for the GPU to pose - also when the classifier holds the
+    // model still, as marking it a spell effect lets it move again. Without
+    // a place it is drawn in its bind pose (said by the pool).
+    if (gpuModel.hasAnimation)
+        gpuModel.skeleton = skeletons_.place(model, kMaxBonesPerInstance, model.name.c_str());
+
     vkCtx_->endUploadBatch();
 
     // Each batch's material row. A batch whose texture - even the white
@@ -2233,6 +2102,25 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
     }
     gpuModel.hasGlowSprites = std::any_of(gpuModel.batches.begin(), gpuModel.batches.end(),
         [&](const M2ModelGPU::BatchGPU& b) { return m2WantsGlowSprite(glowCardOf(gpuModel, b)); });
+
+    // The bones the CPU reads of it, copied back from the GPU's pose: where
+    // its emitters, ribbons, lights and glow cards hang.
+    if (gpuModel.skeleton.placed()) {
+        auto& read = gpuModel.readBones;
+        const auto want = [&](int64_t bone) {
+            if (bone >= 0 && bone < static_cast<int64_t>(gpuModel.skeleton.boneCount))
+                read.push_back(static_cast<uint16_t>(bone));
+        };
+        for (const auto& emitter : gpuModel.particleEmitters) want(emitter.bone);
+        for (const auto& emitter : gpuModel.ribbonEmitters) want(emitter.bone);
+        for (const auto& light : gpuModel.lights) want(light.bone);
+        for (const auto& batch : gpuModel.batches) {
+            for (const auto& anchor : batch.lightBoneAnchors) want(anchor.bone);
+            if (batch.lightSuspensionBone != UINT16_MAX) want(batch.lightSuspensionBone);
+        }
+        std::sort(read.begin(), read.end());
+        read.erase(std::unique(read.begin(), read.end()), read.end());
+    }
 
     registerRtModel(gpuModel, model);
     // No rebuild of the spatial index for this. It used to be marked dirty

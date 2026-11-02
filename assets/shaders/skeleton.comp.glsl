@@ -162,7 +162,20 @@ mat3 quatToMat3(vec4 q) {
                 2.0 * (x * z + w * y), 2.0 * (y * z - w * x), 1.0 - 2.0 * (x * x + y * y));
 }
 
-// m2_billboard.hpp: a billboard bone rebuilt in view space.
+// A billboard bone, as the client turns it (CM2Model::Animate, WoW.exe 3.3.5a
+// 0x82f0f0, dispatch 0x82ff3a; render spec section 3.5): in VIEW space, after
+// the bone's whole parent chain and the model's placement, against the view's
+// fixed axis rather than toward the eye point - every card of a model turns
+// alike, as on a screen. The bone's axes are rebuilt per its flag (0x8
+// spherical, 0x10/0x20/0x40 keeping X/Y/Z), each keeping its length, and the
+// pivot stays where it was. A card faces +X, Y left, Z up. The client's view
+// space is left-handed; this one is right-handed, so the cross products run
+// the other way round from the disassembly and +X comes out toward the
+// viewer. A spherical billboard of a bone with its own tracks (0x280) still
+// turns by them.
+//
+// A vector too short to say a direction is left as it is, zero staying zero
+// and the card collapsing - the client has no fallback.
 vec3 billboardNormalize(vec3 v) {
     const float len2 = dot(v, v);
     return len2 > 2.384e-7 ? v * inversesqrt(len2) : v;
@@ -174,7 +187,8 @@ mat4 billboardBone(uint flags, mat4 boneView, mat3 local, vec3 pivot) {
     vec3 c0 = boneView[0].xyz, c1 = boneView[1].xyz, c2 = boneView[2].xyz;
     const uint kinds = flags & 0x78u;
     if (bitCount(kinds) > 1) {
-        // Two kinds at once rebuild nothing and only rescale.
+        // Two kinds at once rebuild nothing and only rescale, which squares
+        // the axes' lengths - as the client does.
     } else if (kinds == 0x10u) {
         c0 = billboardNormalize(c0);
         c1 = billboardNormalize(vec3(c0.y, -c0.x, 0.0));
