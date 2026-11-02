@@ -357,36 +357,6 @@ glm::mat4 placed(const glm::vec3& at, float yawDegrees, float scale) {
 
 }  // namespace
 
-TEST_CASE("A tree and its shadow sway together whichever way it faces", "[wind][shader]") {
-    const WindZoneTable table = parseWindZones(kTable, "test");
-    WindField field;
-    WindInputs in = at(kRealmNow);
-    in.fixedWind = WindOverride{120.0f, 9.0f};
-
-    const glm::mat4 trees[] = {placed({100.0f, 200.0f, 30.0f}, 0.0f, 1.0f),
-                               placed({-4000.0f, 812.0f, 55.0f}, 73.0f, 1.3f),
-                               placed({9.0f, -9.0f, 0.0f}, 211.0f, 0.7f)};
-    const glm::vec3 vertices[] = {{0.0f, 0.0f, 12.0f}, {2.5f, -1.0f, 18.0f}, {-3.0f, 4.0f, 6.0f}};
-    for (int frame = 0; frame < 240; ++frame) {
-        field.update(kFrame, in, table.defaultRow(), table);
-        in.clockSeconds += kFrame;
-        const auto gpu = field.gpu();
-        toPerFrame(gpu);
-        for (const auto& model : trees) {
-            const auto caster = wowee::rendering::shadowWindFor(gpu, model);
-            const glm::vec2 origin(model[3]);
-            for (const auto& v : vertices) {
-                const glm::vec2 tree = wind_shader::foliageWindSway(
-                    wind_shader::perFrameFoliageWind(model), v, v, origin, 0.8f);
-                const glm::vec2 shadow = wind_shader::foliageWindSway(
-                    wind_shader::foliageWindFromShadowCaster(caster.wind, caster.phases), v, v, origin, 0.8f);
-                REQUIRE(shadow.x == Approx(tree.x).margin(1e-5));
-                REQUIRE(shadow.y == Approx(tree.y).margin(1e-5));
-            }
-        }
-    }
-}
-
 TEST_CASE("A tree leans downwind whichever way it faces", "[wind][shader]") {
     const WindZoneTable table = parseWindZones(kTable, "test");
     const float toward = 120.0f;

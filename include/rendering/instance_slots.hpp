@@ -118,6 +118,10 @@ public:
     [[nodiscard]] uint32_t idAt(uint32_t slot) const {
         return slot < slots_.size() ? slots_[slot].id : invalid;
     }
+    /// The model of the instance in a slot; meaningless for a free one.
+    [[nodiscard]] uint32_t modelAt(uint32_t slot) const {
+        return slot < slots_.size() ? slots_[slot].model : 0;
+    }
     /// Slots handed out so far, free ones included: the rows a copy needs.
     [[nodiscard]] uint32_t slotCount() const { return static_cast<uint32_t>(slots_.size()); }
     [[nodiscard]] size_t instanceCount() const { return slotById_.size(); }

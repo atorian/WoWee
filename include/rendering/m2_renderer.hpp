@@ -1004,20 +1004,23 @@ private:
         /// w: where the alpha test cuts, in 255ths; 0 is a half. At the
         /// offset shadow.frag reads them from, as ShadowPush has them.
         glm::ivec4 flags{0};
-        /// x trunk, y branch, z leaf phase; w the branch and leaf scale
-        /// (shadowWindFor). The same for every caster.
+        /// x trunk, y branch, z leaf phase; w the branch and leaf scale.
+        /// The same for every caster.
         glm::vec4 windPhases{0.0f};
+        /// xy toward (world), z lean, w swing: the main pass's, which the
+        /// shader turns into each caster's own space as m2.vert does.
+        glm::vec4 windDirLean{0.0f};
     };
-    /// One caster, as m2_shadow.vert.glsl reads it (std430).
+    /// One caster, as m2_shadow.vert.glsl reads it (std430). Where it stands
+    /// is its slot's row in the instance table.
     struct M2ShadowInstance {
-        glm::mat4 model;
-        /// xy: the world origin, which gives the wind its per-tree phase.
-        /// z: the height the bend is normalised against. w: its amplitude,
-        /// with the distance fade applied; zero for what does not bend.
-        glm::vec4 sway{0.0f};
-        /// The wind toward in the model's own xy, the lean and the swing
-        /// (shadowWindFor).
-        glm::vec4 wind{0.0f};
+        uint32_t slot = 0;
+        /// The height the bend is normalised against.
+        float refHeight = 0.0f;
+        /// The bend, with the distance fade applied; zero for what does not
+        /// bend.
+        float amplitude = 0.0f;
+        float pad = 0.0f;
     };
     /// Casters one frame's maps may hold between them: the sun's, then the
     /// units' again. Dalaran's sun map takes a few hundred.
@@ -1165,6 +1168,7 @@ private:
     uint32_t slotTablesVersion_ = 0;
     uint32_t cullSetTableVersion_[2] = {};
     uint32_t instanceSetTableVersion_[2] = {};
+    uint32_t shadowSetTableVersion_[kShadowTexPoolFrames] = {};
     /// Per frame slot: the rows being copied in (cull rows, then instance
     /// rows), and the kept list read back.
     CullBuffer cullStaging_[2];
@@ -1186,6 +1190,10 @@ private:
     /// Whether this slot's instance set names the instance table as it is.
     [[nodiscard]] bool instanceSetReady(uint32_t frameIndex) const {
         return instanceTable_.buffer && instanceSetTableVersion_[frameIndex] == slotTablesVersion_;
+    }
+    /// The same for this slot's shadow caster set.
+    [[nodiscard]] bool shadowSetReady(uint32_t frameIndex) const {
+        return instanceTable_.buffer && shadowSetTableVersion_[frameIndex] == slotTablesVersion_;
     }
     /// The extracted frame whose table changes were recorded and not yet
     /// known to be submitted; 0 for none.
@@ -1529,16 +1537,17 @@ private:
             return modelId != other.modelId ? modelId < other.modelId : draw < other.draw;
         }
     };
-    /// A caster as the depth-only passes draw it, copied out of the scene by
-    /// the sun's cull, so neither the contact map's filter nor the recording
-    /// reads an instance.
+    /// A caster as the depth-only passes draw it, taken off its cull record
+    /// by the extraction, so neither the maps' filters nor the recording read
+    /// an instance. Where it stands is its slot's row on the GPU.
     struct ShadowDraw {
         uint32_t modelId = 0;
-        glm::mat4 modelMatrix{1.0f};
+        uint32_t slot = 0;
         /// Held for the frame by its shadowModels, once per model.
         const M2ModelGPU* model = nullptr;
         glm::vec3 position{0.0f};
-        float scale = 1.0f;
+        /// How far beyond its position it may cast (Record::shadowRadius).
+        float reach = 0.0f;
     };
     std::vector<ShadowCaster> shadowCasters_[2];
     std::vector<ShadowDraw> shadowDraws_;

@@ -1031,20 +1031,24 @@ bool M2Renderer::ensureSlotTables(VkCommandBuffer cmd, uint32_t frameIndex, uint
             return false;
         }
     }
-    // This slot's set is written after its fence, and only when the table
-    // it names was replaced.
-    if (instanceSetTableVersion_[frameIndex] != slotTablesVersion_) {
-        const VkDescriptorBufferInfo table{.buffer = instanceTable_.buffer, .offset = 0,
-                                           .range = VkDeviceSize(instanceTable_.capacity) * sizeof(InstanceStaticGPU)};
+    // This slot's sets - the view's and the shadow maps' - are written after
+    // its fence, before either pass binds them, and only when the table they
+    // name was replaced.
+    const VkDescriptorBufferInfo table{.buffer = instanceTable_.buffer, .offset = 0,
+                                       .range = VkDeviceSize(instanceTable_.capacity) * sizeof(InstanceStaticGPU)};
+    const auto nameTable = [&](VkDescriptorSet set, uint32_t& version) {
+        if (!set || version == slotTablesVersion_) return;
         VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        write.dstSet = instanceSet_[frameIndex];
+        write.dstSet = set;
         write.dstBinding = 1;
         write.descriptorCount = 1;
         write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         write.pBufferInfo = &table;
         vkUpdateDescriptorSets(vkCtx_->getDevice(), 1, &write, 0, nullptr);
-        instanceSetTableVersion_[frameIndex] = slotTablesVersion_;
-    }
+        version = slotTablesVersion_;
+    };
+    nameTable(instanceSet_[frameIndex], instanceSetTableVersion_[frameIndex]);
+    nameTable(shadowInstanceSet_[frameIndex], shadowSetTableVersion_[frameIndex]);
     return true;
 }
 
@@ -1997,12 +2001,12 @@ std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camer
     laps.lap("particles");
     gatherM2Ribbons(*frame, camera.getPosition());
     laps.lap("ribbons");
-    // The candidates that cast, as the shadow passes take them. Whether one
-    // casts at all is on its cull record, which the cull just read; the
-    // instance is read only for what is kept. Its model is held by the frame
-    // once for each run of its casters - a shared_ptr per caster was an
-    // atomic increment here and a decrement on the render thread for each of
-    // some ten thousand casters a frame in Dalaran.
+    // The candidates that cast, as the shadow passes take them: all of it off
+    // the cull record the cull just read and the slot's model, none of it off
+    // the instance - where one stands is its slot's row on the GPU. Its model
+    // is held by the frame once for each run of its casters - a shared_ptr
+    // per caster was an atomic increment here and a decrement on the render
+    // thread for each of some ten thousand casters a frame in Dalaran.
     const auto takeCasters = [&](std::vector<ShadowDraw>& into) {
         using G = M2CullGrid;
         constexpr uint16_t kNeeds = G::kValid | G::kHasModel;
@@ -2011,15 +2015,16 @@ std::shared_ptr<const M2Renderer::Frame> M2Renderer::extract(const Camera& camer
         uint32_t heldModelId = 0;
         const M2ModelGPU* heldModel = nullptr;
         for (uint32_t index : shadowCandidates_) {
-            const uint16_t flags = scene_->cullGrid_.record(index).flags;
-            if ((flags & kNeeds) != kNeeds || (flags & kRefuses)) continue;
-            const auto& inst = scene_->instances[index];
-            if (!heldModel || inst.modelId != heldModelId) {
-                frame->shadowModels.push_back(models.at(inst.modelId));
-                heldModelId = inst.modelId;
+            const M2CullGrid::Record& record = scene_->cullGrid_.record(index);
+            if ((record.flags & kNeeds) != kNeeds || (record.flags & kRefuses)) continue;
+            const uint32_t modelId = scene_->slots.modelAt(record.slot);
+            if (!heldModel || modelId != heldModelId) {
+                frame->shadowModels.push_back(models.at(modelId));
+                heldModelId = modelId;
                 heldModel = frame->shadowModels.back().get();
             }
-            into.push_back({inst.modelId, inst.modelMatrix, heldModel, inst.position, inst.scale});
+            into.push_back({.modelId = modelId, .slot = record.slot, .model = heldModel,
+                            .position = record.position, .reach = record.shadowRadius});
         }
     };
     if (shadowMatrix != glm::mat4(0.0f)) {
@@ -2719,25 +2724,30 @@ void M2Renderer::renderAfterWater(VkCommandBuffer cmd, VkDescriptorSet perFrameS
 bool M2Renderer::createShadowInstanceBuffers() {
     if (shadowInstanceSetLayout_) return true;
     VkDevice device = vkCtx_->getDevice();
-    static_assert(sizeof(M2ShadowInstance) == 96, "M2ShadowInstance is m2_shadow.vert's std430 layout");
+    static_assert(sizeof(M2ShadowInstance) == 16, "M2ShadowInstance is m2_shadow.vert's std430 layout");
+    static_assert(sizeof(M2ShadowPush) <= 128, "the push block every device must take");
     static_assert(offsetof(M2ShadowPush, flags) == offsetof(ShadowPush, flags),
                   "shadow.frag reads every shadow pass's flags at one offset");
 
-    VkDescriptorSetLayoutBinding binding{};
-    binding.binding = 0;
-    binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    binding.descriptorCount = 1;
-    binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    // Binding 0: the frame's casters. Binding 1: the instance table they name
+    // a slot of, written by ensureSlotTables.
+    VkDescriptorSetLayoutBinding bindings[2] = {};
+    for (uint32_t b = 0; b < 2; ++b) {
+        bindings[b].binding = b;
+        bindings[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[b].descriptorCount = 1;
+        bindings[b].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    }
     VkDescriptorSetLayoutCreateInfo layoutCi{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    layoutCi.bindingCount = 1;
-    layoutCi.pBindings = &binding;
+    layoutCi.bindingCount = 2;
+    layoutCi.pBindings = bindings;
     if (vkCreateDescriptorSetLayout(device, &layoutCi, nullptr, &shadowInstanceSetLayout_) != VK_SUCCESS) {
         LOG_ERROR("M2Renderer: could not create the shadow casters' set layout; doodads cast no shadow");
         return false;
     }
 
     VkDescriptorPoolSize poolSize{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                  .descriptorCount = kShadowTexPoolFrames};
+                                  .descriptorCount = 2 * kShadowTexPoolFrames};
     VkDescriptorPoolCreateInfo poolCi{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     poolCi.maxSets = kShadowTexPoolFrames;
     poolCi.poolSizeCount = 1;
@@ -2936,10 +2946,9 @@ void M2Renderer::cullShadowCasters(const glm::mat4& lightSpaceMatrix, float shad
     const bool perspective = glm::length(glm::vec3(lightSpaceMatrix[0][3], lightSpaceMatrix[1][3], lightSpaceMatrix[2][3])) > 1e-6f;
     Frustum lightFrustum;
     if (perspective) lightFrustum.extractFromMatrix(lightSpaceMatrix);
-    auto insideFootprint = [&](const glm::vec3& position, float scale, const M2ModelGPU& model) {
-        if (perspective) return lightFrustum.intersectsSphere(position, model.boundRadius * scale * 1.5f);
-        return instanceInShadowFootprint(lightSpaceMatrix, position, model.boundRadius * scale,
-                                         shadowRadius);
+    auto insideFootprint = [&](const ShadowDraw& caster) {
+        if (perspective) return lightFrustum.intersectsSphere(caster.position, caster.reach);
+        return instanceInShadowFootprint(lightSpaceMatrix, caster.position, caster.reach, shadowRadius);
     };
 
 
@@ -2951,7 +2960,7 @@ void M2Renderer::cullShadowCasters(const glm::mat4& lightSpaceMatrix, float shad
     const auto& candidates = lightSpaceMatrix == recording_->strikeMatrix ? recording_->strikeDepth
         : lightSpaceMatrix == recording_->overheadMatrix ? recording_->depth : recording_->solarDepth;
     for (const auto& source : candidates) {
-        if (!insideFootprint(source.position, source.scale, *source.model)) continue;
+        if (!insideFootprint(source)) continue;
         const uint32_t draw = static_cast<uint32_t>(shadowDraws_.size());
         shadowDraws_.push_back(source);
         const auto& model = *source.model;
@@ -3019,23 +3028,15 @@ void M2Renderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& light
             const uint32_t firstCaster = shadowInstanceCount_;
             shadowInstanceCount_ += count;
             for (std::size_t k = g; k < groupEnd; ++k) {
-                const ShadowDraw& instance = shadowDraws_[casters[k].draw];
-                M2ShadowInstance& out = casterData[firstCaster + (k - g)];
-                out.model = instance.modelMatrix;
-                if (windBent) {
-                    // The instance's own origin is what gives the wind its
-                    // per-tree phase; the height and amplitude are the
-                    // model's. The wind's direction is turned into the
-                    // model's own space here, where the main pass turns it
-                    // on the GPU: the sway is applied before the model matrix.
-                    const glm::vec3 origin(instance.modelMatrix[3]);
-                    const float fade = m2WindDistanceFade(glm::length(origin - recording_->cameraPosition));
-                    out.sway = glm::vec4(origin.x, origin.y, sway.refHeight, sway.amp * fade);
-                    out.wind = shadowWindFor(wind, instance.modelMatrix).wind;
-                } else {
-                    out.sway = glm::vec4(0.0f);
-                    out.wind = glm::vec4(0.0f);
-                }
+                const ShadowDraw& caster = shadowDraws_[casters[k].draw];
+                // The height and amplitude are the model's, faded with the
+                // caster's distance as the main pass fades it; the phase and
+                // the wind's turn into its own space the shader takes from
+                // its row, as m2.vert does.
+                const float fade = windBent
+                    ? m2WindDistanceFade(glm::length(caster.position - recording_->cameraPosition)) : 0.0f;
+                casterData[firstCaster + (k - g)] = M2ShadowInstance{
+                    .slot = caster.slot, .refHeight = sway.refHeight, .amplitude = sway.amp * fade};
             }
 
             VkDeviceSize offset = 0;
@@ -3082,7 +3083,8 @@ void M2Renderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& light
                     .lightSpace = lightSpaceMatrix,
                     .flags = glm::ivec4(alphaCutout ? 1 : 0, alphaCutout ? 1 : 0, windBent ? 1 : 0,
                                         batch.drawState.alphaTest == 4 ? 224 : 0),
-                    .windPhases = wind.phases};
+                    .windPhases = wind.phases,
+                    .windDirLean = wind.dirLean};
                 vkCmdPushConstants(cmd, shadowPipelineLayout_,
                                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                    0, sizeof(M2ShadowPush), &push);
@@ -3121,7 +3123,9 @@ void M2Renderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMa
         cullShadowCasters(lightSpaceMatrix, shadowRadius, resetDescriptors, reuseCull);
     }
     if (resetDescriptors) shadowInstanceCount_ = 0;
-    if (!shadowInstanceMapped_[frameIdx] || !shadowInstanceSet_[frameIdx]) return;
+    // Where the casters stand is in the instance table; without it (no
+    // memory, logged by ensureSlotTables) the doodads cast no shadow.
+    if (!shadowInstanceMapped_[frameIdx] || !shadowInstanceSet_[frameIdx] || !shadowSetReady(frameIdx)) return;
     {
         CpuStage recordStage(vkCtx_->cpuStages(), stageGroup, "record");
         // Pass 1: non-foliage (no wind displacement)

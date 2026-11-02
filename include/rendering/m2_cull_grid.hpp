@@ -212,14 +212,14 @@ private:
 static_assert(sizeof(M2CullGrid::Record) == 48, "two to three records to a 128-byte cache line");
 
 /// The shadow pass's per-instance test against an orthographic light-space
-/// matrix: whether a caster at `position` with this bounding radius (already
-/// scaled) can land in the shadow map. The bounding sphere is converted to NDC
-/// against `shadowRadius`, the box's half-extent, and inflated by half again;
-/// overshoot only costs a draw.
+/// matrix: whether a caster at `position` that reaches `reach` beyond it
+/// (Record::shadowRadius: its bounding radius at its scale, inflated by half
+/// again) can land in the shadow map. The reach is converted to NDC against
+/// `shadowRadius`, the box's half-extent; overshoot only costs a draw.
 inline bool instanceInShadowFootprint(const glm::mat4& lightSpace, const glm::vec3& position,
-                                      float boundRadiusTimesScale, float shadowRadius) {
+                                      float reach, float shadowRadius) {
     const glm::vec4 clip = lightSpace * glm::vec4(position, 1.0f);
-    const float margin = boundRadiusTimesScale / shadowRadius * 1.5f;
+    const float margin = reach / shadowRadius;
     if (std::abs(clip.x) > 1.0f + margin || std::abs(clip.y) > 1.0f + margin) return false;
     return clip.z >= -margin && clip.z <= 1.0f + margin;
 }

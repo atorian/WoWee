@@ -106,33 +106,6 @@ struct WindGpu {
     glm::vec4 travel{0.0f};                     ///< cloth phase, fronts, swells, rustle
 };
 
-/// The world direction `dirWorld` in the xy of a model drawn with `model`,
-/// whose sway is applied before its model matrix: the inverse rotation is the
-/// transpose, and the scale it keeps is normalised away. The shadow pass's
-/// half of windDirectionInModel in wind.glsli, which the main pass runs on
-/// the GPU; the two must give one answer for a tree and its shadow to move
-/// together.
-inline glm::vec2 windDirectionInModel(const glm::mat4& model, const glm::vec2& dirWorld) {
-    const glm::vec3 d = glm::transpose(glm::mat3(model)) * glm::vec3(dirWorld, 0.0f);
-    const float len = glm::length(glm::vec2(d));
-    return len > 1e-6f ? glm::vec2(d) / len : glm::vec2(1.0f, 0.0f);
-}
-
-/// What the shadow passes carry of the wind for one caster, read back by
-/// foliageWindFromShadowPush in wind.glsli: the frame's wind with its
-/// direction turned into the caster's own space (M2ShadowInstance::wind), and
-/// the phases every caster shares (M2ShadowPush::windPhases).
-struct ShadowCasterWind {
-    glm::vec4 wind{0.0f};    ///< xy toward in the model's xy, z lean, w swing
-    glm::vec4 phases{0.0f};  ///< trunk, branch, leaf, detail
-};
-
-inline ShadowCasterWind shadowWindFor(const WindGpu& wind, const glm::mat4& model) {
-    return {glm::vec4(windDirectionInModel(model, glm::vec2(wind.dirLean)), wind.dirLean.z,
-                      wind.dirLean.w),
-            wind.phases};
-}
-
 /// The wind over the place the player is: one field for the trees, their
 /// shadows, the cloth and the grass.
 ///

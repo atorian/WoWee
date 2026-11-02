@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""A doodad moved after it was placed is drawn where it went, and only there.
+"""A doodad moved after it was placed is drawn where it went, and only there,
+and so is its shadow.
 
 Where an M2 stands is kept on the GPU, a row per instance, and written again
-only when the instance changes. A lamppost is placed on the left and, some
-frames in, moved to the right, as the client moves a game object; the kept
-frame is drawn well after that. Against the same scene with the lamppost
-hidden (`"hidden": true`, so the camera and the rest stay the same):
+only when the instance changes; the view and the shadow maps both draw it
+from that row. A lamppost on open ground in the late afternoon is placed on
+the left and moved to the right, as the client moves a game object, in the
+very frame that is kept. Against the same scene with the lamppost hidden
+(`"hidden": true`, so the camera and the rest stay the same):
 
-- On the pixels the lamppost covers where it was placed, the picture is the
-  empty one: a row left as it was placed would still draw it there.
+- On the pixels the lamppost and its long shadow cover where it was placed,
+  the picture is the empty one: a row left as it was placed would still draw
+  it, or cast its shadow, there.
 - On the pixels it covers where it went, it is drawn.
 
 Each side's own pixels come from the lamppost placed there and left there.
@@ -23,17 +26,23 @@ from check_sharp_stars import rgb_pixels
 
 LAMPPOST = r"World\Azeroth\Elwynn\PassiveDoodads\LampPost\LampPost.m2"
 WIDTH, HEIGHT = 320, 240
-PLACED, WENT = [0, -6, 0], [0, 6, 0]
-MOVED_AT = 6
+PLACED, WENT = [0, -9, 0], [0, 9, 0]
+FRAMES = 12
+# Moved in the kept frame itself (the last): a pass that draws it from the
+# rows as they stood a frame before - recorded ahead of the frame's own
+# changes - is caught, not healed by the frames after.
+MOVED_AT = FRAMES - 1
 
 
 def scene(model):
+    # The open ground of shadows.json: Elwynn at five, the shadows long.
     return {
-        "map": "Northrend", "mapId": 571, "zoneId": 4395, "hour": 12.0,
-        "origin": [5818, 405, 650], "streamWorld": False, "models": [model],
-        "camera": {"offset": [-20, 0, 4], "lookAt": [0, 0, 3]},
-        "size": [WIDTH, HEIGHT], "frames": 12, "rayTracedLighting": 0,
-        "volumetricFog": 0, "shadowQuality": 0, "msaa": 1, "bloom": 0,
+        "map": "Azeroth", "mapId": 0, "zoneId": 12, "hour": 17.0,
+        "server": [-9440.0, 70.0, 56.5], "streamWorld": False,
+        "groundPlane": {"size": 120, "height": 0}, "models": [model],
+        "camera": {"offset": [-30, 0, 14], "lookAt": [0, 0, 1]},
+        "size": [WIDTH, HEIGHT], "frames": FRAMES, "rayTracedLighting": 0,
+        "volumetricFog": 0, "shadowQuality": 2, "msaa": 1, "bloom": 0,
         "clouds": False, "sunShafts": False,
         "wind": {"direction": 0, "speed": 0},
     }

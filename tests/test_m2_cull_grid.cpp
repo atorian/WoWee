@@ -88,7 +88,7 @@ TEST_CASE("a column is kept whenever one of its instances would cast") {
             if (kept) continue;
             for (const uint32_t index : cell.members) {
                 const Inst& inst = all[index];
-                if (instanceInShadowFootprint(light, inst.pos, inst.r, shadowRadius)) ++lost;
+                if (instanceInShadowFootprint(light, inst.pos, inst.r * 1.5f, shadowRadius)) ++lost;
             }
         }
         CHECK(lost == 0);

@@ -68,8 +68,9 @@ vec2 foliageWindSway(FoliageWind w, vec3 pos, vec3 restPos, vec2 worldRef, float
     return (w.dir * alongAmt + across * acrossAmt) * amp;
 }
 
-// A shadow caster's wind (M2ShadowInstance::wind) and the frame's phases
-// (M2ShadowPush::windPhases), as shadowWindFor in wind_field.hpp packs them.
+// A shadow caster's wind - the frame's turned into its own space by
+// windDirectionInModel, its lean and its swing - and the frame's phases
+// (M2ShadowPush::windDirLean and windPhases).
 FoliageWind foliageWindFromShadowCaster(vec4 wind, vec4 phases) {
     FoliageWind w;
     w.dir = vec2(wind.x, wind.y);
@@ -161,8 +162,8 @@ vec3 grassWindBend(GrassWind w, vec2 root, float seed) {
 // The world-space direction `dirWorld` turned into the xy of a model drawn
 // with `model`, whose sway is applied before the model matrix. The inverse
 // rotation is the transpose of the rotation, and the scale the transpose
-// keeps is normalised away. Matches windDirectionInModel in wind_field.hpp,
-// which fills the shadow pass's push constants with the same answer.
+// keeps is normalised away. The main pass and the shadow pass both call it,
+// on the same model matrix, so a tree and its shadow sway alike.
 vec2 windDirectionInModel(mat4 model, vec2 dirWorld) {
     vec3 t = transpose(mat3(model)) * vec3(dirWorld, 0.0);
     vec2 d = vec2(t.x, t.y);
