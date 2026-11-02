@@ -66,6 +66,10 @@ public:
                                     VkImageLayout layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     /// The place back, once no frame in flight can sample it.
     void remove(TextureHandle handle, Kind kind);
+    /// The same image through another sampler - an M2 batch's wrap and mip
+    /// bias, say. The image's place stays its owner's; kNoTextureHandle,
+    /// said once, when no sampler place is left.
+    [[nodiscard]] TextureHandle withSampler(TextureHandle handle, VkSampler sampler);
 
     [[nodiscard]] uint32_t used(Kind kind) const;
 
@@ -87,6 +91,7 @@ private:
     mutable std::mutex mutex_;
     Places plain_, layered_;
     uint32_t samplerCapacity_ = 0;
+    bool samplersFullSaid_ = false;
     std::unordered_map<VkSampler, uint32_t> samplers_;
 };
 

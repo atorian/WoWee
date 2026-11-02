@@ -931,6 +931,21 @@ void M2Renderer::extractCull(const Camera& camera, Frame& frame) {
             InstanceStaticGPU{.model = instance.modelMatrix, .interiorLight = instance.interiorLight});
     }
     frame.cullSlotCount = slotCount;
+
+    // The material rows ride the same way: from the first frame extracted
+    // after they were written until one that carried them is on the GPU.
+    MaterialRows& rows = materialRows_;
+    std::erase_if(rows.pending, [&](uint32_t row) {
+        uint32_t& carried = rows.pendingSerial[row];
+        if (carried == kMaterialRowUncarried) carried = serial;
+        if (carried > applied) return false;
+        carried = 0;
+        return true;
+    });
+    frame.materialUpdateSlots.assign(rows.pending.begin(), rows.pending.end());
+    frame.materialUpdateRows.reserve(rows.pending.size());
+    for (const uint32_t row : rows.pending) frame.materialUpdateRows.push_back(rows.data[row]);
+    frame.materialRowCount = static_cast<uint32_t>(rows.data.size());
 }
 
 M2Renderer::CullRowGPU M2Renderer::cullRowOf(size_t index) const {
@@ -985,8 +1000,24 @@ bool M2Renderer::makeCullBuffer(CullBuffer& into, uint32_t capacity, VkDeviceSiz
     return true;
 }
 
-bool M2Renderer::ensureSlotTables(VkCommandBuffer cmd, uint32_t frameIndex, uint32_t slots) {
-    if (!cullTable_.reserve(cmd, slots) || !instanceTable_.reserve(cmd, slots)) return false;
+bool M2Renderer::ensureSlotTables(VkCommandBuffer cmd, uint32_t frameIndex, uint32_t slots, uint32_t materialRows) {
+    if (!cullTable_.reserve(cmd, slots) || !instanceTable_.reserve(cmd, slots) ||
+        !materialTable_.reserve(cmd, std::max(materialRows, 1u))) {
+        return false;
+    }
+    // The view's set names the material table too, by the same rule.
+    if (instanceSet_[frameIndex] && instanceSetMaterialVersion_[frameIndex] != materialTable_.version()) {
+        const VkDescriptorBufferInfo materials{.buffer = materialTable_.buffer(), .offset = 0,
+                                               .range = materialTable_.bytes()};
+        VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = instanceSet_[frameIndex];
+        write.dstBinding = 2;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        write.pBufferInfo = &materials;
+        vkUpdateDescriptorSets(vkCtx_->getDevice(), 1, &write, 0, nullptr);
+        instanceSetMaterialVersion_[frameIndex] = materialTable_.version();
+    }
     // This slot's sets - the view's and the shadow maps' - are written after
     // its fence, before either pass binds them, and only when the table they
     // name was replaced.
@@ -1056,12 +1087,13 @@ void M2Renderer::uploadSlotTables(VkCommandBuffer cmd, uint32_t frameIndex) {
     if (!recording_) return;
     const Frame& frame = *recording_;
     if (frame.cullSlotCount == 0) return;
-    if (!ensureSlotTables(cmd, frameIndex, frame.cullSlotCount)) return;
+    if (!ensureSlotTables(cmd, frameIndex, frame.cullSlotCount, frame.materialRowCount)) return;
 
     // A free instance row is never read: only the cull's rows need clearing.
     if (frame.cullReset) cullTable_.clear(cmd);
     if (!cullTable_.write(cmd, frameIndex, frame.cullUpdateSlots, frame.cullUpdateRows.data()) ||
-        !instanceTable_.write(cmd, frameIndex, frame.cullUpdateSlots, frame.instanceUpdateRows.data())) {
+        !instanceTable_.write(cmd, frameIndex, frame.cullUpdateSlots, frame.instanceUpdateRows.data()) ||
+        !materialTable_.write(cmd, frameIndex, frame.materialUpdateSlots, frame.materialUpdateRows.data())) {
         // Not acknowledged, so the same slots come again with the next frame.
         return;
     }
@@ -1118,15 +1150,11 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex) {
 
 namespace {
 
-// Push constants now carry per-batch data only; per-instance data is in instance SSBO.
+// Where a draw's instances start in the instance SSBO, and its batch's
+// material row; everything else of the batch is in that row.
 struct M2PushConstants {
-    int32_t texCoordSet;        // UV set index (0 or 1)
-    int32_t isFoliage;          // -1 = sky, 0 = none, 1 = wind foliage, 2 = ground clutter
-    int32_t instanceDataOffset; // Base index into instance SSBO for this draw group
-    float swayRefHeight;        // Model-space height the wind normalises against
-    float swayAmp;              // Wind amplitude scale; 1.0 = the tree-sized default
-    float plantHeight;          // The model's own height, for the player brush
-    int32_t texCoordSet2;       // the second stage's: 0 UV0, 1 UV1, -1 sphere map, 2 UV0 unanimated
+    int32_t instanceDataOffset;
+    uint32_t material;
 };
 static_assert(sizeof(M2PushConstants) == kM2PushConstantBytes, "m2.vert's Push block");
 
@@ -1301,34 +1329,6 @@ void M2Renderer::appendGlowSprites(const M2Instance& inst, const M2ModelGPU& mod
     }
 }
 
-namespace {
-
-// Fill the sway half of the push constants for one model.
-//
-// Two modes, and the split is about who owns the idle motion. Ground clutter
-// plays a sequence of its own, so mode 2 asks the shader for the player
-// brush and no wind - two swings of one plant at two rates reads as a
-// glitch. Everything else the wind picks up has its animation disabled by
-// the classifier and gets mode 1, wind and brush both.
-//
-// The wind itself was written for trees: it normalised height against 20
-// yards and displaced by an absolute number of model units, so a one-yard
-// tuft travelled a fraction of a millimetre. Every model normalises against
-// its own height now, with an amplitude interpolated between the two ends
-// rather than switched at a threshold - a bush a foot taller than its
-// neighbour should not sway ten times less. Both ends reproduce the numbers
-// that were there: a 20-yard tree still throws 0.35 model units at the tip.
-void fillSway(M2PushConstants& pc, const M2ModelGPU& mdl, bool sky) {
-    const M2Sway sway = m2SwayFor(sky, mdl.isHangingCloth, mdl.shadowWindFoliage,
-                                  mdl.isGroundDetail, mdl.boundMin.z, mdl.boundMax.z,
-                                  mdl.isStandingCloth);
-    pc.isFoliage = sway.mode;
-    pc.swayRefHeight = sway.refHeight;
-    pc.swayAmp = sway.amp;
-    pc.plantHeight = sway.plantHeight;
-}
-
-}  // namespace
 
 void M2Renderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera&,
                         const StarReplacement& drawStars, bool drawBakedStars) {
@@ -1896,6 +1896,7 @@ void M2Renderer::Frame::clear() noexcept {
     glowSprites_.clear(); ribbonDraws_.clear(); particleRuns_.clear();
     ribbonVertices.clear(); particleVertices.clear(); bones.clear();
     cullUpdateSlots.clear(); cullUpdateRows.clear(); instanceUpdateRows.clear(); cullReset = false;
+    materialUpdateSlots.clear(); materialUpdateRows.clear(); materialRowCount = 0;
     cullGuard = {}; culledFromColumns = false; cullSlotCount = cullSerial = 0;
     depth.clear(); solarDepth.clear(); strikeDepth.clear(); shadowModels.clear();
     instanceEntries = 0;
@@ -2005,7 +2006,7 @@ void M2Renderer::recordStarReplacement(VkCommandBuffer cmd, VkDescriptorSet perF
                                        const M2ModelGPU& model, const StarReplacement& drawStars) {
     drawStars();
     // A different renderer just bound its pipeline, descriptors and vertices.
-    // Restore all M2 bindings; callers invalidate their pipeline/material cache.
+    // Restore all M2 bindings; callers invalidate their pipeline cache.
     const uint32_t frame = vkCtx_->getCurrentFrame();
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             pipelineLayout_, 0, 1, &perFrameSet, 0, nullptr);
@@ -2014,7 +2015,13 @@ void M2Renderer::recordStarReplacement(VkCommandBuffer cmd, VkDescriptorSet perF
                                      pipelineLayout_, 2, 1, &bones, 0, nullptr);
     if (instanceSet_[frame]) vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                               pipelineLayout_, 3, 1, &instanceSet_[frame], 0, nullptr);
+    bindTextureTable(cmd);
     geometry_.bind(cmd, model.geometry);
+}
+
+void M2Renderer::bindTextureTable(VkCommandBuffer cmd) const {
+    const VkDescriptorSet table = vkCtx_->textureTable().set();
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 1, 1, &table, 0, nullptr);
 }
 
 void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
@@ -2034,7 +2041,6 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
     // State tracking
     VkPipeline currentPipeline = VK_NULL_HANDLE;
-    VkDescriptorSet currentMaterialSet = VK_NULL_HANDLE;
 
     // Validate per-frame descriptor set before any Vulkan commands
     if (!perFrameSet) {
@@ -2045,6 +2051,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     // Bind per-frame descriptor set (set 0) - shared across all draws
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             pipelineLayout_, 0, 1, &perFrameSet, 0, nullptr);
+    bindTextureTable(cmd);
 
     // Start with opaque pipeline
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, opaquePipeline_);
@@ -2212,7 +2219,6 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                         !opaqueBatchSkip(model, bi, lod, diagThisModel, false)) {
                         recordStarReplacement(cmd, perFrameSet, model, drawStars);
                         currentPipeline = VK_NULL_HANDLE;
-                        currentMaterialSet = VK_NULL_HANDLE;
                     }
                     if (diagThisModel) {
                         static std::set<std::pair<const void*, size_t>> saidDraw;
@@ -2320,20 +2326,12 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     }
                     faces.show(skyMode_ || m2MaterialTwoSided(batch.materialFlags));
 
-                    // Bind material descriptor set (set 1)
-                    if (!batch.materialSet) continue;
-                    if (batch.materialSet != currentMaterialSet) {
-                        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                                pipelineLayout_, 1, 1, &batch.materialSet, 0, nullptr);
-                        currentMaterialSet = batch.materialSet;
-                    }
+                    // A batch with no material row is not drawn (said when it got none).
+                    if (batch.materialRow == kNoMaterialRow) continue;
 
                     // Push constants + instanced draw
-                    M2PushConstants pc;
-                    pc.texCoordSet = static_cast<int32_t>(batch.textureUnit);
-                    pc.texCoordSet2 = static_cast<int32_t>(batch.secondTexCoords);
-                    fillSway(pc, model, skyMode_);
-                    pc.instanceDataOffset = static_cast<int32_t>(drawOffset);
+                    M2PushConstants pc{.instanceDataOffset = static_cast<int32_t>(drawOffset),
+                                       .material = batch.materialRow};
                     vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
                     vkCmdDrawIndexed(cmd, batch.indexCount, groupSize, model.geometry.firstIndex + batch.indexStart,
                                      model.geometry.baseVertex, 0);
@@ -2407,12 +2405,12 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 pipelineLayout_, 3, 1, &instanceSet_[frameIndex], 0, nullptr);
     }
+    bindTextureTable(cmd);
 
     uint32_t currentModelId = UINT32_MAX;
     const M2ModelGPU* currentModel = nullptr;
     bool currentModelValid = false;
     VkPipeline currentPipeline = VK_NULL_HANDLE;
-    VkDescriptorSet currentMaterialSet = VK_NULL_HANDLE;
     FaceCulling faces(*vkCtx_, cmd);
 
     for (const auto& entry : transparentVisible_) {
@@ -2479,7 +2477,6 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
                 if (drawStars) {
                     recordStarReplacement(cmd, perFrameSet, model, drawStars);
                     currentPipeline = VK_NULL_HANDLE;
-                    currentMaterialSet = VK_NULL_HANDLE;
                 }
                 continue;
             }
@@ -2583,19 +2580,11 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             // its far side no longer shows through its near one.
             faces.show(skyMode_ || m2MaterialTwoSided(batch.materialFlags));
 
-            if (!batch.materialSet) continue;
-            if (batch.materialSet != currentMaterialSet) {
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                        pipelineLayout_, 1, 1, &batch.materialSet, 0, nullptr);
-                currentMaterialSet = batch.materialSet;
-            }
+            if (batch.materialRow == kNoMaterialRow) continue;
 
             // Push constants + single-instance draw
-            M2PushConstants pc;
-            pc.texCoordSet = static_cast<int32_t>(batch.textureUnit);
-            pc.texCoordSet2 = static_cast<int32_t>(batch.secondTexCoords);
-            fillSway(pc, model, skyMode_);
-            pc.instanceDataOffset = static_cast<int32_t>(drawOffset);
+            M2PushConstants pc{.instanceDataOffset = static_cast<int32_t>(drawOffset),
+                               .material = batch.materialRow};
             vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
             vkCmdDrawIndexed(cmd, batch.indexCount, 1, model.geometry.firstIndex + batch.indexStart,
                              model.geometry.baseVertex, 0);

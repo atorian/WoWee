@@ -13,6 +13,7 @@
 #include "core/env_flag.hpp"
 #include "rendering/m2_renderer_internal.h"
 #include "rendering/m2_blend_mode.hpp"
+#include "rendering/m2_sway.hpp"
 #include "pipeline/model_bounds.hpp"
 #include "rendering/render_constants.hpp"
 #include "pipeline/m2_model_classifier.hpp"
@@ -504,6 +505,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     assetManager = assets;
     cullTable_.initialize(*ctx);
     instanceTable_.initialize(*ctx);
+    materialTable_.initialize(*ctx);
     geometry_.initialize(*ctx);
 
     // Announce the renderer diagnostics this build understands, and which of
@@ -526,27 +528,8 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     VkDevice device = vkCtx_->getDevice();
 
     // --- Descriptor set layouts ---
-
-    // Material set layout (set 1): binding 0 = sampler2D, binding 2 = M2Material UBO
-    // (M2Params moved to push constants alongside model matrix)
-    {
-        VkDescriptorSetLayoutBinding bindings[3] = {};
-        bindings[0].binding = 0;
-        bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[0].descriptorCount = 1;
-        bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        bindings[1].binding = 2;
-        bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        bindings[1].descriptorCount = 1;
-        bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-
-        VkDescriptorSetLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        bindings[2] = bindings[0];
-        bindings[2].binding = 3; // second texture stage (RGBA mask)
-        ci.bindingCount = 3;
-        ci.pBindings = bindings;
-        vkCreateDescriptorSetLayout(device, &ci, nullptr, &materialSetLayout_);
-    }
+    // Set 1 is the device's texture table (TextureTable); a batch's
+    // textures are handles in its material row.
 
     // Bone set layout (set 2): binding 0 = STORAGE_BUFFER (bone matrices)
     {
@@ -563,18 +546,20 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     }
 
     // Instance data set layout (set 3): binding 0 = this frame's per-draw
-    // records, binding 1 = the instance table (by slot)
+    // records, binding 1 = the instance table (by slot), binding 2 = the
+    // material table (by row), which the fragment shader reads too
     {
-        VkDescriptorSetLayoutBinding bindings[2] = {};
-        for (uint32_t b = 0; b < 2; ++b) {
+        VkDescriptorSetLayoutBinding bindings[3] = {};
+        for (uint32_t b = 0; b < 3; ++b) {
             bindings[b].binding = b;
             bindings[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             bindings[b].descriptorCount = 1;
             bindings[b].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
         }
+        bindings[2].stageFlags |= VK_SHADER_STAGE_FRAGMENT_BIT;
 
         VkDescriptorSetLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        ci.bindingCount = 2;
+        ci.bindingCount = 3;
         ci.pBindings = bindings;
         vkCreateDescriptorSetLayout(device, &ci, nullptr, &instanceSetLayout_);
     }
@@ -605,8 +590,6 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
         ci.pPoolSizes = sizes;
         ci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
         vkCreateDescriptorPool(device, &ci, nullptr, &materialDescPool_);
-        materialSlots_ = UniformSlotPool::forDevice(ctx->getAllocator(), ctx->getPhysicalDevice(),
-                                                    sizeof(M2MaterialUBO), 1024, "M2 materials");
     }
     {
         VkDescriptorPoolSize sizes[] = {
@@ -700,10 +683,12 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     {
         static_assert(sizeof(M2InstanceGPU) == 112, "M2InstanceGPU must be 112 bytes (std430)");
         static_assert(sizeof(InstanceStaticGPU) == 96, "InstanceStaticGPU must be 96 bytes (std430)");
+        static_assert(sizeof(M2MaterialGPU) == 80 && offsetof(M2MaterialGPU, tint) == 32,
+                      "M2MaterialGPU must match M2Material in m2_material.glsli (std430)");
         const VkDeviceSize instBufSize = kInitialInstanceCapacity * sizeof(M2InstanceGPU);
 
-        // Descriptor pool for 2 sets (double-buffered), two buffers each
-        VkDescriptorPoolSize poolSize{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 4};
+        // Descriptor pool for 2 sets (double-buffered), three buffers each
+        VkDescriptorPoolSize poolSize{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 6};
         VkDescriptorPoolCreateInfo poolCi{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         poolCi.maxSets = 2;
         poolCi.poolSizeCount = 1;
@@ -840,10 +825,12 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
 
     // --- Pipeline layouts ---
 
-    // Main M2 pipeline layout: set 0 = perFrame, set 1 = material, set 2 = bones, set 3 = instances
+    // Main M2 pipeline layout: set 0 = perFrame, set 1 = the texture table,
+    // set 2 = bones, set 3 = instances and materials
     // Push constant: M2PushConstants, m2.vert's Push block
     {
-        VkDescriptorSetLayout setLayouts[] = {perFrameLayout, materialSetLayout_, boneSetLayout_, instanceSetLayout_};
+        VkDescriptorSetLayout setLayouts[] = {perFrameLayout, ctx->textureTable().layout(), boneSetLayout_,
+                                              instanceSetLayout_};
         VkPushConstantRange pushRange{};
         pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
         pushRange.offset = 0;
@@ -976,7 +963,8 @@ void M2Renderer::shutdown() {
     // Model and bone destruction above is deferred; drain it now while the
     // descriptor pools are still alive.
     vkCtx_->flushDeferredCleanup();
-    if (materialSlots_) materialSlots_->release();
+    // Every model's rows came back with it; the next scene's are given anew.
+    materialRows_ = MaterialRows{};
 
     // The models gave their textures back with them; the fallbacks go too.
     failedTextureRetryAt_.clear();
@@ -1041,6 +1029,8 @@ void M2Renderer::shutdown() {
     }
     cullTable_.destroy();
     instanceTable_.destroy();
+    materialTable_.destroy();
+    instanceSetMaterialVersion_[0] = instanceSetMaterialVersion_[1] = 0;
     // Every model's ranges came back in the flush above.
     geometry_.destroy();
     pendingCullDispatch_ = CullDispatch{};
@@ -1050,7 +1040,6 @@ void M2Renderer::shutdown() {
     destroy(device, cullDescPool_);
     destroy(device, cullSetLayout_);
 
-    destroy(device, materialSetLayout_);
     destroy(device, boneSetLayout_);
     destroy(device, instanceSetLayout_);
     destroy(device, particleTexLayout_);
@@ -1079,35 +1068,16 @@ void M2Renderer::destroyModelGPU(uint32_t modelId, std::shared_ptr<M2ModelGPU> r
     releaseEmitterTexSets(*retired);
     // Detach ownership immediately; command buffers retain these handles until
     // every frame slot has fenced. Capture values, never this or model refs.
-    VkContext* ctx = vkCtx_;
-    const VkDescriptorPool pool = materialDescPool_;
-    // Its ranges come back after the frames that may draw it.
+    // Its ranges and material rows come back after the frames that may draw
+    // it, and it holds its textures until then.
     geometry_.release(retired->geometry);
-    vkCtx_->deferAfterAllFrameFences([retired, ctx, pool, slots = materialSlots_]() {
-        for (auto& batch : retired->batches) {
-            if (batch.materialSet) ctx->freeDescriptorSets(pool, 1, &batch.materialSet);
-            if (slots) slots->free(batch.materialSlot);
-        }
-    });
+    for (const auto& batch : retired->batches) releaseMaterialRow(batch.materialRow);
+    vkCtx_->deferAfterAllFrameFences([retired] {});
 }
 
 void M2Renderer::destroyInstanceBones(M2Instance& inst, bool defer) {
     if (!vkCtx_) return;
     releaseInstanceBones(*vkCtx_, boneDescPool_, boneDescPoolGeneration_, inst, defer);
-}
-
-VkDescriptorSet M2Renderer::allocateMaterialSet() {
-    VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    ai.descriptorPool = materialDescPool_;
-    ai.descriptorSetCount = 1;
-    ai.pSetLayouts = &materialSetLayout_;
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    VkResult result = vkCtx_->allocateDescriptorSets(ai, &set);
-    if (result != VK_SUCCESS) {
-        LOG_ERROR("M2Renderer: material descriptor set allocation failed (", result, ")");
-        return VK_NULL_HANDLE;
-    }
-    return set;
 }
 
 VkDescriptorSet M2Renderer::allocateBoneSet() {
@@ -1128,13 +1098,57 @@ bool M2Renderer::hasModel(uint32_t modelId) const {
     return models.find(modelId) != models.end();
 }
 
-VkDescriptorImageInfo M2Renderer::batchImageInfo(const VkTexture& texture,
-                                                 uint8_t texFlags) const {
+VkSampler M2Renderer::batchSampler(const VkTexture& texture, uint8_t texFlags) const {
+    return vkCtx_->getOrCreateSampler(
+        m2TextureSamplerInfo(texFlags, texture.getMipLevels(), skyMode_ ? m2SkyMipBias() : 0.0f));
+}
+
+VkDescriptorImageInfo M2Renderer::batchImageInfo(const VkTexture& texture, uint8_t texFlags) const {
     VkDescriptorImageInfo info = texture.descriptorInfo();
-    const VkSampler sampler = vkCtx_->getOrCreateSampler(m2TextureSamplerInfo(
-        texFlags, texture.getMipLevels(), skyMode_ ? m2SkyMipBias() : 0.0f));
-    if (sampler != VK_NULL_HANDLE) info.sampler = sampler;
+    if (const VkSampler sampler = batchSampler(texture, texFlags)) info.sampler = sampler;
     return info;
+}
+
+TextureHandle M2Renderer::batchTextureHandle(const VkTexture* texture, TextureHandle image,
+                                             uint8_t texFlags) const {
+    if (!texture || image == kNoTextureHandle) return kNoTextureHandle;
+    const VkSampler sampler = batchSampler(*texture, texFlags);
+    // Without the batch's own sampler, the one the image was placed with.
+    if (sampler == VK_NULL_HANDLE) return image;
+    return vkCtx_->textureTable().withSampler(image, sampler);
+}
+
+uint32_t M2Renderer::placeMaterialRow() {
+    MaterialRows& rows = materialRows_;
+    {
+        std::lock_guard lock(rows.returned->mutex);
+        rows.free.insert(rows.free.end(), rows.returned->rows.begin(), rows.returned->rows.end());
+        rows.returned->rows.clear();
+    }
+    if (!rows.free.empty()) {
+        const uint32_t row = rows.free.back();
+        rows.free.pop_back();
+        return row;
+    }
+    rows.data.emplace_back();
+    rows.pendingSerial.push_back(0);
+    return static_cast<uint32_t>(rows.data.size() - 1);
+}
+
+void M2Renderer::writeMaterialRow(uint32_t row, const M2MaterialGPU& material) {
+    MaterialRows& rows = materialRows_;
+    rows.data[row] = material;
+    if (rows.pendingSerial[row] == 0) rows.pending.push_back(row);
+    // Carried by the next extracted frame, whatever an earlier one carried.
+    rows.pendingSerial[row] = kMaterialRowUncarried;
+}
+
+void M2Renderer::releaseMaterialRow(uint32_t row) {
+    if (row == kNoMaterialRow || !vkCtx_) return;
+    vkCtx_->deferAfterAllFrameFences([returned = materialRows_.returned, row] {
+        std::lock_guard lock(returned->mutex);
+        returned->rows.push_back(row);
+    });
 }
 
 void M2Renderer::applyBatchTextureProps(M2ModelGPU::BatchGPU& batch, const TextureInfo& texture) const {
@@ -1149,74 +1163,14 @@ void M2Renderer::applyBatchTextureProps(M2ModelGPU::BatchGPU& batch, const Textu
     batch.alphaIsSilhouette = texture.alphaIsSilhouette;
 }
 
-void M2Renderer::writeBatchDescriptors(M2ModelGPU::BatchGPU& batch) const {
-    if (!batch.materialSet) return;
-    VkTexture* batchTex = (batch.texture && batch.texture->isValid())
-        ? batch.texture : whiteTexture_.get();
-    VkDescriptorImageInfo imgInfo = batchImageInfo(*batchTex, batch.texFlags);
-
-    VkDescriptorBufferInfo matBufInfo{};
-    matBufInfo.buffer = batch.materialSlot.buffer;
-    matBufInfo.offset = batch.materialSlot.offset;
-    matBufInfo.range = sizeof(M2MaterialUBO);
-
-    VkWriteDescriptorSet writes[3] = {};
-    // binding 0: texture
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = batch.materialSet;
-    writes[0].dstBinding = 0;
-    writes[0].descriptorCount = 1;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[0].pImageInfo = &imgInfo;
-    // binding 2: M2Material UBO
-    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = batch.materialSet;
-    writes[1].dstBinding = 2;
-    writes[1].descriptorCount = 1;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    writes[1].pBufferInfo = &matBufInfo;
-
-    const bool hasMask = batch.secondTexture && batch.secondTexture->isValid();
-    VkDescriptorImageInfo maskInfo = hasMask
-        ? batchImageInfo(*batch.secondTexture, batch.secondTexFlags) : imgInfo;
-    writes[2] = writes[0];
-    writes[2].dstBinding = 3;
-    writes[2].pImageInfo = &maskInfo;
-    vkUpdateDescriptorSets(vkCtx_->getDevice(), 3, writes, 0, nullptr);
-}
-
 bool M2Renderer::makeModelWritable(uint32_t modelId) {
     auto& current = models.at(modelId);
     if (current.use_count() == 1) return true;
+    // A previous snapshot owns the old description. Only changed models are
+    // copied; ordinary frames retain the same resource. The copy keeps the
+    // batches' material rows: a row rewritten reaches the GPU in queue order,
+    // after the frames recorded from the old description.
     auto next = std::make_shared<M2ModelGPU>(*current);
-    // A previous snapshot owns the old description and its material bindings.
-    // Only changed models are copied; ordinary frames retain the same resource.
-    for (auto& batch : next->batches) {
-        batch.materialSet = VK_NULL_HANDLE;
-        batch.materialSlot = {};
-    }
-    bool ready = true;
-    for (auto& batch : next->batches) {
-        batch.materialSlot = materialSlots_ ? materialSlots_->allocate() : UniformSlotPool::Slot{};
-        batch.materialSet = allocateMaterialSet();
-        if (!batch.materialSlot || !batch.materialSet) { ready = false; break; }
-        writeBatchMaterial(*next, batch);
-        writeBatchDescriptors(batch);
-    }
-    const auto retireMaterials = [ctx = vkCtx_, pool = materialDescPool_, slots = materialSlots_](std::shared_ptr<M2ModelGPU> model) {
-        ctx->deferAfterAllFrameFences([ctx, pool, slots, model = std::move(model)] {
-            for (const auto& batch : model->batches) {
-                if (batch.materialSet) ctx->freeDescriptorSets(pool, 1, &batch.materialSet);
-                if (slots) slots->free(batch.materialSlot);
-            }
-        });
-    };
-    if (!ready) {
-        retireMaterials(std::move(next));
-        LOG_ERROR("M2 model ", modelId, " material version allocation failed - keeping its previous materials");
-        return false;
-    }
-    retireMaterials(current);
     current = std::move(next);
     for (size_t i = 0; i < scene_->instances.size(); ++i) {
         auto& inst = scene_->instances[i];
@@ -1251,10 +1205,10 @@ void M2Renderer::retryPendingBatchTextures() {
         batch = &it->second->batches[pending.batchIndex];
         M2ModelGPU& model = (*it->second);
         batch->texture = tex.get();
+        batch->textureHandle = tex.tableHandle();
         applyBatchTextureProps(*batch, tex.info());
         model.textureRefs.push_back(std::move(tex));
         writeBatchMaterial(model, *batch);
-        writeBatchDescriptors(*batch);
         batch->batchOpacity = batch->loadedOpacity;
         LOG_INFO("M2 batch shown after retry: '", model.name, "' batch ", pending.batchIndex,
                  " got '", batch->pendingTextureKey, "'");
@@ -1264,8 +1218,7 @@ void M2Renderer::retryPendingBatchTextures() {
     }
 }
 
-void M2Renderer::writeBatchMaterial(const M2ModelGPU& model,
-                                    M2ModelGPU::BatchGPU& batch) const {
+void M2Renderer::writeBatchMaterial(const M2ModelGPU& model, M2ModelGPU::BatchGPU& batch) {
     M2BatchMaterialInputs in;
     in.blendMode = static_cast<uint8_t>(batch.blendMode);
     in.hasAlpha = batch.hasAlpha;
@@ -1274,21 +1227,62 @@ void M2Renderer::writeBatchMaterial(const M2ModelGPU& model,
     in.groundDetail = model.isGroundDetail;
     in.foliageLike = model.isFoliageLike;
     batch.drawState = m2BatchDrawState(in);
-    if (!batch.materialSlot) return;
 
-    M2MaterialUBO mat{};
+    // Its texture, or white where its own did not upload; a batch whose
+    // texture has no place in the table is not drawn.
+    const bool ownTexture = batch.texture && batch.texture->isValid();
+    const TextureHandle texture =
+        ownTexture ? batchTextureHandle(batch.texture, batch.textureHandle, batch.texFlags)
+                   : batchTextureHandle(whiteTexture_.get(), whiteTexture_.tableHandle(), batch.texFlags);
+    if (texture == kNoTextureHandle) {
+        static core::LogBudget budget(8, "M2 batches with no texture place");
+        if (budget.take())
+            LOG_WARNING("M2 '", model.name, "' batch ", &batch - model.batches.data(),
+                        ": its texture has no place in the texture table - the batch is not drawn");
+        releaseMaterialRow(std::exchange(batch.materialRow, kNoMaterialRow));
+        return;
+    }
+    const TextureHandle mask = batch.secondTexture && batch.secondTexture->isValid()
+        ? batchTextureHandle(batch.secondTexture, batch.secondTextureHandle, batch.secondTexFlags)
+        : kNoTextureHandle;
+
+    M2MaterialGPU mat;
+    mat.texture = texture;
+    mat.secondTexture = mask != kNoTextureHandle ? mask : texture;
     mat.hasTexture = (batch.texture != nullptr && batch.texture != whiteTexture_.get()) ? 1 : 0;
     mat.alphaTest = batch.drawState.alphaTest;
-    mat.tintR = batch.tint.r;
-    mat.tintG = batch.tint.g;
-    mat.tintB = batch.tint.b;
+    mat.tint = glm::vec4(batch.tint, 1.0f);
     mat.unlit = (batch.materialFlags & 0x01) && !batch.drawState.litOverride ? 1 : 0;
     mat.blendMode = batch.blendMode;
     mat.combiner = static_cast<int32_t>(batch.combiner);
-    mat.hasSecondTexture = batch.secondTexture && batch.secondTexture->isValid() ? 1 : 0;
+    mat.hasSecondTexture = mask != kNoTextureHandle ? 1 : 0;
     mat.specularIntensity = 0.5f;
     mat.emissiveBoost = batch.preserveGlowMesh ? 2.4f : 1.0f;
-    std::memcpy(batch.materialSlot.mapped, &mat, sizeof(mat));
+    mat.texCoordSet = batch.textureUnit;
+    mat.texCoordSet2 = batch.secondTexCoords;
+    // The model's sway. Two modes, and the split is about who owns the idle
+    // motion. Ground clutter plays a sequence of its own, so mode 2 asks the
+    // shader for the player brush and no wind - two swings of one plant at
+    // two rates reads as a glitch. Everything else the wind picks up has its
+    // animation disabled by the classifier and gets mode 1, wind and brush
+    // both.
+    //
+    // The wind itself was written for trees: it normalised height against
+    // 20 yards and displaced by an absolute number of model units, so a
+    // one-yard tuft travelled a fraction of a millimetre. Every model
+    // normalises against its own height now, with an amplitude interpolated
+    // between the two ends rather than switched at a threshold - a bush a
+    // foot taller than its neighbour should not sway ten times less. Both
+    // ends reproduce the numbers that were there: a 20-yard tree still
+    // throws 0.35 model units at the tip.
+    const M2Sway sway = m2SwayFor(skyMode_, model.isHangingCloth, model.shadowWindFoliage, model.isGroundDetail,
+                                  model.boundMin.z, model.boundMax.z, model.isStandingCloth);
+    mat.isFoliage = sway.mode;
+    mat.swayRefHeight = sway.refHeight;
+    mat.swayAmp = sway.amp;
+    mat.plantHeight = sway.plantHeight;
+    if (batch.materialRow == kNoMaterialRow) batch.materialRow = placeMaterialRow();
+    writeMaterialRow(batch.materialRow, mat);
 }
 
 void M2Renderer::markModelAsSpellEffect(uint32_t modelId) {
@@ -1720,6 +1714,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
     // The model holds a reference to each (gpuModel.textureRefs); the batches,
     // emitters and ribbons keep the raw pointers below.
     std::vector<VkTexture*> allTextures;
+    std::vector<TextureHandle> allTextureHandles;  ///< their places in the texture table
     std::vector<TextureInfo> allTextureInfo;
     std::vector<bool> textureLoadFailed;
     std::vector<std::string> textureKeysLower;
@@ -1756,6 +1751,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
                     LOG_INFO("  InvisibleTrap texture[", ti, "]: ", texPath, " -> ", (failed ? "WHITE" : "OK"));
                 }
                 allTextures.push_back(texRef.get());
+                allTextureHandles.push_back(texRef.tableHandle());
                 allTextureInfo.push_back(texRef.info());
                 gpuModel.textureRefs.push_back(std::move(texRef));
                 textureLoadFailed.push_back(failed);
@@ -1797,6 +1793,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
                     }
                 }
                 allTextures.push_back(whiteTexture_.get());
+                allTextureHandles.push_back(whiteTexture_.tableHandle());
                 allTextureInfo.push_back(whiteTexture_.info());
                 textureLoadFailed.push_back(false);  // Empty filename = intentional white (type!=0)
                 textureKeysLower.emplace_back();
@@ -1872,6 +1869,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
 
             // Resolve texture: batch.textureIndex → textureLookup → allTextures
             VkTexture* tex = whiteTexture_.get();
+            TextureHandle texHandle = whiteTexture_.tableHandle();
             TextureInfo texInfo = whiteTexture_.info();
             bool texFailed = false;
             std::string batchTexKeyLower;
@@ -1879,6 +1877,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
                 uint16_t texIdx = model.textureLookup[batch.textureIndex];
                 if (texIdx < allTextures.size()) {
                     tex = allTextures[texIdx];
+                    texHandle = allTextureHandles[texIdx];
                     texInfo = allTextureInfo[texIdx];
                     texFailed = (texIdx < textureLoadFailed.size()) && textureLoadFailed[texIdx];
                     if (texIdx < textureKeysLower.size()) {
@@ -1893,6 +1892,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
                             " out of range (textureLookup size=", model.textureLookup.size(),
                             ") - falling back to texture[0]");
                 tex = allTextures[0];
+                texHandle = allTextureHandles[0];
                 texInfo = allTextureInfo[0];
                 texFailed = !textureLoadFailed.empty() && textureLoadFailed[0];
                 if (!textureKeysLower.empty()) {
@@ -1905,12 +1905,14 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
                 TextureRef fallbackTex = loadTexture(kDetailFallbackTexture);
                 if (fallbackTex && fallbackTex != whiteTexture_) {
                     tex = fallbackTex.get();
+                    texHandle = fallbackTex.tableHandle();
                     texInfo = fallbackTex.info();
                     texFailed = false;
                     gpuModel.textureRefs.push_back(std::move(fallbackTex));
                 }
             }
             bgpu.texture = tex;
+            bgpu.textureHandle = texHandle;
             const auto tcls = pipeline::classifyBatchTexture(batchTexKeyLower);
             bgpu.starLayer = tcls.starPointLayer;
             const bool modelLanternFamily = gpuModel.isLanternLike;
@@ -1967,6 +1969,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
                     const uint16_t tex = second < model.textureLookup.size() ? model.textureLookup[second] : UINT16_MAX;
                     if (tex < allTextures.size() && tex < textureLoadFailed.size() && !textureLoadFailed[tex]) {
                         bgpu.secondTexture = allTextures[tex];
+                        bgpu.secondTextureHandle = allTextureHandles[tex];
                     } else {
                         // Drawn with its second stage white: the first alone.
                         static std::unordered_set<std::string> saidMissing;
@@ -2199,19 +2202,16 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
 
     vkCtx_->endUploadBatch();
 
-    // Allocate Vulkan descriptor sets and UBOs for each batch
+    // Each batch's material row. A batch whose texture - even the white
+    // fallback - has no place in the texture table gets none and is not
+    // drawn (writeBatchMaterial says so): an image that failed to upload has
+    // no place, so nothing samples a null view, which reached an NVIDIA
+    // driver as a lost device (#123).
     for (auto& bgpu : gpuModel.batches) {
-        // Its M2Material parameters (binding 2), in a slot rather than a
-        // buffer of its own.
-        bgpu.materialSlot = materialSlots_ ? materialSlots_->allocate() : UniformSlotPool::Slot{};
-        if (!bgpu.materialSlot) {
-            // The pool has said why; a batch with no parameters is not drawn.
-            bgpu.materialSet = VK_NULL_HANDLE;
-            continue;
-        }
+        writeBatchMaterial(gpuModel, bgpu);
+        if (bgpu.materialRow == kNoMaterialRow) continue;
         {
-            writeBatchMaterial(gpuModel, bgpu);
-            const auto& mat = *static_cast<const M2MaterialUBO*>(bgpu.materialSlot.mapped);
+            const M2MaterialGPU& mat = materialRows_.data[bgpu.materialRow];
 
             // What the sky model's layers are actually being given, once each.
             //
@@ -2234,23 +2234,6 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
                          " tint=(", bgpu.tint.r, ",", bgpu.tint.g, ",", bgpu.tint.b, ")");
             }
         }
-
-        // Allocate descriptor set and write all bindings
-        bgpu.materialSet = allocateMaterialSet();
-        // Valid, not merely non-null - the same shape as the particle and
-        // ribbon sets below. descriptorInfo() returns the texture's handles as
-        // they are, so one whose upload or view creation failed writes
-        // VK_NULL_HANDLE into a live descriptor and declares
-        // SHADER_READ_ONLY_OPTIMAL over it, which reaches an NVIDIA driver as a
-        // graphics engine exception and a lost device. See #123.
-        //
-        // The set is dropped when even the white fallback is unsampleable, and
-        // the render passes already skip a batch with no set: losing a batch
-        // costs part of a model, and a null image view costs the device.
-        VkTexture* batchTex = (bgpu.texture && bgpu.texture->isValid())
-            ? bgpu.texture : whiteTexture_.get();
-        if (!batchTex || !batchTex->isValid()) bgpu.materialSet = VK_NULL_HANDLE;
-        writeBatchDescriptors(bgpu);
     }
 
     // Pre-compute available LOD levels to avoid per-instance batch iteration

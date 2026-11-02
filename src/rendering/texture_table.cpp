@@ -175,6 +175,21 @@ void TextureTable::remove(TextureHandle handle, Kind kind) {
     --places.used;
 }
 
+TextureHandle TextureTable::withSampler(TextureHandle handle, VkSampler sampler) {
+    if (handle == kNoTextureHandle || !set_ || !sampler) return kNoTextureHandle;
+    std::lock_guard<std::mutex> lock(mutex_);
+    const uint32_t samplerPlace = samplerPlaceLocked(sampler);
+    if (samplerPlace >= samplerCapacity_) {
+        if (!samplersFullSaid_) {
+            LOG_ERROR("Texture table full: all ", samplerCapacity_,
+                      " sampler places in use; a texture drawn through another sampler is drawn with its fallback");
+            samplersFullSaid_ = true;
+        }
+        return kNoTextureHandle;
+    }
+    return (handle & (kMaxImages - 1)) | (samplerPlace << kImageBits);
+}
+
 uint32_t TextureTable::used(Kind kind) const {
     std::lock_guard<std::mutex> lock(mutex_);
     return kind == Kind::Plain ? plain_.used : layered_.used;

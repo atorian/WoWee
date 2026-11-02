@@ -888,7 +888,7 @@ TextureRef M2Renderer::loadTexture(const std::string& path) {
     //
     // The image's own sampler is the cache's. A batch samples it through a
     // sampler built from its own wrap flags and the sky's mip bias
-    // (batchImageInfo), since other models and renderers share the image.
+    // (batchSampler), since other models and renderers share the image.
     TextureRef uploaded = cacheStoredTexture(*vkCtx_, key, blp);
     if (!uploaded) {
         // Refused or failed, as the cache has said; asked for again after the

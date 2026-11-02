@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_nonuniform_qualifier : require
 
 layout(set = 0, binding = 0) uniform PerFrame {
     mat4 view;
@@ -45,22 +46,9 @@ layout(set = 0, binding = 0) uniform PerFrame {
 #include "aerial_frame.glsli"
 #include "interior_light.glsli"
 
-layout(set = 1, binding = 0) uniform sampler2D uTexture;
-layout(set = 1, binding = 3) uniform sampler2D uSecondTexture;
-
-layout(set = 1, binding = 2) uniform M2Material {
-    int hasTexture;
-    int alphaTest;
-    int unlit;
-    int blendMode;
-    float specularIntensity;
-    float emissiveBoost;
-    float tintR;
-    float tintG;
-    float tintB;
-    int combiner;           // M2Combiner
-    int hasSecondTexture;
-};
+#define TEXTURE_TABLE_SET 1
+#include "texture_table.glsli"
+#include "m2_material.glsli"
 
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
 
@@ -76,6 +64,7 @@ layout(location = 8) in vec2 TexCoord2;
 layout(location = 9) flat in vec4 vInteriorAmbient;
 layout(location = 10) flat in vec4 vInteriorDirect;
 layout(location = 11) flat in uvec4 vLocalLights;
+layout(location = 12) flat in uint vMaterial;
 
 layout(location = 0) out vec4 outColor;
 
@@ -130,12 +119,23 @@ vec4 fogVolumeSky(vec2 uv) {
 #include "m2_combiner.glsli"
 
 void main() {
+    // The batch's material, from its row.
+    const M2Material material = m2Materials[vMaterial];
+    const int hasTexture = material.hasTexture;
+    const int alphaTest = material.alphaTest;
+    const int unlit = material.unlit;
+    const int blendMode = material.blendMode;
+    const float specularIntensity = material.specularIntensity;
+    const float emissiveBoost = material.emissiveBoost;
+    const int combiner = material.combiner;
+    const int hasSecondTexture = material.hasSecondTexture;
+
     const vec3 receiverFace = receiverFaceNormal(FragPos);
     // The stages as the client combines them: armour doubled by its
     // sphere-mapped shine, a flame shaped by its mask, a layer with light
     // of its own added on top of the lit one.
-    vec4 t0 = hasTexture != 0 ? texture(uTexture, TexCoord) : vec4(1.0);
-    vec4 t1 = hasSecondTexture != 0 ? texture(uSecondTexture, TexCoord2) : vec4(1.0);
+    vec4 t0 = hasTexture != 0 ? texture(tablePlain2D(material.texture), TexCoord) : vec4(1.0);
+    vec4 t1 = hasSecondTexture != 0 ? texture(tablePlain2D(material.secondTexture), TexCoord2) : vec4(1.0);
     vec3 stageAdd;
     vec4 texColor = combineStages(combiner, t0, t1, stageAdd);
     texColor.a = clamp(texColor.a, 0.0, 1.0);
@@ -143,7 +143,7 @@ void main() {
     // here - Orgrimmar's bonfire carries (1.0, 0.329, 0.0) - so without it
     // every fire in the world burns white. It is part of the vertex colour,
     // which what the stages add on top is not.
-    texColor.rgb *= vec3(tintR, tintG, tintB);
+    texColor.rgb *= material.tint.rgb;
 
     // Original client sky M2s carry their authored colour and alpha, and are
     // taken as they are. They are camera-centered and unlit, and must not be
@@ -201,7 +201,7 @@ void main() {
     // canopy and left it looking milky. A quarter alpha is where the fringe
     // stops and the leaf starts.
     if (alphaTest != 0 && texColor.a > 0.01 && texColor.a < 0.25) {
-        vec3 mipColor = textureLod(uTexture, TexCoord, 4.0).rgb;
+        vec3 mipColor = textureLod(tablePlain2D(material.texture), TexCoord, 4.0).rgb;
         float trust = smoothstep(0.0, 0.25, texColor.a);
         texColor.rgb = mix(mipColor, texColor.rgb, trust);
     }
@@ -224,7 +224,7 @@ void main() {
         // Gentler than it was: at 0.18 a mip-4 canopy came back with every
         // leaf texel above 0.23 alpha opaque, which is a solid green mass
         // rather than a thinned one. Coverage carries the rest now.
-        float mip = textureQueryLod(uTexture, TexCoord).x;
+        float mip = textureQueryLod(tablePlain2D(material.texture), TexCoord).x;
         texColor.a *= 1.0 + clamp(mip, 0.0, 4.0) * 0.11;
     }
     if (alphaTest != 0) {

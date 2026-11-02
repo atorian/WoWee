@@ -1,0 +1,29 @@
+// An M2 batch's material (M2Renderer, M2MaterialGPU): what used to be its
+// own set - the uniform block and the two textures - and its draw's push
+// constants, as one row of a table every draw names by number. Read by
+// m2.vert (coordinates, sway) and m2.frag (textures, shading).
+struct M2Material {
+    // TextureTable handles: the batch's texture and its second stage's,
+    // each through the sampler the batch's wrap flags pick.
+    uint texture;
+    uint secondTexture;
+    int hasTexture;
+    int alphaTest;
+    int unlit;
+    int blendMode;
+    float specularIntensity;
+    float emissiveBoost;
+    vec4 tint;               // rgb, the batch's authored colour; w unused
+    int combiner;            // M2Combiner
+    int hasSecondTexture;
+    int texCoordSet;         // UV set index (0 or 1), -1 sphere map
+    int texCoordSet2;        // second stage: 0 UV0, 1 UV1, -1 sphere map, 2 UV0 unanimated
+    int isFoliage;           // -1 sky, 0 none, 1 foliage, 2 clutter, 3/4 hanging/standing cloth
+    float swayRefHeight;     // model height the sway normalises against (model space)
+    float swayAmp;           // sway amplitude scale; 1.0 = the tree-sized default
+    float plantHeight;       // the model's own height (model space), for the player brush
+};
+
+layout(set = 3, binding = 2) readonly buffer M2Materials {
+    M2Material m2Materials[];
+};

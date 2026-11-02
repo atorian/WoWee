@@ -37,16 +37,14 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 lightningColor;
 };
 
-// Per-draw push constants (batch-level data only)
+// Per-draw push constants: where the draw's instances start and its batch's
+// material.
 layout(push_constant) uniform Push {
-    int texCoordSet;         // UV set index (0 or 1)
-    int isFoliage;           // -1 sky, 0 none, 1 foliage, 2 clutter, 3 hanging cloth
     int instanceDataOffset;  // Base index into InstanceSSBO for this draw group
-    float swayRefHeight;     // Model height the sway normalises against (model space)
-    float swayAmp;           // Sway amplitude scale; 1.0 = the tree-sized default
-    float plantHeight;       // The model's own height (model space), for the player brush
-    int texCoordSet2;        // second stage: 0 UV0, 1 UV1, -1 sphere map, 2 UV0 unanimated
+    uint material;           // its row of m2Materials
 } push;
+
+#include "m2_material.glsli"
 
 layout(set = 2, binding = 0) readonly buffer BoneSSBO {
     mat4 bones[];
@@ -110,6 +108,7 @@ layout(location = 8) out vec2 TexCoord2;
 layout(location = 9) flat out vec4 vInteriorAmbient;
 layout(location = 10) flat out vec4 vInteriorDirect;
 layout(location = 11) flat out uvec4 vLocalLights;
+layout(location = 12) flat out uint vMaterial;
 
 #include "sphere_map.glsli"
 #define WIND_PER_FRAME
@@ -125,6 +124,8 @@ vec2 uvTransform(vec4 row0, vec4 row1, vec2 uv) {
 }
 
 void main() {
+    const M2Material material = m2Materials[push.material];
+    vMaterial = push.material;
     // Fetch per-instance data from SSBO
     int instIdx = push.instanceDataOffset + gl_InstanceIndex;
     uint slot = instanceData[instIdx].slot;
@@ -156,8 +157,8 @@ void main() {
     // used to hardcode; ground clutter passes its own height instead, because
     // normalising a one-yard tuft against twenty moves it by nothing at all.
     float heightFactor = 0.0;
-    if (push.isFoliage > 0) {
-        heightFactor = clamp(pos.z / max(push.swayRefHeight, 0.01), 0.0, 1.0);
+    if (material.isFoliage > 0) {
+        heightFactor = clamp(pos.z / max(material.swayRefHeight, 0.01), 0.0, 1.0);
         heightFactor *= heightFactor; // quadratic - base stays grounded
     }
 
@@ -169,8 +170,8 @@ void main() {
     // player brush below still applies to it: that is motion the authored
     // animation has no way to know about.
     float windFade = m2WindDistanceFade(model[3].xyz, viewPos.xyz);
-    if (push.isFoliage == 1 && windFade > 0.0) {
-        float amp = push.swayAmp * heightFactor * windFade;
+    if (material.isFoliage == 1 && windFade > 0.0) {
+        float amp = material.swayAmp * heightFactor * windFade;
         pos.xy += foliageWindSway(perFrameFoliageWind(model), pos.xyz, aPos, model[3].xy, amp);
     }
 
@@ -187,14 +188,14 @@ void main() {
     //
     // The amplitude is a twentieth of the cloth's own drop, set on the client
     // side; how it moves is wind.glsli's.
-    if (push.isFoliage == 3 || push.isFoliage == 4) {
-        float span = max(push.plantHeight, 0.01);
-        float clothBase = push.swayRefHeight - span;
-        float held = (push.isFoliage == 4)
+    if (material.isFoliage == 3 || material.isFoliage == 4) {
+        float span = max(material.plantHeight, 0.01);
+        float clothBase = material.swayRefHeight - span;
+        float held = (material.isFoliage == 4)
                    ? clamp((pos.z - clothBase) / span, 0.0, 1.0)
-                   : clamp((push.swayRefHeight - pos.z) / span, 0.0, 1.0);
+                   : clamp((material.swayRefHeight - pos.z) / span, 0.0, 1.0);
         held *= held;
-        float amp = push.swayAmp * held;
+        float amp = material.swayAmp * held;
         pos.xyz += clothWindSway(perFrameClothWind(model), pos.xyz, norm.xyz, model[3].xy, amp);
     }
 
@@ -224,11 +225,11 @@ void main() {
     // between them is on the plant's own height rather than on which of the two
     // sway modes it happens to use. A shoulder-high bush and a waist-high one
     // should not behave differently because a bounding box crossed a threshold.
-    if (push.isFoliage > 0 && push.isFoliage != 3 && push.isFoliage != 4 &&
-        push.plantHeight > 0.0) {
+    if (material.isFoliage > 0 && material.isFoliage != 3 && material.isFoliage != 4 &&
+        material.plantHeight > 0.0) {
         vec3 base = model[3].xyz;                      // instance origin, on the ground
         float zScale = length(model[2].xyz);
-        float plantHeight = push.plantHeight * zScale;
+        float plantHeight = material.plantHeight * zScale;
 
         // Full effect up to about head height, nothing from a small tree up.
         float sizeGate = 1.0 - smoothstep(4.0, 8.0, plantHeight);
@@ -240,7 +241,7 @@ void main() {
 
         // Height along the plant, from its own base rather than from whatever
         // the wind normalised against: mode 2 does not compute the wind at all.
-        float brushT = clamp(pos.z / max(push.plantHeight, 0.01), 0.0, 1.0);
+        float brushT = clamp(pos.z / max(material.plantHeight, 0.01), 0.0, 1.0);
         brushT *= brushT;
 
         if (levelGate > 0.0 && brushT > 0.0) {
@@ -296,23 +297,23 @@ void main() {
     vec3 eyePosition = mat3(view) * (worldPos.xyz - viewPos.xyz);
     vec3 eyeNormal = normalize(mat3(view) * Normal);
     // A sphere-mapped stage takes no UV animation (render spec 6.1).
-    if (push.texCoordSet == -1) {
+    if (material.texCoordSet == -1) {
         TexCoord = sphereMapUV(eyePosition, eyeNormal);
     } else {
         TexCoord = uvTransform(instanceData[instIdx].uvRow0, instanceData[instIdx].uvRow1,
-                               push.texCoordSet == 1 ? aTexCoord2 : aTexCoord);
+                               material.texCoordSet == 1 ? aTexCoord2 : aTexCoord);
     }
     // The second stage, from its own source as the client's vertex shader
     // gives it: the second UV set or the sphere map, through the stage's own
     // UV animation - or, behind a sphere-mapped first stage, the first UV set
     // with no animation at all (Diffuse_Env_T2).
-    if (push.texCoordSet2 == -1) {
+    if (material.texCoordSet2 == -1) {
         TexCoord2 = sphereMapUV(eyePosition, eyeNormal);
-    } else if (push.texCoordSet2 == 2) {
+    } else if (material.texCoordSet2 == 2) {
         TexCoord2 = aTexCoord;
     } else {
         TexCoord2 = uvTransform(instanceData[instIdx].uv2Row0, instanceData[instIdx].uv2Row1,
-                                push.texCoordSet2 == 1 ? aTexCoord2 : aTexCoord);
+                                material.texCoordSet2 == 1 ? aTexCoord2 : aTexCoord);
     }
     vLocalLights = instanceData[instIdx].localLights;
 
@@ -320,9 +321,9 @@ void main() {
     // How far up the plant this vertex is, as a fraction of the plant's own
     // height. The fragment shader shades a canopy with it, and dividing by a
     // constant there could only be right for one size of plant.
-    ModelHeight = push.plantHeight > 0.0 ? clamp(pos.z / push.plantHeight, 0.0, 1.0) : 1.0;
+    ModelHeight = material.plantHeight > 0.0 ? clamp(pos.z / material.plantHeight, 0.0, 1.0) : 1.0;
     vFadeAlpha = fade;
-    vSkyMode = push.isFoliage < 0 ? 1 : 0;
+    vSkyMode = material.isFoliage < 0 ? 1 : 0;
     vHighlight = instanceData[instIdx].highlight;
     vInteriorAmbient = instanceStatics[slot].interiorAmbient;
     vInteriorDirect = instanceStatics[slot].interiorDirect;
@@ -331,5 +332,5 @@ void main() {
     // A sky model sits on the far plane whatever its radius, so the depth
     // test rejects it wherever terrain has already been drawn. The sky is
     // drawn after the ground now, and this is what makes that free.
-    if (push.isFoliage < 0) gl_Position.z = gl_Position.w;
+    if (material.isFoliage < 0) gl_Position.z = gl_Position.w;
 }

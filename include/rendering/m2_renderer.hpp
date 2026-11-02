@@ -16,7 +16,6 @@
 #include "rendering/instance_random.hpp"
 #include "rendering/m2_cull_grid.hpp"
 #include "rendering/shadow_params.hpp"
-#include "rendering/uniform_slot_pool.hpp"
 
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/blp_loader.hpp"
@@ -95,9 +94,13 @@ struct M2ModelGPU {
         int8_t secondTexCoords = 1;
         /// False for shader 0x8000, which the client does not draw.
         bool shaderDrawn = true;
-        VkDescriptorSet materialSet = VK_NULL_HANDLE;  // set 1
-        /// Its M2MaterialUBO, a slot of materialSlots_ (uniform_slot_pool.hpp).
-        UniformSlotPool::Slot materialSlot;
+        /// Its row of the material table (M2MaterialGPU), which every draw of
+        /// it names; kNoMaterialRow when the table had no room.
+        uint32_t materialRow = UINT32_MAX;
+        /// Its textures' places in the texture table, as their cache entries
+        /// hold them; the row carries them with the batch's own samplers.
+        TextureHandle textureHandle = kNoTextureHandle;
+        TextureHandle secondTextureHandle = kNoTextureHandle;
         uint32_t indexStart = 0;   // offset in indices (not bytes)
         uint32_t indexCount = 0;
         bool hasAlpha = false;
@@ -447,27 +450,6 @@ struct M2Instance {
     void updateModelMatrix();
 };
 
-
-// M2 material UBO - matches M2Material in m2.frag.glsl (set 1, binding 2)
-struct M2MaterialUBO {
-    int32_t hasTexture;
-    int32_t alphaTest;
-    int32_t unlit;
-    int32_t blendMode;
-    float specularIntensity;
-    float emissiveBoost;
-    // The batch's authored colour, from the M2's colour track, with any
-    // flicker already folded in. Three scalars rather than a vec3 so the
-    // std140 rules stay trivial.
-    float tintR;
-    float tintG;
-    float tintB;
-    /// M2Combiner: how the stages and the lit colour meet.
-    int32_t combiner;
-    /// The second stage is bound; without it the combiner reads it as white.
-    int32_t hasSecondTexture;
-};
-
 // M2 params UBO - matches M2Params in m2.vert.glsl (set 1, binding 1)
 struct M2ParamsUBO {
     float uvOffsetX;
@@ -787,17 +769,23 @@ public:
         }
         return blended().additive;
     }
-    /// Decide how a batch is drawn and write its material buffer. Runs when the
-    /// model loads, and again if it is marked a spell effect afterwards; the
-    /// draw loops write nothing into it.
-    void writeBatchMaterial(const M2ModelGPU& model, M2ModelGPU::BatchGPU& batch) const;
-    /// The texture as one batch samples it: its image, with a sampler built
-    /// from that batch's own wrap flags.
+    /// Decide how a batch is drawn and write its material row, giving it one
+    /// if it has none. Runs when the model loads, and again when a texture
+    /// arrives late or the model is marked a spell effect afterwards; the
+    /// draw loops write nothing into it. A batch whose texture has no place
+    /// in the texture table gets no row, said, and is not drawn.
+    void writeBatchMaterial(const M2ModelGPU& model, M2ModelGPU::BatchGPU& batch);
+    /// The sampler one batch or emitter samples a texture through, built
+    /// from its own wrap flags and the sky's mip bias; null when none could
+    /// be made.
+    VkSampler batchSampler(const VkTexture& texture, uint8_t texFlags) const;
+    /// The texture as an emitter's set samples it: its image, through
+    /// batchSampler.
     VkDescriptorImageInfo batchImageInfo(const VkTexture& texture, uint8_t texFlags) const;
+    /// The texture's place with batchSampler; kNoTextureHandle for none.
+    TextureHandle batchTextureHandle(const VkTexture* texture, TextureHandle image, uint8_t texFlags) const;
     /// Take what the loaded texture says about itself onto the batch.
     void applyBatchTextureProps(M2ModelGPU::BatchGPU& batch, const TextureInfo& texture) const;
-    /// Point a batch's descriptor set at its texture.
-    void writeBatchDescriptors(M2ModelGPU::BatchGPU& batch) const;
     /// Ask again for textures that failed to load, and show the batches that
     /// were hidden waiting for them. A failed MPQ read is often transient.
     void retryPendingBatchTextures();
@@ -1051,15 +1039,12 @@ private:
     /// runs long after that call and needs the same one.
     VkDescriptorSetLayout perFrameLayout_ = VK_NULL_HANDLE;
 
-    // Descriptor set layouts
-    VkDescriptorSetLayout materialSetLayout_ = VK_NULL_HANDLE;  // set 1
+    // Descriptor set layouts (set 1 is the texture table's)
     VkDescriptorSetLayout boneSetLayout_ = VK_NULL_HANDLE;      // set 2
     VkDescriptorSetLayout particleTexLayout_ = VK_NULL_HANDLE;  // particle set 1 (texture only)
 
     // Descriptor pools
     VkDescriptorPool materialDescPool_ = VK_NULL_HANDLE;
-    /// Every batch's material parameters (uniform_slot_pool.hpp).
-    std::shared_ptr<UniformSlotPool> materialSlots_;
     VkDescriptorPool boneDescPool_ = VK_NULL_HANDLE;
     std::shared_ptr<std::atomic<uint64_t>> boneDescPoolGeneration_ =
         std::make_shared<std::atomic<uint64_t>>(0);
@@ -1112,6 +1097,28 @@ private:
     struct InstanceStaticGPU {
         glm::mat4 model{1.0f};
         InteriorLightGPU interiorLight;
+    };
+    /// A batch's row of the material table (M2Material in m2_material.glsli,
+    /// std430): what its draws used to bind as a set of their own - the
+    /// parameters and the two textures - and what they pushed.
+    struct M2MaterialGPU {
+        TextureHandle texture = kNoTextureHandle;
+        TextureHandle secondTexture = kNoTextureHandle;
+        int32_t hasTexture = 0;
+        int32_t alphaTest = 0;
+        int32_t unlit = 0;
+        int32_t blendMode = 0;
+        float specularIntensity = 0.0f;
+        float emissiveBoost = 1.0f;
+        glm::vec4 tint{1.0f};
+        int32_t combiner = 0;
+        int32_t hasSecondTexture = 0;
+        int32_t texCoordSet = 0;
+        int32_t texCoordSet2 = 0;
+        int32_t isFoliage = 0;
+        float swayRefHeight = 0.0f;
+        float swayAmp = 0.0f;
+        float plantHeight = 0.0f;
     };
     // Bootstrap size only. Visible instances and per-batch UV records determine
     // each frame slot's capacity; scene models must not disappear at this size.
@@ -1176,26 +1183,58 @@ private:
                             .pageVertices = 1u << 19u, .pageIndices = 1u << 21u}};
     GpuSlotTable cullTable_{sizeof(CullRowGPU), "M2 cull table"};
     GpuSlotTable instanceTable_{sizeof(InstanceStaticGPU), "M2 instance table"};
+    /// Every batch's material, a row each, written only when a batch's
+    /// material changes. Rows are given out and written on the main thread
+    /// and ride in the extracted frames until one carrying them is
+    /// submitted, as the cull table's do; a row comes back after the frames
+    /// that may draw it, handed back by the thread that retires frames.
+    GpuSlotTable materialTable_{sizeof(M2MaterialGPU), "M2 material table"};
+    static constexpr uint32_t kNoMaterialRow = UINT32_MAX;
+    /// A row's pending serial while no extracted frame has carried it yet.
+    static constexpr uint32_t kMaterialRowUncarried = UINT32_MAX;
+    struct MaterialRows {
+        std::vector<M2MaterialGPU> data;        ///< by row, as last written
+        std::vector<uint32_t> free;
+        std::vector<uint32_t> pending;          ///< rows written and not yet known on the GPU
+        std::vector<uint32_t> pendingSerial;    ///< by row: the frame that carries it, 0 if none
+        struct Returned {
+            std::mutex mutex;
+            std::vector<uint32_t> rows;
+        };
+        std::shared_ptr<Returned> returned = std::make_shared<Returned>();
+    } materialRows_;
+    /// A row for a batch's material; UINT32_MAX never (the table grows).
+    uint32_t placeMaterialRow();
+    /// The row as the batch's draws will read it, from the next extracted
+    /// frame on.
+    void writeMaterialRow(uint32_t row, const M2MaterialGPU& material);
+    /// The row back once no frame in flight can draw with it.
+    void releaseMaterialRow(uint32_t row);
     /// The table version (GpuSlotTable::version) each slot's sets name, so
     /// they are rewritten when a table is replaced.
     uint32_t cullSetTableVersion_[2] = {};
     uint32_t instanceSetTableVersion_[2] = {};
+    uint32_t instanceSetMaterialVersion_[2] = {};
     uint32_t shadowSetTableVersion_[kShadowTexPoolFrames] = {};
     /// Per frame slot: the kept list read back.
     CullBuffer cullVisible_[2];
     /// A buffer for the kept list; false, logged, when there was no memory.
     bool makeCullBuffer(CullBuffer& into, uint32_t capacity, VkDeviceSize bytes, VkBufferUsageFlags usage,
                         VmaMemoryUsage memory, const char* what);
-    /// Both tables at least this large, and this slot's instance sets
-    /// naming the instance table. False, logged, when there was no memory
-    /// for one: the frame's models are not drawn.
-    bool ensureSlotTables(VkCommandBuffer cmd, uint32_t frameIndex, uint32_t slots);
+    /// The cull and instance tables room for `slots`, the material table for
+    /// `materialRows`, and this slot's sets naming them. False, logged, when
+    /// there was no memory for one: the frame's models are not drawn.
+    bool ensureSlotTables(VkCommandBuffer cmd, uint32_t frameIndex, uint32_t slots, uint32_t materialRows);
     /// This slot's kept list at least this large and its cull set naming
     /// it and the table. False, logged, when there was no memory: no cull.
     bool ensureCullOutput(uint32_t frameIndex, uint32_t slots);
-    /// Whether this slot's instance set names the instance table as it is.
+    /// The device's texture table at set 1 of pipelineLayout_.
+    void bindTextureTable(VkCommandBuffer cmd) const;
+    /// Whether this slot's instance set names the instance and material
+    /// tables as they are.
     [[nodiscard]] bool instanceSetReady(uint32_t frameIndex) const {
-        return instanceTable_.buffer() && instanceSetTableVersion_[frameIndex] == instanceTable_.version();
+        return instanceTable_.buffer() && instanceSetTableVersion_[frameIndex] == instanceTable_.version() &&
+               materialTable_.buffer() && instanceSetMaterialVersion_[frameIndex] == materialTable_.version();
     }
     /// The same for this slot's shadow caster set.
     [[nodiscard]] bool shadowSetReady(uint32_t frameIndex) const {
@@ -1333,7 +1372,7 @@ private:
     /// A model texture from the shared cache, loading it if it is not there;
     /// white when it cannot be had. The image is shared with every other
     /// renderer, so how a batch wraps or biases it is the batch's sampler's
-    /// business (batchImageInfo), not the texture's.
+    /// business (batchSampler), not the texture's.
     TextureRef loadTexture(const std::string& path);
     std::unordered_map<std::string, pipeline::BLPImage>* predecodedBLPCache_ = nullptr;
 
@@ -1754,7 +1793,6 @@ private:
                                const std::vector<VkTexture*>& allTextures);
 
     // Helper to allocate descriptor sets
-    VkDescriptorSet allocateMaterialSet();
     VkDescriptorSet allocateBoneSet();
 
     // Helper to destroy model GPU resources
@@ -1821,6 +1859,11 @@ public:
         std::vector<CullRowGPU> cullUpdateRows;
         std::vector<InstanceStaticGPU> instanceUpdateRows;
         bool cullReset = false;
+        /// The material rows written and not yet known to be on the GPU, as
+        /// they stand, and how many rows the table holds.
+        std::vector<uint32_t> materialUpdateSlots;
+        std::vector<M2MaterialGPU> materialUpdateRows;
+        uint32_t materialRowCount = 0;
         /// Slots the cull tests, this extracted frame's number, and the
         /// ranges its test reads.
         uint32_t cullSlotCount = 0, cullSerial = 0;
