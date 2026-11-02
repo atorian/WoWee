@@ -35,7 +35,5 @@
   "shadowQuality": 0,
   "lens": false,
   "terrain": true,
-  "terrainRadius": 5,
-  "settleFrames": 6000,
   "volumetricDensity": 1
 }

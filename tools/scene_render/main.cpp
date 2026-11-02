@@ -34,7 +34,12 @@
 //     "playerPosition": [5815,629,647],  // lighting/weather sample position,
 //                                         // render axes; default: model centre
 //     "terrain": false,                   // stream the map's terrain around it,
-//     "terrainRadius": 1,                 //   this many tiles out (3x3)
+//     "terrainRadius": 1,                 //   this many tiles out, and no
+//                                         //   landmark tiles past them; or as
+//                                         //   far as the client streams for
+//                                         //   "viewDistance" when that is named.
+//                                         //   The frames wait until all of it
+//                                         //   is in, however long that takes
 //     "models": [
 //       { "path": "World\\Azeroth\\Elwynn\\PassiveDoodads\\LampPost\\LampPost.m2",
 //         "offset": [0, 0, 0],             // render axes, from the origin
@@ -641,6 +646,61 @@ private:
     double windowMs_ = 0.0;
 };
 
+// Draws frames with the scene's clock held until its terrain is in; false,
+// having said why, if it never comes in.
+//
+// In when nothing is waiting and nothing more has arrived for a second of
+// frames: the manager asks for the tiles round the scene over its first
+// frames, so an empty queue on the first one is not yet the end. Nor are the
+// tiles all of it: a tile's models arrive after it, as their files load. One
+// that came in during the kept frames started its animation and its particles
+// that many frames late, so a torch differed from one run of the same scene
+// to the next.
+//
+// No count of frames ends the wait: a tile's upload is spread over frames by
+// time, so on a busy machine six hundred of them did not bring Stormwind in,
+// and the kept frame was drawn with none of its doodads. Only a stream that
+// never ends does, and that is a failure.
+bool streamTerrainIn(rendering::Renderer& renderer, const rendering::TerrainManager& terrain) {
+    constexpr int kSettledFrames = 30;
+    constexpr auto kSettleLimit = std::chrono::minutes(20);
+    constexpr auto kSettleReport = std::chrono::seconds(30);
+    const auto settleStart = std::chrono::steady_clock::now();
+    auto nextReport = settleStart + kSettleReport;
+    int waited = 0;
+    int settled = 0;
+    int lastLoaded = -1;
+    uint64_t lastModels = ~0ull;
+    for (; settled < kSettledFrames; ++waited) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - settleStart > kSettleLimit) {
+            std::fprintf(stderr, "scene_render: terrain still streaming after %d frames and %d minutes "
+                                 "(%d tiles in, %d to come); no picture drawn\n",
+                         waited, static_cast<int>(std::chrono::duration_cast<std::chrono::minutes>(kSettleLimit).count()),
+                         terrain.getLoadedTileCount(), terrain.getRemainingTileCount());
+            return false;
+        }
+        if (now >= nextReport) {
+            std::printf("scene_render: streaming terrain, %d frames: %d tiles in, %d to come\n",
+                        waited, terrain.getLoadedTileCount(), terrain.getRemainingTileCount());
+            std::fflush(stdout);
+            nextReport += kSettleReport;
+        }
+        renderer.update(0.0f);
+        renderer.beginFrame(renderer.extractFrameInputs());
+        renderer.renderWorld();
+        renderer.endFrame();
+        const int loaded = terrain.getLoadedTileCount();
+        const uint64_t models = (uint64_t{renderer.getM2Renderer()->getInstanceCount()} << 32) |
+                                renderer.getWMORenderer()->getInstanceCount();
+        settled = terrain.getRemainingTileCount() == 0 && loaded == lastLoaded && models == lastModels ? settled + 1 : 0;
+        lastLoaded = loaded;
+        lastModels = models;
+    }
+    std::printf("scene_render: terrain in after %d frames: %d tiles\n", waited, terrain.getLoadedTileCount());
+    return true;
+}
+
 int render(const json& scene, const std::string& outPath, pipeline::AssetManager& assets,
            rendering::Renderer& renderer, bool timing) {
     const std::string map = scene.value("map", "Northrend");
@@ -663,16 +723,18 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
         const auto [tileX, tileY] = core::coords::canonicalToTile(canonical.x, canonical.y);
         const std::string adt = "World\\Maps\\" + map + "\\" + map + "_" + std::to_string(tileX) +
                                 "_" + std::to_string(tileY) + ".adt";
+        if (scene.contains("terrainRadius") && scene.contains("viewDistance")) {
+            std::fprintf(stderr, "scene_render: \"terrainRadius\" and \"viewDistance\" both name the "
+                                 "tiles streamed; a scene names one\n");
+            return 1;
+        }
         if (!renderer.loadTestTerrain(&assets, adt)) {
             std::fprintf(stderr, "scene_render: no terrain at %s\n", adt.c_str());
             return 1;
         }
-        // The tiles around it, not the client's view distance of them: the
-        // frame waits for every tile it asks for.
-        const int radius = scene.value("terrainRadius", 1);
-        renderer.getTerrainManager()->setLoadRadius(radius);
-        renderer.getTerrainManager()->setUnloadRadius(radius + 2);
     }
+    if (scene.contains("settleFrames"))
+        LOG_WARNING("scene_render: settleFrames is obsolete; a terrain scene waits until its tiles are in");
 
     Bounds bounds;
     uint32_t modelId = 0xFFFF0400;
@@ -859,40 +921,22 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     // Dalaran's lamppost had the mountains of Northrend behind it in the kept
     // frame depended on how fast that job ran. In before the first frame.
     renderer.finishDistantTerrain();
-    const auto* terrain = renderer.getTerrainManager();
+    auto* terrain = renderer.getTerrainManager();
     const bool waitTerrain = scene.value("terrain", false) && terrain;
+    if (waitTerrain && !scene.contains("viewDistance")) {
+        // The tiles the scene names, not the client's view distance of them.
+        // After the distant terrain: its arrival sets the view distance again,
+        // and with it the client's radii and the landmark tiles beyond them -
+        // fifty tiles round Stormwind for a scene that asked for nine.
+        const int radius = scene.value("terrainRadius", 1);
+        terrain->setLandmarkRadius(0);
+        terrain->setLoadRadius(radius);
+        terrain->setUnloadRadius(radius + 2);
+    }
     if (waitTerrain) {
         environment.realmSeconds = realmTime;
         renderer.setWorldEnvironment(environment);
-        // In when nothing is waiting and nothing more has arrived for a second
-        // of frames: the manager asks for the tiles round the scene over its
-        // first frames, so an empty queue on the first one is not yet the end.
-        // Nor are the tiles all of it: a tile's models arrive after it, as
-        // their files load. One that came in during the kept frames started
-        // its animation and its particles that many frames late, so a torch
-        // differed from one run of the same scene to the next.
-        constexpr int kSettledFrames = 30;
-        int waited = 0;
-        int settled = 0;
-        int lastLoaded = -1;
-        uint64_t lastModels = ~0ull;
-        for (; waited < scene.value("settleFrames",600) && settled < kSettledFrames; ++waited) {
-            renderer.update(0.0f);
-            renderer.beginFrame(renderer.extractFrameInputs());
-            renderer.renderWorld();
-            renderer.endFrame();
-            const int loaded = terrain->getLoadedTileCount();
-            const uint64_t models = (uint64_t{renderer.getM2Renderer()->getInstanceCount()} << 32) |
-                                    renderer.getWMORenderer()->getInstanceCount();
-            settled = terrain->getRemainingTileCount() == 0 && loaded == lastLoaded && models == lastModels ? settled + 1 : 0;
-            lastLoaded = loaded;
-            lastModels = models;
-        }
-        if (terrain->getRemainingTileCount() > 0) {
-            std::fprintf(stderr, "scene_render: %d terrain tiles still streaming after %d frames; "
-                                 "drawing without them\n",
-                         static_cast<int>(terrain->getRemainingTileCount()), waited);
-        }
+        if (!streamTerrainIn(renderer, *terrain)) return 1;
     }
     int frame = 0;
     SceneCapture capture(renderer, frame, frames - 1);

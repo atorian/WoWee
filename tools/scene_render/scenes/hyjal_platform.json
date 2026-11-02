@@ -9,8 +9,6 @@
     140
   ],
   "terrain": true,
-  "terrainRadius": 5,
-  "settleFrames": 6000,
   "camera": {
     "offset": [
       0,

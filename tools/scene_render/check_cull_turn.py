@@ -48,7 +48,7 @@ def scene(look_at, last=None, frames=FRAMES):
         # The client derives the tiles it streams from the view distance once
         # the map's distant terrain is in; the shortest keeps them few, and
         # the frames wait as long as they take.
-        "server": [-9440.0, 70.0, 56.5], "terrain": True, "viewDistance": 400, "settleFrames": 6000,
+        "server": [-9440.0, 70.0, 56.5], "terrain": True, "viewDistance": 400,
         "camera": camera, "size": [WIDTH, HEIGHT], "frames": frames,
         "rayTracedLighting": 0, "volumetricFog": 0, "shadowQuality": 2, "msaa": 1,
         "bloom": 0, "clouds": False, "sunShafts": False,

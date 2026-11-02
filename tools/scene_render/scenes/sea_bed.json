@@ -33,6 +33,5 @@
   "wind": {
     "direction": 0.0,
     "speed": 9.0
-  },
-  "settleFrames": 20000
+  }
 }
