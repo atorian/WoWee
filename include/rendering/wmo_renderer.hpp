@@ -19,7 +19,6 @@
 #include "rendering/geometry_pool.hpp"
 
 #include "pipeline/blp_loader.hpp"
-#include "pipeline/grass_clearing.hpp"
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
@@ -405,16 +404,6 @@ public:
                      const float /*ambientColor*/[3]) {}
     void setShadowMap(uint32_t /*depthTex*/, const glm::mat4& /*lightSpace*/) {}
     void clearShadowMap() {}
-
-    /**
-     * Append the 2D footprints of instances touching the given window, for
-     * the grass generator's clearings - grass grows short and sparse beside
-     * a building the way it does beside a road. Per-group boxes rather than
-     * the instance's outer bounds: a keep's outer box swallows its own
-     * courtyards, and a courtyard is exactly where grass belongs.
-     */
-    void collectGrassClearings(float minX, float minY, float maxX, float maxY,
-                               std::vector<pipeline::GrassClearingSource>& out) const;
 
     /// Changes whenever what is drawn does: an instance created or removed, a
     /// model finished loading or unloaded.

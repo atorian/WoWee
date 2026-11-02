@@ -567,15 +567,6 @@ void SettingsPanel::renderSettingsWindow(ChatPanel& chatPanel,
                 ImGui::SeparatorText("Detail");
                 drawSchemaCategory("Detail", saveCallback);
 
-                // From the schema, like everything else on this tab: the four
-                // grass controls were drawn by hand here with labels and a lone
-                // tooltip of their own, so the interface's options page and this
-                // window explained the same sliders differently, and three of
-                // them not at all. The schema's own heading follows.
-                ImGui::Spacing();
-                ImGui::SeparatorText("Grass");
-                drawSchemaCategory("Grass", saveCallback);
-
                 ImGui::Spacing();
                 ImGui::SeparatorText("Ray Tracing (highly experimental)");
                 drawSchemaCategory("Ray Tracing", saveCallback);
@@ -827,7 +818,6 @@ constexpr const char* kGraphicsPresetKeys[] = {
     "viewdistance", "shadows", "shadowdistance", "antialiasing", "fxaa",
     "normalmapping", "normalmapstrength", "parallax", "parallaxquality",
     "groundclutter",
-    "grassenabled", "grassdensity", "grassheight", "grassdistance",
 };
 
 /// Every graphics setting that has to reach something when it is loaded.
@@ -845,8 +835,7 @@ static_assert(cameraDistanceFactor(50) - rendering::CameraController::kMaxDistan
 constexpr const char* kGraphicsApplyKeys[] = {
     "viewdistance", "shadows", "shadowdistance", "antialiasing", "fxaa",
     "normalmapping", "normalmapstrength", "parallax", "parallaxquality",
-    "groundclutter", "grassenabled", "grassdensity", "grassheight",
-    "grassdistance", "waterrefraction", "upscaling", "fsrquality",
+    "groundclutter", "waterrefraction", "upscaling", "fsrquality",
     "fsrsharpness", "framegen", "brightness", "uiopacity", "minimapsquare",
     "minimapnpcdots", "minimapclock", "minimapcoords", "minimaprotate", "latencymeter",
     "fogstrength", "fogheightinfluence", "aerialraymarching", "sharpstars", "lightshafts", "mistdensity", "sunshafts",
@@ -898,10 +887,6 @@ void SettingsPanel::applyGraphicsPreset(GraphicsPreset preset) {
         pendingPOM               = p.parallax;
         pendingPOMQuality        = p.parallaxQuality;
         pendingGroundClutterDensity = p.groundClutter;
-        pendingGrassEnabled      = p.grass;
-        pendingGrassDensity      = p.grassDensity;
-        pendingGrassHeight       = p.grassHeight;
-        pendingGrassDistance     = p.grassDistance;
         // Each one goes to the thing it affects through the one function that
         // knows where that is, rather than through a second copy of the same
         // renderer calls written out here.
@@ -939,13 +924,7 @@ void SettingsPanel::updateGraphicsPresetFromCurrentSettings() {
             pendingFXAA == p.fxaa &&
             pendingNormalMapping == p.normalMapping &&
             pendingPOM == p.parallax &&
-            std::abs(pendingGroundClutterDensity - p.groundClutter) <= 10 &&
-            pendingGrassEnabled == p.grass &&
-            // As with shadows: a preset that grows no grass says nothing about
-            // how dense, how tall or how far it would have been.
-            (!p.grass || (std::abs(pendingGrassDensity - p.grassDensity) <= 5 &&
-                          std::abs(pendingGrassHeight - p.grassHeight) <= 5 &&
-                          std::abs(pendingGrassDistance - p.grassDistance) <= 10));
+            pendingGroundClutterDensity == p.groundClutter;
         if (matches) {
             pendingGraphicsPreset = static_cast<GraphicsPreset>(i + 1);
             return;
@@ -999,10 +978,6 @@ constexpr FieldBinding kFieldBindings[] = {
     {.key = "minimapclock",   .asBool  = &SettingsPanel::pendingShowMinimapClock},
     {.key = "friendlyplates", .asBool  = &SettingsPanel::showFriendlyNameplates_},
     {.key = "enemyplates",    .asBool  = &SettingsPanel::showEnemyNameplates_},
-    {.key = "grassenabled",   .asBool  = &SettingsPanel::pendingGrassEnabled},
-    {.key = "grassdensity",   .asInt   = &SettingsPanel::pendingGrassDensity},
-    {.key = "grassheight",    .asInt   = &SettingsPanel::pendingGrassHeight},
-    {.key = "grassdistance",  .asInt   = &SettingsPanel::pendingGrassDistance},
     // Not a fraction any more. These two crossed the bridge as 0-1.5 and 0-1
     // while their fields held 0-150 and 0-100, which was invisible while the
     // only control for them was drawn here from the field. They are schema
@@ -1206,20 +1181,12 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
     } else if (key == "waterrefraction") {
         if (renderer) renderer->setWaterRefractionEnabled(pendingWaterRefraction);
     } else if (key == "groundclutter") {
-        if (renderer) {
-            if (auto* tm = renderer->getTerrainManager()) {
-                tm->setGroundClutterDensityScale(
-                    static_cast<float>(pendingGroundClutterDensity) / 100.0f);
-            }
-        }
+        if (renderer) renderer->setGroundEffectDensity(static_cast<uint32_t>(pendingGroundClutterDensity));
     } else if (key == "groundclutterdistance") {
         // The five below reach the same code the game's own Effects panel
         // reached through LuaServices. They are settings rather than cvars
         // now; kClientCVars keeps the cvar pointing at the same value.
-        if (renderer) {
-            if (auto* m2 = renderer->getM2Renderer())
-                m2->setGroundDetailDistance(static_cast<float>(pendingGroundClutterDistance));
-        }
+        if (renderer) renderer->setGroundEffectDistance(static_cast<float>(pendingGroundClutterDistance));
     } else if (key == "particledensity") {
         if (renderer) {
             if (auto* m2 = renderer->getM2Renderer())
@@ -1430,18 +1397,6 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
                     ac->onOriginalSoundtrackDisabled(zm);
                 }
             }
-        }
-    } else if (key == "grassenabled" || key == "grassdensity" || key == "grassheight" ||
-               key == "grassdistance") {
-        // Grass belonged in its own branch all along. These calls were sitting
-        // inside the soundtrack's, so changing the soundtrack applied the grass
-        // settings and changing a grass setting did nothing at all - the key
-        // matched no branch and fell out of the bottom.
-        if (renderer) {
-            renderer->setGrassEnabled(pendingGrassEnabled);
-            renderer->setGrassScales(static_cast<float>(pendingGrassDensity) / 100.0f,
-                                     static_cast<float>(pendingGrassHeight) / 100.0f);
-            renderer->setGrassDistance(static_cast<float>(pendingGrassDistance));
         }
     } else if (key == "chatboxvisible") {
         // Applied by deactivating every box that is not being typed in - see

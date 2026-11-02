@@ -15,7 +15,6 @@ namespace {
 constexpr AblationPass kOrder[] = {
     AblationPass::None,
     AblationPass::Terrain,
-    AblationPass::Grass,
     AblationPass::WMO,
     AblationPass::M2,
     AblationPass::Clutter,
@@ -36,7 +35,6 @@ const char* ablationPassName(AblationPass pass) {
     switch (pass) {
         case AblationPass::None:       return "baseline";
         case AblationPass::Terrain:    return "terrain";
-        case AblationPass::Grass:      return "grass";
         case AblationPass::WMO:        return "wmo";
         case AblationPass::M2:         return "doodads (clutter included)";
         case AblationPass::Clutter:    return "ground clutter alone";

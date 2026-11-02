@@ -512,9 +512,6 @@ bool Application::initialize() {  // NOLINT(readability-function-size)
     // The renderer knows terrain and the sounds it places; which zone that
     // terrain is and what plays there are the client's, joined here.
     zoneTracker_ = std::make_unique<ZoneTracker>();
-    renderer->setAreaZoneResolver([zones = zoneTracker_.get()](uint32_t areaId) {
-        return zones->resolveAreaZoneId(areaId);
-    });
     renderer->setAmbientEmitterSink([audio = audioCoordinator_.get()](const glm::vec3& position,
                                                                         uint32_t type) {
         if (auto* ambient = audio->getAmbientSoundManager()) {
@@ -1130,8 +1127,7 @@ bool Application::initialize() {  // NOLINT(readability-function-size)
             if (window) window->setShouldClose(true);
         };
         luaSvc.setGroundDetailDistance = [this](float yards) {
-            if (!renderer) return;
-            if (auto* m2 = renderer->getM2Renderer()) m2->setGroundDetailDistance(yards);
+            if (renderer) renderer->setGroundEffectDistance(yards);
         };
         luaSvc.setAnisotropyLimit = [this](float limit) {
             if (auto* window = this->window.get()) {

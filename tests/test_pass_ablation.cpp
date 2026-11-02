@@ -44,7 +44,7 @@ TEST_CASE("a run walks every pass and ends on the baseline") {
     CHECK_FALSE(ablation.skip(AblationPass::None));
 
     const AblationPass expected[] = {
-        AblationPass::Terrain,    AblationPass::Grass, AblationPass::WMO,
+        AblationPass::Terrain,    AblationPass::WMO,
         AblationPass::M2,         AblationPass::Clutter,
         AblationPass::FarDoodads,
         AblationPass::Characters, AblationPass::Sky,   AblationPass::Shadows,
@@ -111,7 +111,7 @@ TEST_CASE("a pass is worth the frame time it takes away, and drift is reported")
     // Baseline at 20ms, terrain phase at 8ms, everything else back at 20ms,
     // and the closing baseline at 21ms - a millisecond of drift over the run.
     const double phaseMs[] = {20.0, 8.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0,
-                              20.0, 20.0, 21.0};
+                              20.0, 21.0};
     REQUIRE(sizeof(phaseMs) / sizeof(phaseMs[0]) == PassAblation::phaseCount());
     for (double ms : phaseMs) runPhase(ablation, ms);
 
@@ -153,7 +153,7 @@ TEST_CASE("a run the world moved under is called what it is") {
     // was up, a ruinous terrain phase taken while the zone streamed in, and a
     // closing baseline nowhere near the opening one.
     const double phaseMs[] = {5.0, 123.0, 21.0, 18.0, 17.0, 17.0, 17.0, 20.0, 20.0, 17.0, 17.0, 17.0,
-                              17.0, 17.0, 20.0};
+                              17.0, 20.0};
     REQUIRE(sizeof(phaseMs) / sizeof(phaseMs[0]) == PassAblation::phaseCount());
     for (double ms : phaseMs) runPhase(ablation, ms);
 
@@ -165,7 +165,7 @@ TEST_CASE("a run the world moved under is called what it is") {
 TEST_CASE("a steady run is not called into question") {
     PassAblation ablation(100.0, 0.0, 0.0);
     const double phaseMs[] = {20.0, 8.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0,
-                              20.0, 20.0, 21.0};
+                              20.0, 21.0};
     REQUIRE(sizeof(phaseMs) / sizeof(phaseMs[0]) == PassAblation::phaseCount());
     for (double ms : phaseMs) runPhase(ablation, ms);
     CHECK(ablation.report().find("not a measurement") == std::string::npos);

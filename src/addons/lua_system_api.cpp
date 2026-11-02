@@ -690,7 +690,9 @@ static void pushCvarDefault(lua_State* L, const std::string& n) {  // NOLINT(rea
     // The top of the slider: this client has always drawn at 16x, so anything
     // less would be a quality setting the player never asked for.
     else if (n == "texturefilteringmode") lua_pushstring(L, "5");
-    else if (n == "groundeffectdist") lua_pushstring(L, "140");
+    // The client's own defaults (WoW.exe 12340, 0x78e780).
+    else if (n == "groundeffectdist") lua_pushstring(L, "70");
+    else if (n == "groundeffectdensity") lua_pushstring(L, "16");
     // Level 3 is 4096, which is the shadow map this client drew before the
     // setting existed. Answering the size it has always used keeps a player who
     // never touches this from being quietly downgraded by it appearing.
@@ -1098,11 +1100,8 @@ constexpr ClientCVarBinding kClientCVars[] = {
     {"nameplateshowfriends", "friendlyplates"},
     // Not gxWindow: it is the fullscreen row the other way round, which a scale
     // cannot say, so GetCVar and SetCVar carry it by hand.
-    // 64 doodads is the most Blizzard's slider asks for and 150 percent the
-    // most this client draws, so one of theirs is 150/64 of ours. It was
-    // 1.5/64 while the setting travelled as a fraction; the setting is the
-    // percentage the panel shows now, and this is the one place that knows.
-    {"groundeffectdensity",  "groundclutter", 150.0 / 64.0},
+    // The setting is the client's own groundEffectDensity, in its units.
+    {"groundeffectdensity",  "groundclutter"},
     // The rest of what the game's own Effects panel used to drive. That
     // panel is retired and these are rows in the schema now, but the cvars
     // stay bound to them: an addon or a macro writing particleDensity still

@@ -162,6 +162,12 @@ struct TerrainMesh {
  *
  * Converts ADT heightmap data into renderable triangle meshes
  */
+/// A point on a chunk's drawn surface and the normal of the triangle under it.
+struct ChunkSurfaceSample {
+    glm::vec3 point{0.0f};
+    glm::vec3 normal{0.0f, 0.0f, 1.0f};
+};
+
 class TerrainMeshGenerator {
 public:
     /**
@@ -193,6 +199,15 @@ public:
     static glm::vec3 chunkSurfacePoint(const float chunkPosition[3],
                                        const HeightMap& heightMap,
                                        float fracX, float fracY, float unitSize);
+
+    /**
+     * chunkSurfacePoint with the normal of the terrain triangle the point
+     * lies on - the plane the client stands ground clutter on and lights it
+     * by. Pointing up.
+     */
+    static ChunkSurfaceSample chunkSurfaceSample(const float chunkPosition[3],
+                                                 const HeightMap& heightMap,
+                                                 float fracX, float fracY, float unitSize);
 
     /**
      * Where a world position falls inside a chunk, in the 0..8 grid fractions

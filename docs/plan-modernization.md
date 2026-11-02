@@ -275,8 +275,8 @@ not what this plan is for, and it is a large change to material binding across f
 plus `nonuniformEXT` in the shaders.
 
 Its actual value is as an **enabler**: a bindless material array is what lets the GPU choose a
-material without the CPU binding one, which is a precondition for GPU-driven terrain and for the
-indirect path `docs/plan-grass.md` describes. Justify it from that work when it arrives, with a
+material without the CPU binding one, which is a precondition for GPU-driven terrain. Justify it
+from that work when it arrives, with a
 feature that needs it, rather than as a modernization step on its own.
 
 ### Phase 9 — Vulkan: synchronization2 + dynamic rendering (one change, or neither)
@@ -290,8 +290,7 @@ masks into Metal's coarser model, so most of the precision advantage is lost on 
 platform. Requires bumping `require_api_version` to 1.3 or enabling both extensions with feature
 structs — check the hardware floor that implies first.
 
-**Exit:** zero legacy `vkCmdPipelineBarrier`, zero `vkCreateRenderPass`, validation clean, and
-`docs/plan-grass.md` §2 deviation row flipped to sync2.
+**Exit:** zero legacy `vkCmdPipelineBarrier`, zero `vkCreateRenderPass`, validation clean.
 
 ### Phase 10 — Lock it in
 Tighten `.clang-tidy` now that the codebase can pass more: add the `modernize-*` checks

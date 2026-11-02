@@ -37,7 +37,7 @@ constexpr SettingDesc kSchema[] = {
     // no line here needs to say what it depends on.
     {"graphicspreset", "Quality preset", SettingKind::Enum, 0, 4, 1, "Graphics", "Quality",
      "Sets every graphics option at once: view distance, shadows,\n"
-     "anti-aliasing, surface detail, ground clutter and grass.\n"
+     "anti-aliasing, surface detail and ground clutter.\n"
      "Change any one of them afterwards and this reads Custom.",
      "Custom|Low|Medium|High|Ultra", 0},
     // No shadows row, because turning them off crashes the client.
@@ -144,14 +144,16 @@ constexpr SettingDesc kSchema[] = {
     // pixels, which test_settings_panel_layout measures, and Graphics uses
     // most of them. These are the settings that describe how much of the
     // world is drawn rather than how it is lit.
-    {"groundclutter", "Ground clutter", SettingKind::Int, 0, 150, 5, "Detail", "Ground cover",
-     "How many small plants, tufts and stones are scattered over the\n"
-     "ground, as a percentage of what the zone asks for. 100 is as\n"
-     "designed; above it is denser than the original client drew.", "", 70},
-    {"groundclutterdistance", "Ground clutter distance", SettingKind::Int, 70, 300, 10,
+    // The client's own Ground Clutter Density and Radius - groundEffectDensity
+    // and groundEffectDist - with their ranges and defaults.
+    {"groundclutter", "Ground clutter", SettingKind::Int, 16, 256, 16, "Detail", "Ground cover",
+     "How many patches of each stretch of ground grow grass, flowers\n"
+     "and stones, as the original client counts them: 16 is its\n"
+     "default, 256 covers nearly all of it.", "", 16},
+    {"groundclutterdistance", "Ground clutter distance", SettingKind::Int, 70, 140, 10,
      "Detail", "",
-     "How far out that clutter is drawn, in yards. Past this it simply\n"
-     "is not there, so a short distance is a visible edge on open ground.", "", 140},
+     "How far ahead that clutter is drawn, in yards; it fades out over\n"
+     "the last part of it. 70 is the original client's default.", "", 70},
 
     {"normalmapping", "Surface bumps (normal mapping)", SettingKind::Bool, 0, 0, 0, "Detail", "Surfaces",
      "Light stone, wood, cloth, metal and the ground by their surface\n"
@@ -259,27 +261,6 @@ constexpr SettingDesc kSchema[] = {
      "Which way FSR 3's sub-pixel jitter is applied. 0.38 is the value that\n"
      "currently looks right; the rest of the range is for finding out why.", "", 0.38f, "upscaling=2"},
 #endif
-
-    // Their own category, which the interface's options panel turns into its
-    // own page. They belong beside ground clutter under Graphics, but that
-    // page is full - two rows pushed lens flare and sharp stars off the bottom
-    // of its second column, which test_settings_panel_layout catches - and a
-    // setting a player cannot find is not a setting.
-    {"grassenabled", "Grass (experimental)", SettingKind::Bool, 0, 0, 0,
-     "Grass", "Ground cover (experimental)",
-     "Grow grass from the terrain's own ground-effect data, bending in\n"
-     "the wind and parting as you walk through it. Experimental: it\n"
-     "costs time on the main thread as you move and has known faults.", "", 0},
-    {"grassdensity", "Grass density", SettingKind::Float, 0, 300, 5, "Grass", "",
-     "How much grass grows, as a percentage of what the terrain asks\n"
-     "for. 100 is as designed.", "", 100, "grassenabled"},
-    {"grassheight", "Grass height", SettingKind::Float, 50, 300, 5, "Grass", "",
-     "How tall the blades grow, as a percentage. Taller grass shows\n"
-     "the wind crossing it more.", "", 100, "grassenabled"},
-    {"grassdistance", "Grass distance", SettingKind::Float, 30, 2000, 5, "Grass", "",
-     "How far out grass is drawn, in yards. Beyond 45 the field thins\n"
-     "with distance and each blade fades in as you ride toward it.\n"
-     "Farther costs more each time you move.", "", 150, "grassenabled"},
 
     // ----------------------------------------------------------------- Display
     {"fullscreen", "Fullscreen", SettingKind::Bool, 0, 0, 0, "Display", "Screen",

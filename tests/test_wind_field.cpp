@@ -1,4 +1,4 @@
-// The wind: one field over the trees, their shadows, the cloth and the grass,
+// The wind: one field over the trees, their shadows and the cloth,
 // drawn from the realm's clock and the zone (WindField, wind_zones.json).
 //
 // What matters about it is what two players standing side by side see: the
@@ -102,12 +102,9 @@ void requireInStep(const WindState& a, const WindState& b, double tolerance) {
     CHECK(a.speed == Approx(b.speed).margin(1e-6));
     CHECK(a.swing == Approx(b.swing).margin(1e-6));
     for (auto [pa, pb] : {std::pair{a.trunkPhase, b.trunkPhase}, {a.branchPhase, b.branchPhase},
-                          {a.leafPhase, b.leafPhase}, {a.clothPhase, b.clothPhase},
-                          {a.rustlePhase, b.rustlePhase}}) {
+                          {a.leafPhase, b.leafPhase}, {a.clothPhase, b.clothPhase}}) {
         CHECK(samePhase(pa, pb, WindField::kPhaseWrap, tolerance));
     }
-    CHECK(samePhase(a.waveTravel, b.waveTravel, WindField::kTravelWrap, tolerance));
-    CHECK(samePhase(a.gustTravel, b.gustTravel, WindField::kTravelWrap, tolerance));
 }
 
 }  // namespace
@@ -385,36 +382,4 @@ TEST_CASE("A tree leans downwind whichever way it faces", "[wind][shader]") {
         CHECK(glm::length(mean) > 0.1f);
         CHECK(glm::dot(glm::normalize(mean), downwind) > 0.98f);
     }
-}
-
-TEST_CASE("Grass bends downwind, and further in a stronger wind", "[wind][shader]") {
-    const WindZoneTable table = parseWindZones(kTable, "test");
-    const float toward = 300.0f;
-    const glm::vec2 downwind(std::cos(glm::radians(toward)), std::sin(glm::radians(toward)));
-
-    auto meanBend = [&](float speed) {
-        WindField field;
-        WindInputs in = at(kRealmNow);
-        in.fixedWind = WindOverride{toward, speed};
-        field.update(kFrame, in, table.defaultRow(), table);
-        toPerFrame(field.gpu());
-        glm::vec2 mean(0.0f);
-        int blades = 0;
-        for (int x = 0; x < 40; ++x) {
-            for (int y = 0; y < 40; ++y) {
-                const glm::vec2 root(-9000.0f + x * 1.7f, 300.0f + y * 1.3f);
-                const glm::vec3 bend = wind_shader::grassWindBend(
-                    wind_shader::perFrameGrassWind(), root, std::fmod(x * 0.37f + y * 0.61f, 1.0f));
-                mean += glm::vec2(bend.x, bend.y) * bend.z;
-                ++blades;
-            }
-        }
-        return mean / static_cast<float>(blades);
-    };
-
-    const glm::vec2 breeze = meanBend(2.0f);
-    const glm::vec2 gale = meanBend(12.0f);
-    CHECK(glm::dot(glm::normalize(breeze), downwind) > 0.98f);
-    CHECK(glm::dot(glm::normalize(gale), downwind) > 0.98f);
-    CHECK(glm::length(gale) > glm::length(breeze) * 1.5f);
 }

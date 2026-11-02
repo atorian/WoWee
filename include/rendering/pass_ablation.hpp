@@ -10,7 +10,6 @@ namespace wowee::rendering {
 enum class AblationPass {
     None = 0,
     Terrain,
-    Grass,
     WMO,
     M2,
     Clutter,

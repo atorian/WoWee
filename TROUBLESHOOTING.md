@@ -144,7 +144,7 @@ Graphics Preset: LOW
 - MSAA: OFF
 - Normal Mapping: Disabled
 - Surface depth (parallax): Disabled
-- Ground clutter: 25%
+- Ground clutter: 16
 ```
 
 ### For Mid-Range GPUs
@@ -154,7 +154,7 @@ Graphics Preset: MEDIUM
 - Shadow distance: 200 yards
 - MSAA: 2x
 - Normal Mapping: On (0.6 strength)
-- Ground clutter: 60%
+- Ground clutter: 32
 - Upscaling: FSR 1 or FSR 3 (optional)
 ```
 
@@ -165,8 +165,7 @@ Graphics Preset: HIGH or ULTRA
 - Shadow distance: 350-500 yards
 - MSAA: 4-8x
 - Normal Mapping: On (0.8-1.2 strength)
-- Ground clutter: 100-150%
-- Grass: On with Ultra
+- Ground clutter: 64-256 (the original client's 16-256), distance 70-140 yards
 - Upscaling: FSR 3 (optional, for 4K)
 ```
 

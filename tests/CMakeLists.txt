@@ -2343,7 +2343,7 @@ wowee_add_test(test_m2_sway
     SOURCES test_m2_sway.cpp)
 
 # ── test_wind_field ──────────────────────────────────────────
-# The one wind over the trees, their shadows, the cloth and the grass: two
+# The one wind over the trees, their shadows and the cloth: two
 # clients reading the same realm clock in the same zone blow the same wind,
 # a change eases in without a tree jumping, and wind_zones.json's rows match
 # the places they name.
@@ -3317,56 +3317,14 @@ wowee_add_test(test_adt_alpha
             ${TEST_COMMON_SOURCES})
 target_link_libraries(test_adt_alpha PRIVATE wowee_pipeline)
 
-# ── test_grass_terrain ─────────────────────────────────
-# Whether grass grows at a point, answered from the ADT's own ground-effect
-# ids rather than from a classifier of ours. Headless: the chunks are built by
-# hand, so this needs no device, no tile and no world.
-wowee_add_test(test_grass_terrain
-    SOURCES test_grass_terrain.cpp
+# ── test_detail_doodads ────────────────────────────────
+# Ground clutter laid out by the client's rules: which quads of a chunk grow
+# anything, what grows there and how it stands. Headless: the chunks are built
+# by hand.
+wowee_add_test(test_detail_doodads
+    SOURCES test_detail_doodads.cpp
             ${TEST_COMMON_SOURCES})
-target_link_libraries(test_grass_terrain PRIVATE wowee_pipeline)
-
-# ── test_grass_population ──────────────────────────────
-# Blades generated from terrain suitability. Most of these cases are one
-# property from different angles: a blade's identity comes from its world
-# lattice cell and nothing else, so rebuilding the population as the player
-# moves cannot shuffle the field.
-wowee_add_test(test_grass_population
-    SOURCES test_grass_population.cpp
-            ${TEST_COMMON_SOURCES})
-target_link_libraries(test_grass_population PRIVATE wowee_pipeline)
-
-# ── test_grass_profile ─────────────────────────────────
-# What grass looks like on a patch of ground, from the detail doodads the map
-# places there. The asset names carry the classification, so nothing here knows
-# what a zone is - a profile needing a per-zone correction would be the wrong
-# shape entirely.
-wowee_add_test(test_grass_profile
-    SOURCES test_grass_profile.cpp)
-target_link_libraries(test_grass_profile PRIVATE wowee_pipeline)
-
-# ── test_grass_biomes ──────────────────────────────────
-# The per-zone look table: parsing, subzone-over-zone matching, and that an
-# override multiplies the scales and replaces the colours it names while
-# leaving everything else the effect data derived.
-wowee_add_test(test_grass_biomes
-    SOURCES test_grass_biomes.cpp)
-target_link_libraries(test_grass_biomes PRIVATE wowee_pipeline)
-
-# ── test_grass_clearing ────────────────────────────────
-# The clearings the placed world presses into the grass: box distance, the
-# cleared ring, the ease band, and the minimum across overlapping sources.
-wowee_add_test(test_grass_clearing
-    SOURCES test_grass_clearing.cpp)
-target_link_libraries(test_grass_clearing PRIVATE wowee_pipeline)
-
-# ── test_grass_cull_math ───────────────────────────────
-# The frustum arithmetic the grass cull performs, run for a camera turned all
-# the way round. Grass vanishing in one world direction is a claim about this
-# and nothing else, and it is cheaper to measure than to reason about.
-wowee_add_test(test_grass_cull_math
-    SOURCES test_grass_cull_math.cpp)
-target_link_libraries(test_grass_cull_math PRIVATE wowee_render)
+target_link_libraries(test_detail_doodads PRIVATE wowee_pipeline)
 
 # ── test_pass_ablation ───────────────────────────────
 # The phase walk and the arithmetic of the ablation report. It is the only

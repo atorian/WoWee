@@ -44,10 +44,6 @@
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/wmo_night_glow.hpp"
 #include "rendering/m2_renderer.hpp"
-#include "pipeline/grass_profile.hpp"
-#include "pipeline/grass_population.hpp"
-#include "pipeline/grass_terrain.hpp"
-#include "rendering/grass_renderer.hpp"
 #include "rendering/volumetric_fog.hpp"
 #include "rendering/sky_background.hpp"
 #include "rendering/sun_shafts.hpp"
@@ -1103,13 +1099,13 @@ bool Renderer::initialize(RenderSurface* surface) {
     lootSparkles_ = std::make_unique<LootSparkles>();
     corpseBones_ = std::make_unique<CorpseBones>();
 
-    // Non-fatal like the effects above: a device that cannot build the compute
-    // pipeline still gets everything else, and isReady() gates both call sites.
-    grassRenderer_ = std::make_unique<GrassRenderer>();
-    if (!grassRenderer_->initialize(vkCtx, perFrameSetLayout))
-        LOG_WARNING("Grass renderer initialization failed (non-fatal)");
-    // The distance setting may have been applied before this existed.
-    grassRenderer_->setCullDistance(grassDistance_);
+    // Non-fatal like the effects above (it has said why); isReady() gates
+    // its call sites. The settings may have been applied before it existed.
+    detailDoodads_ = std::make_unique<DetailDoodadRenderer>();
+    if (!detailDoodads_->initialize(vkCtx, perFrameSetLayout))
+        LOG_WARNING("Ground clutter is not drawn this session");
+    detailDoodads_->setDensity(groundEffectDensity_);
+    detailDoodads_->setDistance(groundEffectDistance_);
 
     questMarkerRenderer = std::make_unique<QuestMarkerRenderer>();
     footprintRenderer = std::make_unique<FootprintRenderer>();
@@ -1123,9 +1119,10 @@ bool Renderer::initialize(RenderSurface* surface) {
     //
     // WOWEE_SINGLE_THREAD_RECORD takes the fallback path instead. That path
     // records the world inline on one thread, which costs CPU time but marks
-    // every pass separately - grass included, where the parallel path records
-    // grass into the terrain secondary and so reports the two as one number.
-    // Running a frame profile both ways says how much of "terrain" is grass,
+    // every pass separately - ground clutter included, where the parallel path
+    // records it into the terrain secondary and so reports the two as one
+    // number. Running a frame profile both ways says how much of "terrain" is
+    // clutter,
     // and whether serialising the recording moves the frame time at all.
     if (std::getenv("WOWEE_PASS_ABLATION") != nullptr) {
         passAblation_ = std::make_unique<PassAblation>();
@@ -1303,17 +1300,10 @@ void Renderer::shutdown() {
         wmoRenderer.reset();
     }
 
-    if (grassRenderer_) {
-        // The whole session in one line, at the end where the bounded log
-        // cannot rotate it away before anyone reads it.
-        if (grassRebuilds_ > 0) {
-            LOG_INFO("Grass session: ", grassRebuilds_, " rebuilds, last population ",
-                     grassLastCount_, " blades, ", grassProfiles_.size(),
-                     " profiles derived, worst generate ",
-                     static_cast<int>(grassWorstGenerateMs_), "ms");
-        }
-        grassRenderer_->shutdown();
-        grassRenderer_.reset();
+    if (detailDoodads_) {
+        if (terrainManager) terrainManager->setDetailDoodadRenderer(nullptr);
+        detailDoodads_->shutdown();
+        detailDoodads_.reset();
     }
 
     LOG_DEBUG("Renderer::shutdown - m2Renderer...");
@@ -1418,7 +1408,7 @@ void Renderer::applyMsaaChange() {
 
     // Recreate all sub-renderer pipelines (they embed sample count from render pass)
     if (terrainRenderer) terrainRenderer->recreatePipelines();
-    if (grassRenderer_) grassRenderer_->recreatePipelines();
+    if (detailDoodads_) detailDoodads_->recreatePipelines();
     if (distantTerrain_) distantTerrain_->recreatePipeline();
     if (waterRenderer) {
         waterRenderer->recreatePipelines();
@@ -1495,8 +1485,8 @@ FrameInputs Renderer::extractFrameInputs() {
         skyboxModelRenderer_->setSkyTimeOfDay(lightingManager->getTimeOfDayHours());
         skyboxModelRenderer_->update(0.016f, camera->getViewMatrix(), camera->getProjectionMatrix());
     }
-    updateGrassPopulation();
-    extraction.lap("grass population");
+    updateDetailDoodads();
+    extraction.lap("ground clutter");
     FrameInputs in;
     in.worldEpoch = worldEpoch_;
     in.capture = extractCaptureRequest();
@@ -1684,7 +1674,7 @@ FrameInputs Renderer::extractFrameInputs() {
                                                          glm::mat4(0.0f), 1.0f);
     }
     extraction.lap("sky models");
-    if (grassRenderer_) scene->grass = grassRenderer_->extract();
+    if (detailDoodads_) scene->detailDoodads = detailDoodads_->extract(in.camera);
     if (questMarkerRenderer) scene->markers = questMarkerRenderer->extract(in.camera, in.time);
     if (footprintRenderer) scene->footprints = footprintRenderer->extract(in.camera);
     if (skySystem) {
@@ -1987,17 +1977,6 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
         terrainRenderer->dispatchCull(currentCmd, frame, frameInputs_.scene->terrain,
                                       localLightBuffers_[frame].buffer,
                                       static_cast<uint32_t>(currentFrameData.localLightMeta.x));
-    }
-
-    // Grass culls here too, for the same reason: a dispatch has to be recorded
-    // outside a render pass. Unlike the M2 path nothing reads the result back -
-    // the count it produces is consumed by the indirect draw on the GPU.
-    if (grassRenderer_ && frameCamera() && vkCtx) {
-        CpuStage stage(stages, "beginFrame", "grass");
-        GpuPass pass(*vkCtx, currentCmd, "grass cull");
-        grassRenderer_->reportCullResult();
-        grassRenderer_->dispatchCull(currentCmd, vkCtx->getCurrentFrame(), *frameCamera(),
-                                     frameInputs_.characterPosition, frameInputs_.scene->grass);
     }
 
     // --- Off-screen pre-passes ---
@@ -2804,49 +2783,26 @@ void Renderer::setFSR2Enabled(bool enabled) {
     }
     postProcessPipeline_->setFSR2Enabled(enabled);
 }
-void Renderer::setGrassEnabled(bool enabled) {
-    if (enabled == grassEnabled_) return;
-    grassEnabled_ = enabled;
-    if (!enabled && grassRenderer_) {
-        // Empty the population rather than just skipping the draw: a blade
-        // count of zero is what stops the cull dispatching too, and the buffer
-        // it was holding is the point of turning it off.
-        grassRenderer_->setPopulation(nullptr, 0);
-    }
-    grassBuilder_ = pipeline::GrassPopulationBuilder{};
-    grassWindowValid_ = false;
+void Renderer::setGroundEffectDensity(uint32_t quadDraws) {
+    groundEffectDensity_ = std::clamp(quadDraws, pipeline::kMinGroundEffectDensity,
+                                      pipeline::kMaxGroundEffectDensity);
+    if (detailDoodads_) detailDoodads_->setDensity(groundEffectDensity_);
 }
 
-void Renderer::setGrassScales(float density, float height) {
-    // Up to triple. Density past 1 costs generation time and can meet the
-    // blade cap, which thins the whole window rather than cutting a side off
-    // it; height past 1 costs nothing.
-    const float d = glm::clamp(density, 0.0f, 3.0f);
-    const float h = glm::clamp(height, 0.5f, 3.0f);
-    if (d == grassDensityScale_ && h == grassHeightScale_) return;
-    grassDensityScale_ = d;
-    grassHeightScale_ = h;
-    // The live population was generated with the old numbers, so it has to go
-    // rather than wait for the player to walk far enough to be rebuilt - and
-    // so does a build in progress, which froze them when it began.
-    grassBuilder_ = pipeline::GrassPopulationBuilder{};
-    grassWindowValid_ = false;
+void Renderer::setGroundEffectDistance(float yards) {
+    groundEffectDistance_ = std::clamp(yards, 1.0f, pipeline::kMaxGroundEffectDist);
+    if (detailDoodads_) detailDoodads_->setDistance(groundEffectDistance_);
 }
 
-void Renderer::setGrassDistance(float yards) {
-    // The slider's own range. The ceiling is generosity rather than promise:
-    // a 0.4 yard blade is under a pixel tall past a couple of hundred yards,
-    // so the far end of a long range is carried by the taller seeded stems
-    // and by density, not by every blade surviving.
-    const float d = glm::clamp(yards, 30.0f, 2000.0f);
-    if (d == grassDistance_) return;
-    grassDistance_ = d;
-    if (grassRenderer_) grassRenderer_->setCullDistance(d);
-    // Regenerate: the window radius and the falloff are both functions of the
-    // distance, so neither the live population nor a build in progress
-    // matches it any more.
-    grassBuilder_ = pipeline::GrassPopulationBuilder{};
-    grassWindowValid_ = false;
+void Renderer::updateDetailDoodads() {
+    if (!detailDoodads_ || !detailDoodads_->isReady() || !terrainManager || !camera) return;
+    // A chunk in view whose nearest point is within the distance ahead can be
+    // as far to the side as the view is wide; a square view of up to 90
+    // degrees reaches the distance's diagonal, plus the chunk's own half.
+    const float reach = groundEffectDistance_ * 1.5f + 24.0f;
+    const glm::vec3 eye = camera->getPosition();
+    terrainManager->collectDetailChunks(glm::vec2(eye), reach, detailChunksScratch_);
+    detailDoodads_->update(*camera, detailChunksScratch_, terrainManager->groundEffects());
 }
 
 void Renderer::updateWind(float deltaTime) {
@@ -2881,7 +2837,6 @@ void Renderer::updateWind(float deltaTime) {
     // over a scene's.
     inputs.weatherKind = weather_.target().kind;
     inputs.weatherIntensity = weather_.target().intensity;
-    inputs.pivot = glm::dvec2(characterPosition.x, characterPosition.y);
     inputs.fixedWind = weatherControls_.wind ? weatherControls_.wind : environment_.wind;
     CpuStageTimes* stages = vkCtx ? &vkCtx->gameCpuStages() : nullptr;
     {
@@ -2943,420 +2898,6 @@ void Renderer::updateWaterWake(float deltaTime) {
     waterRenderer->advanceWake(deltaTime, glm::vec2(eye), movers);
 }
 
-uint32_t Renderer::grassProfileFor(uint32_t effectId, uint32_t areaId) {
-    // The biome table, read once. Its absence is fine - grass then looks the
-    // way the effect data alone says - but a file that exists and does not
-    // parse is an authoring error worth a line.
-    if (!grassBiomesLoaded_) {
-        grassBiomesLoaded_ = true;
-        std::ifstream f("assets/grass_biomes.json");
-        if (f) {
-            const std::string text((std::istreambuf_iterator<char>(f)),
-                                   std::istreambuf_iterator<char>());
-            std::string parseError;
-            grassBiomes_ = pipeline::loadGrassBiomes(text, parseError);
-            if (!parseError.empty()) {
-                LOG_WARNING("Grass biomes: ", parseError);
-            } else {
-                LOG_INFO("Grass biomes: ", grassBiomes_.size(), " regions");
-            }
-        }
-    }
-
-    // Which biome this ground belongs to, memoised per area: the zone walk
-    // costs a few map lookups and this is called for every sampled blade.
-    uint32_t biomeIdx = 0;
-    const auto cachedBiome = grassBiomeForArea_.find(areaId);
-    if (cachedBiome != grassBiomeForArea_.end()) {
-        biomeIdx = cachedBiome->second;
-    } else {
-        const uint32_t zoneId = areaZoneResolver_ ? areaZoneResolver_(areaId) : areaId;
-        biomeIdx = grassBiomes_.findFor(areaId, zoneId);
-        grassBiomeForArea_[areaId] = biomeIdx;
-    }
-
-    // Derived once per (biome, effect) and kept. The table is uploaded whole
-    // whenever it grows, which happens a handful of times as the player
-    // crosses into ground they have not stood on before and then stops.
-    const uint64_t key = (static_cast<uint64_t>(biomeIdx) << 32) | effectId;
-    const auto known = grassProfileIndex_.find(key);
-    if (known != grassProfileIndex_.end()) return known->second;
-
-    std::vector<std::string> models;
-    std::vector<uint32_t> weights;
-    if (terrainManager) terrainManager->getGroundEffectDoodads(effectId, models, weights);
-
-    pipeline::GrassProfile profile = pipeline::deriveProfile(models, weights);
-    if (const auto* biome = grassBiomes_.biome(biomeIdx)) {
-        biome->override_.apply(profile);
-    }
-
-    uint32_t index = 0;
-    if (grassProfiles_.size() < GrassRenderer::kMaxProfiles) {
-        index = static_cast<uint32_t>(grassProfiles_.size());
-        grassProfiles_.push_back(profile);
-    }
-    grassProfileIndex_[key] = index;
-    return index;
-}
-
-void Renderer::updateGrassPopulation() {
-    if (!grassEnabled_) return;
-    if (!grassRenderer_ || !grassRenderer_->isReady() || !terrainManager) return;
-
-    // How far out blades are generated, and how far the player may walk before
-    // the window is rebuilt. Both follow the grass distance setting. The
-    // margin between them is the invariant: at its stalest the window centre
-    // lags the player by a full step, so the grass ahead reaches
-    // (radius - step) - and that must clear the cull distance, or the field
-    // ends at a visible edge on one side of the player and pops forward on
-    // every rebuild. The first numbers this had put the window *inside* the
-    // cull distance, which is exactly how it looked; building the radius as
-    // distance + step keeps the margin by construction at every distance the
-    // slider allows.
-    // Constant, not scaled by the distance setting: the octave walk made
-    // rebuild cost grow with the log of the window rather than its area, so
-    // frequent small steps beat rare big ones - and the slack every ring
-    // must carry to cover a stale centre is the step, which at three
-    // hundred yards would have meant full-density generation far past the
-    // near field.
-    const float rebuildStep = 24.0f;
-    const float windowRadius = grassDistance_ + rebuildStep;
-    const float rebuildStepSq = rebuildStep * rebuildStep;
-
-    const glm::vec3 center = characterPosition;
-    if (glm::dot(center, center) <= 0.0f) return;  // no character yet
-
-    // Whether a new build has to start. While one is running the comparison
-    // is against its centre rather than the live window's, so walking far
-    // during a long build restarts it around where the player now is instead
-    // of finishing a window they have already left.
-    bool needBegin;
-    if (grassBuilder_.active()) {
-        const glm::vec2 moved(center.x - grassBuildCenter_.x, center.y - grassBuildCenter_.y);
-        needBegin = glm::dot(moved, moved) >= rebuildStepSq;
-    } else if (grassWindowValid_) {
-        const glm::vec2 moved(center.x - grassWindowCenter_.x, center.y - grassWindowCenter_.y);
-        needBegin = glm::dot(moved, moved) >= rebuildStepSq;
-    } else {
-        needBegin = true;
-    }
-    if (!needBegin && !grassBuilder_.active()) return;
-
-    // One chunk decoded at a time. populateArea walks cells in world order, so
-    // consecutive samples land in the same chunk and this memo almost always
-    // hits - without it every candidate would decode the chunk's alpha maps
-    // again, which is four kilobytes a layer for each of tens of thousands.
-    const pipeline::MapChunk* cached = nullptr;
-    const TerrainTile* cachedTile = nullptr;
-    pipeline::ChunkGrassContext context;
-    auto densityFor = [this](uint32_t effectId) {
-        return terrainManager->getGroundEffectDensity(effectId);
-    };
-    // One-shot diagnostic: which link in the chain is empty. A population of
-    // zero can mean no chunk under the sample, no effect id on its layers, or
-    // an effect the table grows nothing for, and the three are indistinguish-
-    // able from the outside.
-    static bool reportedChain = false;
-    size_t noChunk = 0;
-    size_t sampled = 0;
-
-    // A chunk is 33 yards across and candidates are a third of a yard apart, so
-    // a hundred consecutive samples land in the chunk the last one did. Testing
-    // that chunk before searching for another is what takes this off the frame:
-    // findChunkAt is a tile lookup and a 3x3 probe, and running it per sample
-    // was most of the cost.
-    constexpr float kUnitSize = core::coords::TILE_SIZE / 16.0f / 8.0f;
-
-    auto sampler = [&](float wx, float wy) -> pipeline::GrassSuitability {
-        float fracX = 0.0f;
-        float fracY = 0.0f;
-        ++sampled;
-        const pipeline::MapChunk* chunk = nullptr;
-        if (cached && pipeline::TerrainMeshGenerator::chunkFractionsAt(
-                          cached->position, wx, wy, kUnitSize, fracX, fracY)) {
-            chunk = cached;
-        } else {
-            chunk = terrainManager->findChunkAt(wx, wy, fracX, fracY, &cachedTile);
-        }
-        if (!chunk) { ++noChunk; return {}; }
-        if (chunk != cached) {
-            // The texture names live on the tile, which pipeline code never
-            // sees, so they arrive as a lookup. build() uses them to keep
-            // grass off made surfaces; nothing else can, because a road's
-            // ground effect is as real as a meadow's.
-            const TerrainTile* tile = cachedTile;
-            auto textureNameFor = [tile](uint32_t texId) -> std::string {
-                if (!tile || texId >= tile->terrain.textures.size()) return {};
-                return tile->terrain.textures[texId];
-            };
-            context = pipeline::ChunkGrassContext{};
-            context.build(*chunk, densityFor, textureNameFor);
-
-            // Reported for the first few chunks that carry a made surface, at
-            // a level the default log actually keeps. Grass on cobblestone has
-            // survived two fixes that each looked right, so this is the code
-            // saying what it sees rather than me saying what it should - and
-            // aimed at the chunks in question rather than at whichever chunk
-            // happened to be sampled first.
-            static int reportedRoadChunks = 0;
-            bool anyRoad = false;
-            for (size_t i = 0; i < std::min<size_t>(chunk->layers.size(), 4); ++i) {
-                anyRoad = anyRoad ||
-                          pipeline::isRoadLikeTexture(textureNameFor(chunk->layers[i].textureId));
-            }
-            if (anyRoad && reportedRoadChunks < 4) {
-                ++reportedRoadChunks;
-                std::string detail;
-                for (size_t i = 0; i < std::min<size_t>(chunk->layers.size(), 4); ++i) {
-                    const std::string name = textureNameFor(chunk->layers[i].textureId);
-                    detail += "\n    [" + std::to_string(i) + "] tex=" +
-                              std::to_string(chunk->layers[i].textureId) + " '" +
-                              (name.empty() ? std::string("<no name>") : name) + "' effect=" +
-                              std::to_string(chunk->layers[i].effectId) +
-                              (pipeline::isRoadLikeTexture(name) ? " ROAD" : "") +
-                              (context.grows[i] ? " grows" : " bare");
-                }
-                LOG_WARNING("Grass road chunk: ", chunk->layers.size(), " layers", detail);
-            }
-
-            // Any water over this chunk. Sampled once here rather than per
-            // blade: a pond's surface is flat, and three hundred thousand
-            // height queries a rebuild is not.
-            {
-                const float cx = chunk->position[0] - 4.0f * kUnitSize;
-                const float cy = chunk->position[1] - 4.0f * kUnitSize;
-                if (const auto level = liquidScene_.heightAt(cx, cy)) {
-                    context.waterHeight = *level;
-                    context.hasWater = true;
-                }
-            }
-
-            // The tones the ground is painted in, for colouring the blades.
-            const size_t n = std::min<size_t>(chunk->layers.size(), 4);
-            for (size_t i = 0; i < n; ++i) {
-                const std::string name = textureNameFor(chunk->layers[i].textureId);
-                if (name.empty()) continue;
-                const auto tones = terrainManager->getTerrainTextureTones(name);
-                context.layerShadow[i] = tones.shadow;
-                context.layerHighlight[i] = tones.highlight;
-                context.hasLayerColors = true;
-            }
-            cached = chunk;
-            if (!reportedChain) {
-                reportedChain = true;
-                std::string layers;
-                for (size_t i = 0; i < chunk->layers.size(); ++i) {
-                    layers += " [" + std::to_string(i) +
-                              "] effect=" + std::to_string(chunk->layers[i].effectId) +
-                              " density=" +
-                              std::to_string(terrainManager->getGroundEffectDensity(
-                                  chunk->layers[i].effectId));
-                }
-                const auto fit = pipeline::evaluateGrass(context, *chunk, fracX, fracY);
-                LOG_INFO("Grass chain: chunk at (", wx, ",", wy, ") frac=(", fracX, ",", fracY,
-                         ") layers=", chunk->layers.size(), layers,
-                         " -> suitability=", fit.suitability, " slope=", fit.slope);
-            }
-        }
-        auto fit = pipeline::evaluateGrass(context, *chunk, fracX, fracY);
-        // The terrain's verge eased toward roads; the placed world eases the
-        // same number toward walls and wagon wheels.
-        if (fit.suitability > 0.0f) {
-            fit.wildness = std::min(fit.wildness, grassClearing_.wildness(wx, wy));
-        }
-        return fit;
-    };
-
-    pipeline::GrassPopulationParams params;
-    params.densityScale = grassDensityScale_;
-    params.baseHeight *= grassHeightScale_;
-    // Full density out to the base range; past it the lattice coarsens by
-    // octaves, so the long ranges the slider allows cost blades - and build
-    // time - by the log of the radius rather than by its area. The slack
-    // keeps blades in the buffer a rebuild step before they fade in, so a
-    // ride toward them never outruns the window.
-    params.fullDensityRadius = GrassRenderer::kCullDistance;
-    params.ringSlack = rebuildStep;
-
-    // Zero means the player turned grass off. Said out loud once: a density of
-    // zero produces an empty population through a chain that is otherwise
-    // working perfectly, and nothing about that looks like a setting rather
-    // than a fault.
-    if (params.densityScale <= 0.0f) {
-        static bool warnedDisabled = false;
-        if (!warnedDisabled) {
-            warnedDisabled = true;
-            LOG_WARNING("Grass: density is 0, so no grass will grow. "
-                        "Raise Grass Density in Settings > Graphics to see any.");
-        }
-        grassBuilder_ = pipeline::GrassPopulationBuilder{};
-        grassRenderer_->setPopulation(nullptr, 0);
-        grassWindowCenter_ = center;
-        grassWindowValid_ = true;
-        return;
-    }
-
-    if (needBegin) {
-        // Clearings around the built and the placed, gathered once per
-        // rebuild: the terrain's own verges handle roads and paths, but a
-        // building is a placement, and only its renderer knows where it is.
-        std::vector<pipeline::GrassClearingSource> clearings;
-        const float winMinX = center.x - windowRadius;
-        const float winMaxX = center.x + windowRadius;
-        const float winMinY = center.y - windowRadius;
-        const float winMaxY = center.y + windowRadius;
-        if (wmoRenderer) {
-            wmoRenderer->collectGrassClearings(winMinX, winMinY, winMaxX, winMaxY, clearings);
-        }
-        if (m2Renderer) {
-            m2Renderer->collectGrassClearings(winMinX, winMinY, winMaxX, winMaxY, clearings);
-        }
-        grassClearing_.build(std::move(clearings), winMinX, winMinY, winMaxX, winMaxY);
-
-        grassBuilder_.begin(center.x, center.y, windowRadius, params,
-                            GrassRenderer::kMaxBlades);
-        grassBuildCenter_ = center;
-    }
-
-    // WOWEE_GRASS_DEBUG=1: everything about the ground the player is standing
-    // on. Screenshots cannot say whether a stretch of cobble resolved to a
-    // road layer that was suppressed, a dirt layer that was not, or a grass
-    // layer underneath showing through - and those want three different fixes.
-    // Once per build, not per slice.
-    if (needBegin && rendering::envFlagEnabled("WOWEE_GRASS_DEBUG")) {
-        float fx = 0.0f;
-        float fy = 0.0f;
-        const TerrainTile* tile = nullptr;
-        if (const pipeline::MapChunk* here =
-                terrainManager->findChunkAt(center.x, center.y, fx, fy, &tile)) {
-            auto nameFor = [tile](uint32_t texId) -> std::string {
-                if (!tile || texId >= tile->terrain.textures.size()) return {};
-                return tile->terrain.textures[texId];
-            };
-            pipeline::ChunkGrassContext ctx;
-            ctx.build(*here, densityFor, nameFor);
-            std::string report;
-            for (size_t i = 0; i < std::min<size_t>(here->layers.size(), 4); ++i) {
-                const uint32_t texId = here->layers[i].textureId;
-                const std::string name = nameFor(texId).empty() ? std::string("<none>")
-                                                                : nameFor(texId);
-                const bool road = pipeline::isRoadLikeTexture(name);
-                report += "\n    [" + std::to_string(i) + "] effect=" +
-                          std::to_string(here->layers[i].effectId) + " density=" +
-                          std::to_string(terrainManager->getGroundEffectDensity(
-                              here->layers[i].effectId)) +
-                          (road ? " ROAD-SUPPRESSED " : " ") + name;
-            }
-            const auto fit = pipeline::evaluateGrass(ctx, *here, fx, fy);
-            // The no-effect mask in full, plus the player's own quad. Stand on
-            // a farm row or an abbey floor and this is the line that says
-            // whether the data flags it and whether the bit order reads it
-            // the right way round.
-            const int qx = std::clamp(static_cast<int>(fx), 0, 7);
-            const int qy = std::clamp(static_cast<int>(fy), 0, 7);
-            LOG_INFO("Grass under player: frac=(", fx, ",", fy, ") suitability=",
-                     fit.suitability, " growsAnything=", ctx.growsAnything ? 1 : 0,
-                     " noEffectDoodad=0x", std::hex, here->noEffectDoodad, std::dec,
-                     " thisQuad=", here->isEffectDisabled(qy, qx) ? "no-grow" : "grows",
-                     " mappedLayer=", here->effectLayerFor(qy, qx),
-                     report);
-        }
-    }
-
-    const size_t profilesBefore = grassProfiles_.size();
-    auto profileFor = [this](uint32_t effectId, uint32_t areaId) {
-        pipeline::GrassProfileRef ref;
-        ref.index = grassProfileFor(effectId, areaId);
-        const auto& p = grassProfiles_[ref.index];
-        ref.heightScale = p.heightScale;
-        ref.widthScale = p.widthScale;
-        ref.densityScale = p.densityScale;
-        return ref;
-    };
-
-    // A bounded number of lattice blocks per frame, so a rebuild costs the
-    // same per frame at any window size - a large one just takes more frames
-    // and the field grows in when it lands. Since the octave walk, nearly
-    // every block surveyed becomes a terrain sample, so the budget is set by
-    // the cost of sampling rather than of walking: small enough to stay off
-    // the frame, large enough that a default window lands in a few slices.
-    constexpr size_t kCellsPerSlice = 64000;
-    const auto started = std::chrono::steady_clock::now();
-    const bool done = grassBuilder_.step(sampler, profileFor, kCellsPerSlice);
-
-    // Only when it grew, and after every slice rather than at the end: the
-    // shaders index this by blade, so it has to reach the device before the
-    // population that refers to it does.
-    if (grassProfiles_.size() != profilesBefore) {
-        grassRenderer_->setProfiles(grassProfiles_);
-    }
-    const double generateMs =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-    grassWorstGenerateMs_ = std::max(grassWorstGenerateMs_, generateMs);
-    if (!done) return;
-
-    std::vector<pipeline::GrassBladeSample>& blades = grassBuilder_.blades();
-    const bool complete = grassBuilder_.complete();
-    if (!complete) {
-        // The window met the blade cap. The generator thins uniformly when it
-        // can see this coming, so meeting it anyway means the density slider
-        // and the terrain conspired past the estimate - worth a line, because
-        // the visible symptom is a field that ends early on its north side.
-        LOG_WARNING("Grass population truncated at ", blades.size(),
-                    " blades; lower Grass Density or Grass Distance");
-    }
-
-    // WOWEE_GRASS_DUMP=1: write the first generated population to a CSV so
-    // the field's actual shape around the player can be analysed offline. The
-    // cull reports a stable 2-3x more grass kept looking one way than the
-    // other, which is a claim about where blades are, and this answers it.
-    static const bool dumpPopulation = rendering::envFlagEnabled("WOWEE_GRASS_DUMP");
-    if (dumpPopulation) {
-        static bool dumped = false;
-        if (!dumped && !blades.empty()) {
-            dumped = true;
-            std::ofstream out("grass_population.csv");
-            out << "# player," << center.x << "," << center.y << "," << center.z << "\n";
-            for (const auto& b : blades) {
-                out << b.x << "," << b.y << "," << b.z << "," << b.height << "\n";
-            }
-            LOG_INFO("Grass population dumped: ", blades.size(), " blades");
-        }
-    }
-
-    grassRenderer_->setPopulation(blades.data(), blades.size());
-    // The build's centre, not where the player stands now: they may have
-    // walked most of a rebuild step while the window generated, and measuring
-    // future movement from here rather than from them is what keeps the
-    // stale-window margin honest.
-    grassWindowCenter_ = grassBuildCenter_;
-    grassWindowValid_ = true;
-    ++grassRebuilds_;
-    grassLastCount_ = blades.size();
-
-    const double totalMs =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-    if (!blades.empty()) {
-        float minZ = blades[0].z, maxZ = blades[0].z;
-        float minH = blades[0].height, maxH = blades[0].height;
-        for (const auto& b : blades) {
-            minZ = std::min(minZ, b.z); maxZ = std::max(maxZ, b.z);
-            minH = std::min(minH, b.height); maxH = std::max(maxH, b.height);
-        }
-        LOG_INFO("Grass extent: player=(", center.x, ",", center.y, ",", center.z,
-                 ") bladeZ=[", minZ, ",", maxZ, "] height=[", minH, ",", maxH,
-                 "] first=(", blades[0].x, ",", blades[0].y, ",", blades[0].z, ")");
-    }
-    if (blades.empty()) {
-        LOG_INFO("Grass population empty: ", sampled, " samples, ", noChunk,
-                 " with no chunk under them");
-    }
-    LOG_INFO("Grass population rebuilt: ", blades.size(), " blades, final slice ",
-             static_cast<int>(totalMs), "ms (generate ", static_cast<int>(generateMs),
-             "ms, density ", params.densityScale, ", distance ", grassDistance_, ")",
-             complete ? "" : " - hit the blade cap");
-}
 
 void Renderer::renderSkyBackground(float timeOfDay,
                                    bool drawSkyModels, bool useOriginalSkybox) {
@@ -3427,11 +2968,11 @@ void Renderer::renderWorld() {  // NOLINT(readability-function-size)
     const bool skipM2 = envSkipM2 || ablated(AblationPass::M2);
     const bool skipTerrain = envSkipTerrain || ablated(AblationPass::Terrain);
     const bool skipSky = envSkipSky || ablated(AblationPass::Sky);
-    const bool skipGrass = ablated(AblationPass::Grass);
+    const bool skipClutter = ablated(AblationPass::Clutter);
     // The terrain chooses its chunks' detail by their triangles' size in the
     // image it is drawn into, which an upscaler makes smaller than the window.
     if (m2Renderer) {
-        m2Renderer->setSkipGroundDetail(ablated(AblationPass::Clutter));
+        m2Renderer->setSkipGroundDetail(skipClutter);
         // 250 yards: past the shadow distance and well past where a tree with
         // no LOD is still worth every triangle it has.
         m2Renderer->setDoodadDistanceCap(ablated(AblationPass::FarDoodads) ? 250.0f : 0.0f);
@@ -3476,19 +3017,19 @@ void Renderer::renderWorld() {  // NOLINT(readability-function-size)
         // --- Dispatch worker threads (terrain + WMO + M2) ---
         std::future<double> terrainFuture, wmoFuture, charFuture, m2Future, postFuture;
 
-        // Grass rides in the terrain secondary: it sits on the ground, and
-        // that buffer is executed after the sky and before WMO, which is
-        // exactly the order grass wants. Recording it there touches only the
-        // one worker's command buffer.
+        // Ground clutter rides in the terrain secondary: it sits on the
+        // ground, and that buffer is executed after the sky and before WMO,
+        // which is exactly the order clutter wants. Recording it there
+        // touches only the one worker's command buffer.
         //
         // So the buffer is recorded when EITHER wants it, not when terrain
         // does. Hanging it off terrain alone meant that switching terrain off
-        // took grass with it - which for a crash bisect is harmless and for an
-        // ablation is the whole measurement, since the terrain phase would
-        // then be reporting what terrain and grass cost together.
+        // took the clutter with it - which for a crash bisect is harmless and
+        // for an ablation is the whole measurement, since the terrain phase
+        // would then be reporting what terrain and clutter cost together.
         const bool drawTerrain = terrainRenderer && frameCamera() && frameInputs_.terrainEnabled && !skipTerrain;
-        const bool drawGrass = grassRenderer_ && !skipGrass;
-        if (drawTerrain || drawGrass) {
+        const bool drawClutter = detailDoodads_ && !skipClutter;
+        if (drawTerrain || drawClutter) {
             terrainFuture = core::ThreadPool::frameWorkers().submit("record: terrain", [&]() -> double {
                 auto t0 = std::chrono::steady_clock::now();
                 VkCommandBuffer cmd = beginSecondary(SEC_TERRAIN);
@@ -3497,7 +3038,7 @@ void Renderer::renderWorld() {  // NOLINT(readability-function-size)
                     if(distantTerrain_)distantTerrain_->record(cmd,perFrameSet,frameInputs_.scene->distantTerrain);
                     terrainRenderer->recordView(cmd, perFrameSet, frameInputs_.scene->terrain);
                 }
-                if (drawGrass) grassRenderer_->record(cmd, frameIdx, perFrameSet, frameInputs_.scene->grass);
+                if (drawClutter) detailDoodads_->record(cmd, perFrameSet, frameInputs_.scene->detailDoodads);
                 vkEndCommandBuffer(cmd);
                 return std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
@@ -3754,7 +3295,7 @@ void Renderer::renderWorld() {  // NOLINT(readability-function-size)
         };
         if (wmoRenderer && frameCamera() && !skipWMO)
             queue(secondaryCmds_[SEC_WMO][frameIdx], "wmo");
-        if (drawTerrain || drawGrass)
+        if (drawTerrain || drawClutter)
             queue(secondaryCmds_[SEC_TERRAIN][frameIdx], "terrain");
         queue(secondaryCmds_[SEC_SKY][frameIdx], "sky");
         queue(secondaryCmds_[SEC_SELECTION][frameIdx], "selection");
@@ -3812,11 +3353,11 @@ void Renderer::renderWorld() {  // NOLINT(readability-function-size)
                 std::chrono::steady_clock::now() - terrainStart).count();
         }
 
-        // After terrain, before the world's models: grass sits on the ground and
-        // is occluded by everything standing on it.
-        if (grassRenderer_ && vkCtx && !skipGrass) {
-            GpuPass pass(*vkCtx, currentCmd, "grass");
-            grassRenderer_->record(currentCmd, vkCtx->getCurrentFrame(), perFrameSet, frameInputs_.scene->grass);
+        // After terrain, before the world's models: clutter sits on the ground
+        // and is occluded by everything standing on it.
+        if (detailDoodads_ && vkCtx && !skipClutter) {
+            GpuPass pass(*vkCtx, currentCmd, "ground clutter");
+            detailDoodads_->record(currentCmd, perFrameSet, frameInputs_.scene->detailDoodads);
         }
 
         if (skySystem && frameCamera() && !skipSky) {
@@ -4514,6 +4055,10 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         // Set WMO renderer for building loading during streaming
         if (wmoRenderer) {
             terrainManager->setWMORenderer(wmoRenderer.get());
+        }
+        // The ground clutter's models load with the tiles that plant them.
+        if (detailDoodads_ && detailDoodads_->isReady()) {
+            terrainManager->setDetailDoodadRenderer(detailDoodads_.get());
         }
         // A WMO's child M2 doodads - a ship's sails, its paddlewheel - are moved
         // and destroyed through this pointer. It was never set, so every one of

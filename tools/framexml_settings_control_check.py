@@ -345,7 +345,8 @@ do
     {"view distance", "View distance"},
     -- One control with two names, in both directions.
     {"sensitivity", "sensitivity"},
-    {"grass", "Grass"},
+    -- What the clutter is, which only its description says.
+    {"grass", "Ground clutter"},
     -- The description is searched as well as the name.
     {"fps", "Frame rate limit"},
     {"edges", "FXAA"},

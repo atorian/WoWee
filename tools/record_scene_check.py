@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Count world recording paths that read mutable producer-side scene state.
 
-Colour, depth, particles, water, grass, sky, weather and overlays must consume
+Colour, depth, particles, water, ground clutter, sky, weather and overlays must consume
 extracted draw data. GPU preparation may update frame slots and acceleration
 structures, but must not walk live instances, streaming lists or simulations.
 Interface composites consume extracted data too. sweep_guard holds the count
@@ -15,7 +15,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 FILES = tuple("src/rendering/" + name + ".cpp" for name in (
     "m2_renderer", "m2_renderer_render", "m2_renderer_particles", "m2_renderer_instance",
     "m2_renderer_posed_emitters", "wmo_renderer", "character_renderer", "terrain_renderer",
-    "terrain_bake", "distant_terrain", "water_renderer", "grass_renderer", "sky_system", "skybox", "clouds",
+    "terrain_bake", "distant_terrain", "water_renderer", "detail_doodad_renderer", "sky_system", "skybox", "clouds",
     "starfield", "lens_flare", "precipitation", "ocean_waves", "water_wake", "mount_dust",
     "swim_effects", "lightning", "charge_effect", "quest_marker_renderer", "footprint_renderer",
     "overlay_system", "volumetric_fog", "rt_scene", "renderer", "renderer_results", "minimap",
@@ -29,7 +29,7 @@ LIVE = {
     "TerrainBake": r"atlases_",
     "DistantTerrain": r"gpu_|pending_|map_|source_|setMap|update",
     "WaterRenderer": r"drawn_|gameUBO_|inView_|renderingEnabled",
-    "GrassRenderer": r"population_|profiles_|cullDistance_",
+    "DetailDoodadRenderer": r"chunks_|models_|textures_|distance_|density_",
     "SkySystem": r"proceduralStarsEnabled_|debugSkyMode_",
     "Clouds": r"windOffset_|density_|enabled_",
     "StarField": r"twinkleTime|renderingEnabled",

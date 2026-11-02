@@ -121,13 +121,14 @@ TEST_CASE("the graphics defaults have one home", "[settings]") {
     // The same two numbers were written in the settings panel, in the login
     // screen's copy of the same struct, and in the reset button's constant.
     CHECK(wowee::ui::kDefaultViewDistance == 1900.0f);
-    CHECK(wowee::ui::kDefaultGroundClutter == 70);
+    // The original client's groundEffectDensity default.
+    CHECK(wowee::ui::kDefaultGroundClutter == 16);
 
     // And they have to be reachable on the sliders that show them, or the
     // panel opens on a value it cannot represent.
     CHECK(wowee::ui::kDefaultViewDistance >= wowee::rendering::kMinViewDistance);
     CHECK(wowee::ui::kDefaultViewDistance <= wowee::rendering::kMaxViewDistance);
-    CHECK(wowee::ui::kDefaultGroundClutter >= 0);
+    CHECK(wowee::ui::kDefaultGroundClutter >= 16);
     CHECK(wowee::ui::kDefaultGroundClutter <= 150);
 }
 
@@ -361,7 +362,8 @@ TEST_CASE("the two loaders clamp the same keys the same way", "[settings]") {
 
     const auto loginRanges = clampRanges(login);
     const auto gameRanges = clampRanges(game);
-    REQUIRE(loginRanges.size() >= 8);
+    // Six since the procedural grass's four settings went.
+    REQUIRE(loginRanges.size() >= 6);
     REQUIRE(gameRanges.size() >= 30);
 
     int shared = 0;
@@ -380,7 +382,7 @@ TEST_CASE("the two loaders clamp the same keys the same way", "[settings]") {
     // graphics_preset and pom_quality are not counted here: their bounds are
     // kGraphicsPresetCount and kPomQualityCount, which is the stronger form of
     // agreeing - they read the same constant rather than the same number.
-    CHECK(shared >= 8);
+    CHECK(shared >= 5);
 }
 
 TEST_CASE("the login screen clamps every number it reads", "[settings]") {

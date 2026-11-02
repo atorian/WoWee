@@ -183,21 +183,11 @@ public:
     /// cvar in kClientCVars, so the two are one value rather than two that
     /// can disagree - which is why they are settings here rather than
     /// another store beside the one the panel wrote.
-    int pendingGroundClutterDistance = 140;   ///< yards
+    int pendingGroundClutterDistance = kDefaultGroundClutterDistance;  ///< yards
     int pendingParticleDensity = 100;         ///< percent of what an effect asks for
     int pendingWeatherDetail = 3;             ///< 0 none, 3 full
     int pendingEnvironmentDetail = 100;       ///< percent
     int pendingTextureFiltering = 4;          ///< 0 off, then 2x 4x 8x 16x
-    // Grass, as percentages of the generator's own defaults. Separate from
-    // ground clutter: clutter is M2 doodads with per-instance cost, grass is
-    // one indirect draw, and a player who turns one down does not necessarily
-    // mean the other.
-    /// Off unless asked for: it is new, it costs generation time on the main
-    /// thread, and a player who has not gone looking for it should not pay.
-    bool pendingGrassEnabled = false;
-    int pendingGrassDensity = 100;   // 0-300
-    int pendingGrassHeight = 100;    // 50-300
-    int pendingGrassDistance = 150;  // 30-2000 yards; density thins past 45
     int pendingAntiAliasing = 1;  // 0=Off, 1=2x, 2=4x, 3=8x
     float pendingBloom = 0.8f;
     bool pendingFXAA = false;     // FXAA post-process (combinable with MSAA)

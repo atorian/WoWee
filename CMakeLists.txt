@@ -1166,14 +1166,11 @@ set(WOWEE_SOURCES
     src/rendering/screen_capture.cpp
     src/rendering/loot_sparkles.cpp
     src/rendering/corpse_bones.cpp
-    src/rendering/grass_renderer.cpp
+    src/rendering/detail_doodad_renderer.cpp
     src/rendering/wind_field.cpp
     src/pipeline/adt_alpha.cpp
-    src/pipeline/grass_terrain.cpp
-    src/pipeline/grass_population.cpp
-    src/pipeline/grass_profile.cpp
-    src/pipeline/grass_biomes.cpp
-    src/pipeline/grass_clearing.cpp
+    src/pipeline/client_random.cpp
+    src/pipeline/detail_doodads.cpp
     src/pipeline/wind_zones.cpp
     src/rendering/quest_marker_renderer.cpp
     src/rendering/footprint_renderer.cpp
@@ -2572,6 +2569,11 @@ if(WOWEE_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_terrain_cull.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/terrain-cull)
         set_tests_properties(scene_terrain_cull PROPERTIES SKIP_RETURN_CODE 77)
+        # Ground clutter is drawn as the client lays it out, and its density counts.
+        wowee_add_gpu_test(scene_ground_clutter
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_ground_clutter.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/ground-clutter)
+        set_tests_properties(scene_ground_clutter PROPERTIES SKIP_RETURN_CODE 77)
         # A scene draws the same frame however long the world takes to stream in.
         wowee_add_gpu_test(scene_streamed_world_settled
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_streamed_world_settled.py

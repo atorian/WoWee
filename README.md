@@ -72,8 +72,7 @@ Their interfaces, formats, runtime requirements, and behavior may change. Frame
 generation is only built when `WOWEE_ENABLE_AMD_FSR3_FRAMEGEN` is turned on
 with AMD's SDK under `extern/`. FSR 1 and FSR 3 upscaling are built in, but
 graphics acceleration features are still under active development and should
-not be treated as release-critical functionality. Grass is marked experimental
-in the settings.
+not be treated as release-critical functionality.
 
 ## Quick start
 
@@ -415,7 +414,7 @@ can be described in a `gamecontrollerdb.txt` in the per-user data directory.
 
 Escape opens the game menu. This client's own settings sit under a **WoWee**
 heading in the game's **Video**, **Sound** and **Interface** panels: Graphics,
-Detail, Grass, Upscaling and Display under Video, with the quality preset on
+Detail, Upscaling and Display under Video, with the quality preset on
 Graphics. View distance, shadow distance and MSAA have the largest performance
 cost; FSR 1 or FSR 3 upscaling can improve frame rate on weaker hardware.
 

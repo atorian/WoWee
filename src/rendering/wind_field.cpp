@@ -57,21 +57,18 @@ double easeStep(double diff, double dt, double tau, double floorRate) {
 /// How fast each layer advances at a wind of `s` reference speeds. At s = 1
 /// these are exactly the rates the shaders ran on the frame clock before
 /// there was a wind: 0.8, 1.7 and 4.5 radians a second for trunk, branch and
-/// leaf, 1.1 for cloth, 1.9 for the grass rustle, and the grass fronts and
-/// swells travelling at 2.1 / 0.48 and 0.7 / 0.11 yards a second - the rates
-/// at their spatial frequencies in wind.glsli.
+/// leaf, and 1.1 for cloth.
 ///
 /// A trunk is a pendulum whose rate the wind barely moves; a leaf flutters as
 /// fast as the air goes past it; the rest lie between.
 struct Rates {
-    double trunk, branch, leaf, cloth, rustle, fronts, swells;
+    double trunk, branch, leaf, cloth;
 };
 
 Rates ratesFor(double s) {
     s = std::max(s, 0.0);
     const double s34 = std::pow(s, 0.75);
-    return {0.8 * std::sqrt(s), 1.7 * s34, 4.5 * s, 1.1 * s34, 1.9 * s34,
-            (2.1 / 0.48) * s34, (0.7 / 0.11) * s};
+    return {0.8 * std::sqrt(s), 1.7 * s34, 4.5 * s, 1.1 * s34};
 }
 
 }  // namespace
@@ -166,13 +163,6 @@ void WindField::update(float dt, const WindInputs& inputs, const pipeline::WindZ
     const glm::dvec2 newDir(std::cos(newAngle), std::sin(newAngle));
     state_.direction = glm::vec2(newDir);
 
-    // The grass fronts are measured along the wind from the world's origin;
-    // turning them about the player instead keeps the field near the player
-    // where it was.
-    const double pivotShift = glm::dot(inputs.pivot, newDir - oldDir);
-    state_.waveTravel = wrap(state_.waveTravel + pivotShift, kTravelWrap);
-    state_.gustTravel = wrap(state_.gustTravel + pivotShift, kTravelWrap);
-
     respond();
 
     // A clock that moved by more than the frame did has jumped: the realm's
@@ -193,9 +183,6 @@ void WindField::update(float dt, const WindInputs& inputs, const pipeline::WindZ
     state_.branchPhase = wrap(state_.branchPhase + r.branch * step, kPhaseWrap);
     state_.leafPhase = wrap(state_.leafPhase + r.leaf * step, kPhaseWrap);
     state_.clothPhase = wrap(state_.clothPhase + r.cloth * step, kPhaseWrap);
-    state_.rustlePhase = wrap(state_.rustlePhase + r.rustle * step, kPhaseWrap);
-    state_.waveTravel = wrap(state_.waveTravel + r.fronts * step, kTravelWrap);
-    state_.gustTravel = wrap(state_.gustTravel + r.swells * step, kTravelWrap);
 }
 
 void WindField::anchorPhases(double clockSeconds) {
@@ -206,9 +193,6 @@ void WindField::anchorPhases(double clockSeconds) {
     state_.branchPhase = wrap(clockSeconds * r.branch, kPhaseWrap);
     state_.leafPhase = wrap(clockSeconds * r.leaf, kPhaseWrap);
     state_.clothPhase = wrap(clockSeconds * r.cloth, kPhaseWrap);
-    state_.rustlePhase = wrap(clockSeconds * r.rustle, kPhaseWrap);
-    state_.waveTravel = wrap(clockSeconds * r.fronts, kTravelWrap);
-    state_.gustTravel = wrap(clockSeconds * r.swells, kTravelWrap);
 }
 
 void WindField::respond() {
@@ -226,8 +210,7 @@ WindGpu WindField::gpu() const {
     g.dirLean = glm::vec4(state_.direction, state_.lean, state_.swing);
     g.phases = glm::vec4(static_cast<float>(state_.trunkPhase), static_cast<float>(state_.branchPhase),
                          static_cast<float>(state_.leafPhase), state_.detail);
-    g.travel = glm::vec4(static_cast<float>(state_.clothPhase), static_cast<float>(state_.waveTravel),
-                         static_cast<float>(state_.gustTravel), static_cast<float>(state_.rustlePhase));
+    g.travel = glm::vec4(static_cast<float>(state_.clothPhase), 0.0f, 0.0f, 0.0f);
     return g;
 }
 

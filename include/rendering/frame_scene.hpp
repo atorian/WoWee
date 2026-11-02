@@ -2,7 +2,7 @@
 #include "rendering/quest_marker_renderer.hpp"
 #include "rendering/footprint_renderer.hpp"
 #include "rendering/sky_system.hpp"
-#include "rendering/grass_renderer.hpp"
+#include "rendering/detail_doodad_renderer.hpp"
 #include "rendering/mount_dust.hpp"
 #include "rendering/swim_effects.hpp"
 #include "rendering/lightning.hpp"
@@ -38,7 +38,7 @@ struct FrameScene {
     TerrainRenderer::DrawList terrain;
     DistantTerrain::Frame distantTerrain;
     WaterRenderer::DrawList water;
-    GrassRenderer::Frame grass;
+    DetailDoodadRenderer::Frame detailDoodads;
     std::shared_ptr<const M2Renderer::Frame> models, skyModels;
     std::shared_ptr<const WMORenderer::Frame> buildings;
     std::shared_ptr<const CharacterRenderer::Frame> characters;

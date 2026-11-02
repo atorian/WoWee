@@ -12,6 +12,8 @@
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/blp_loader.hpp"
+#include "pipeline/detail_doodads.hpp"
+#include "rendering/detail_doodad_renderer.hpp"
 #include "rendering/interior_light.hpp"
 #include "rendering/normal_map_encoding.hpp"
 #include <string>
@@ -113,6 +115,17 @@ struct PendingTile {
         float scale;
     };
     std::vector<M2Placement> m2Placements;
+
+    /// Models of the detail doodads the tile's ground effects plant, read on
+    /// the worker for DetailDoodadRenderer; `failed` when the model would not
+    /// read, so the clutter that plants it does not wait for it.
+    struct DetailModel {
+        uint32_t doodadId = 0;
+        bool failed = false;
+        pipeline::DetailDoodadModel model;
+        std::vector<std::pair<std::string, pipeline::BLPImage>> images;
+    };
+    std::vector<DetailModel> detailModels;
 
     // Pre-loaded WMO data
     struct WMOReady {
@@ -289,27 +302,15 @@ public:
     bool isStreamingEnabled() const { return streamingEnabled; }
     void setUpdateInterval(float seconds) { updateInterval = seconds; }
     void setTaxiStreamingMode(bool enabled) { taxiStreamingMode_ = enabled; }
-    void setGroundClutterDensityScale(float scale) { groundClutterDensityScale_ = glm::clamp(scale, 0.0f, 1.5f); }
-    [[nodiscard]] float getGroundClutterDensityScale() const { return groundClutterDensityScale_; }
-
-    /** Density for a ground-effect id, or 0 if it grows nothing or is unknown.
-     *
-     * The one question grass asks of this table. Exposed rather than handing
-     * out the table, so callers cannot start depending on its shape - and so
-     * the grass generator can take a plain callback and stay testable without
-     * a TerrainManager at all.
-     */
-    [[nodiscard]] uint32_t getGroundEffectDensity(uint32_t effectId) const;
-
-    /** The detail doodads a ground effect plants, and their weights.
-     *
-     * Their model names are what says whether a patch of ground is meadow,
-     * scrub or scree, so grass derives its whole appearance from them rather
-     * than from a table of zones. Doodad ids that resolved to no model are
-     * left out, along with their weights.
-     */
-    void getGroundEffectDoodads(uint32_t effectId, std::vector<std::string>& outModels,
-                                std::vector<uint32_t>& outWeights) const;
+    /// GroundEffectTexture and GroundEffectDoodad: what each texture layer grows.
+    [[nodiscard]] const pipeline::GroundEffectTables& groundEffects() const { return groundEffects_; }
+    /// Where the detail doodads' models go as the tiles that plant them are
+    /// committed. Unset, the workers do not read them.
+    void setDetailDoodadRenderer(DetailDoodadRenderer* renderer) { detailDoodadRenderer_ = renderer; }
+    /// The chunks of the loaded detailed tiles whose centre is within
+    /// `radius` of `center` across the ground: the ground clutter's candidates.
+    void collectDetailChunks(const glm::vec2& center, float radius,
+                             std::vector<DetailDoodadRenderer::NearbyChunk>& out) const;
     /// Where the tiles' and buildings' liquid goes as they stream in and out.
     void setLiquidScene(LiquidScene* scene) { liquidScene = scene; }
     /// Where each tile's ground goes as it is committed and leaves as it is
@@ -333,23 +334,6 @@ public:
     const pipeline::MapChunk* findChunkAt(float glX, float glY,
                                           float& fracX, float& fracY,
                                           const TerrainTile** outTile = nullptr) const;
-
-    /** The tones a terrain texture is painted in, cached by path.
-     *
-     * These textures already depict their region's own grass and foliage -
-     * Elwynn's greens, Westfall's dry golds - so the grass growing out of one
-     * takes its colours from it rather than from a palette of ours. Shadow
-     * and highlight are luminance percentiles of the decoded base level, not
-     * a mean: a mean of a grass texture is the average of its blades and the
-     * earth between them, and grass wants the blades.
-     *
-     * Wrong answers here are a tint, not a hole, so failures return greys.
-     */
-    struct TerrainTextureTones {
-        glm::vec3 shadow{0.35f};
-        glm::vec3 highlight{0.65f};
-    };
-    [[nodiscard]] TerrainTextureTones getTerrainTextureTones(const std::string& texturePath);
 
 
     /**
@@ -430,8 +414,6 @@ private:
     void workerLoop();
 
     void loadGroundEffectTables();
-    void generateGroundClutterPlacements(std::shared_ptr<PendingTile>& pending,
-                                         std::unordered_set<uint32_t>& preparedModelIds);
 
     pipeline::AssetManager* assetManager = nullptr;
     const pipeline::GameTables* gameTables_ = nullptr;
@@ -591,17 +573,19 @@ private:
     // Tiles currently being incrementally finalized across frames
     std::deque<FinalizingTile> finalizingTiles_;
 
-    struct GroundEffectEntry {
-        std::array<uint32_t, 4> doodadIds{{0, 0, 0, 0}};
-        std::array<uint32_t, 4> weights{{0, 0, 0, 0}};
-        uint32_t density = 0;
-    };
     // Filled by initialize() before the workers start, read-only after: every
     // worker reads them while it prepares a tile.
-    std::unordered_map<uint32_t, GroundEffectEntry> groundEffectById_; // effectId -> config
-    std::unordered_map<uint32_t, std::string> groundDoodadModelById_;  // doodadId -> model path
-    float groundClutterDensityScale_ = 1.0f;
-    std::unordered_map<std::string, TerrainTextureTones> terrainTextureTones_;
+    pipeline::GroundEffectTables groundEffects_;
+
+    DetailDoodadRenderer* detailDoodadRenderer_ = nullptr;
+    /// The detail doodads whose models have gone to the renderer, so a worker
+    /// preparing a tile does not read them again. Workers read it, the main
+    /// thread adds to it as tiles are committed.
+    mutable std::mutex detailModelsMutex_;
+    std::unordered_set<uint32_t> detailModelsDelivered_;
+    /// Read the models of the detail doodads the tile's ground effects plant
+    /// and have not been delivered: on the worker preparing the tile.
+    void prepareDetailDoodadModels(PendingTile& pending);
 };
 
 } // namespace rendering

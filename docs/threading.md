@@ -38,7 +38,7 @@ follow.
   `processReadyTiles()`.  `WOWEE_TERRAIN_WORKERS` overrides the pool size.
 * **Frame workers** - per-frame parallel work submitted through
   `ThreadPool::submit()`: M2 and character bone animation, M2 visibility,
-  camera floor queries, and the terrain/grass, WMO, M2, character and
+  camera floor queries, and the terrain/ground clutter, WMO, M2, character and
   water/weather/effects secondary command buffers when parallel recording is enabled
   (`WOWEE_SINGLE_THREAD_RECORD` records inline on the main thread instead).
   Sized `hardware_concurrency() - 1`, clamped to 2..16.

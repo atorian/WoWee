@@ -85,6 +85,8 @@
 //     "rayTracedLighting": 0,             // RT lighting mode 0-3
 //     "msaa": 1,                          // samples: 1, 2, 4 or 8
 //     "bloom": 0.8,                       // bright light glow, 0 disables
+//     "groundEffectDensity": 16,          // ground clutter, as the client's cvars:
+//     "groundEffectDist": 70.0,           //   quads planted per chunk, yards ahead
 //     "fxaa": false,                      // FXAA, drawn through its own target
 //     "clouds": true,                   // procedural layer; authored sky models keep their gate
 //     "sharpStars": true,                 // point stars in place of baked star layers
@@ -739,7 +741,12 @@ bool streamTerrainIn(rendering::Renderer& renderer, const rendering::TerrainMana
         const int loaded = terrain.getLoadedTileCount();
         const uint64_t models = (uint64_t{renderer.getM2Renderer()->getInstanceCount()} << 32) |
                                 renderer.getWMORenderer()->getInstanceCount();
-        settled = terrain.getRemainingTileCount() == 0 && loaded == lastLoaded && models == lastModels ? settled + 1 : 0;
+        // And the ground clutter of the chunks in view, laid out a few a
+        // frame once their tiles are in.
+        const auto* clutter = renderer.getDetailDoodadRenderer();
+        const bool clutterIn = !clutter || clutter->pendingChunks() == 0;
+        settled = terrain.getRemainingTileCount() == 0 && loaded == lastLoaded && models == lastModels && clutterIn
+                      ? settled + 1 : 0;
         lastLoaded = loaded;
         lastModels = models;
     }
@@ -931,6 +938,8 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
     }
     if (auto* post = renderer.getPostProcessPipeline()) post->setBloomStrength(scene.value("bloom", 0.8f));
     if (scene.contains("sunShafts")) renderer.setSunShaftsEnabled(scene["sunShafts"].get<bool>());
+    renderer.setGroundEffectDensity(scene.value("groundEffectDensity", pipeline::kDefaultGroundEffectDensity));
+    renderer.setGroundEffectDistance(scene.value("groundEffectDist", pipeline::kDefaultGroundEffectDist));
 
     // Anti-aliasing as the settings panel sets it: the sample count, and
     // FXAA, which puts the scene in an off-screen target of its own.

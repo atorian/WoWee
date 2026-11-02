@@ -1,0 +1,12 @@
+// Elwynn's meadow by Goldshire at midday, from a standing player's eye: the
+// ground clutter the client plants there - grass tufts and flowers in patches,
+// bare between them - fading out toward 70 yards.
+{
+  "map": "Azeroth", "mapId": 0, "zoneId": 12,
+  "hour": 12.0,
+  "server": [-9440.0, 70.0, 56.5],
+  "terrain": true,
+  "camera": { "offset": [0, 0, 6], "yaw": 200, "pitch": -20 },
+  "size": [1280, 720],
+  "frames": 1500
+}

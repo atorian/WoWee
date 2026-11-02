@@ -33,13 +33,10 @@
 #include "rendering/lens_drops.hpp"
 #include "pipeline/custom_zone_discovery.hpp"
 
-#include "pipeline/grass_biomes.hpp"
 #include "pipeline/wind_zones.hpp"
+#include "rendering/detail_doodad_renderer.hpp"
 #include "rendering/wind_field.hpp"
 #include "rendering/liquid_scene.hpp"
-#include "pipeline/grass_clearing.hpp"
-#include "pipeline/grass_population.hpp"
-#include "pipeline/grass_profile.hpp"
 
 namespace wowee {
 namespace rendering { class VkContext; }
@@ -87,7 +84,6 @@ class ChargeEffect;
 class SwimEffects;
 class RenderGraph;
 class OverlaySystem;
-class GrassRenderer;
 class VolumetricFog;
 class RtScene;
 class RtLighting;
@@ -132,11 +128,6 @@ public:
     /// sky is captured for it ahead of the scene pass, and a login screen has
     /// no sky to capture.
     void setWorldInView(bool inView) { worldInView_ = inView; }
-    /// How a terrain area id resolves to its zone, for the grass biomes. The
-    /// area itself when unset.
-    void setAreaZoneResolver(std::function<uint32_t(uint32_t)> resolver) {
-        areaZoneResolver_ = std::move(resolver);
-    }
     /// Where streamed terrain sends its sound emitters - see TerrainManager.
     /// Set before initializeRenderers().
     void setAmbientEmitterSink(std::function<void(const glm::vec3&, uint32_t)> sink) {
@@ -243,6 +234,7 @@ public:
     CharacterEmitters* getCharacterEmitters() const { return characterEmitters_.get(); }
     WMORenderer* getWMORenderer() const { return wmoRenderer.get(); }
     M2Renderer* getM2Renderer() const { return m2Renderer.get(); }
+    DetailDoodadRenderer* getDetailDoodadRenderer() const { return detailDoodads_.get(); }
     Minimap* getMinimap() const { return minimap.get(); }
     QuestMarkerRenderer* getQuestMarkerRenderer() const { return questMarkerRenderer.get(); }
     FootprintRenderer* getFootprintRenderer() const { return footprintRenderer.get(); }
@@ -520,7 +512,6 @@ private:
     WorldEnvironment environment_;
     ViewerMotion viewerMotion_;
     bool worldInView_ = false;
-    std::function<uint32_t(uint32_t)> areaZoneResolver_;
     std::function<void(const glm::vec3&, uint32_t)> ambientEmitterSink_;
 
     /// The original client's sky models that are up, one instance per
@@ -880,51 +871,19 @@ private:
     bool worldDrawnThisFrame_ = false;
     void recordSunShafts();
 
-    // GPU-driven grass: compute cull with atomic compaction feeding an
-    // indirect draw, over a population generated from terrain suitability.
-    std::unique_ptr<GrassRenderer> grassRenderer_;
-    // Where the live population was generated for. Rebuilt when the player
-    // leaves it; the generator's lattice is world-anchored, so a rebuild
-    // reproduces every blade that is still in range rather than reshuffling.
-    glm::vec3 grassWindowCenter_{0.0f};
-    bool grassWindowValid_ = false;
-    // The window being generated, a bounded number of lattice cells per
-    // frame. Small windows still finish inside one; the ones the distance
-    // slider allows take as many frames as they take, and upload when done.
-    pipeline::GrassPopulationBuilder grassBuilder_;
-    glm::vec3 grassBuildCenter_{0.0f};
-    // Clearings around placed WMOs and props for the window being built,
-    // gathered once per rebuild from the renderers that own the instances.
-    pipeline::GrassClearingField grassClearing_;
-    void updateGrassPopulation();
+    // Ground clutter, laid out and drawn as the client does.
+    std::unique_ptr<DetailDoodadRenderer> detailDoodads_;
+    std::vector<DetailDoodadRenderer::NearbyChunk> detailChunksScratch_;
+    void updateDetailDoodads();
+    // The settings, which may arrive before the renderer is made.
+    uint32_t groundEffectDensity_ = pipeline::kDefaultGroundEffectDensity;
+    float groundEffectDistance_ = pipeline::kDefaultGroundEffectDist;
 public:
-    /** Grass density and height, as fractions of the generator's defaults.
-     * Set from the settings panel; either changing rebuilds the field. */
-    void setGrassScales(float density, float height);
-    /** How far out grass draws, in yards. Density thins with distance past
-     * the near field, so range costs blades logarithmically, not by area. */
-    void setGrassDistance(float yards);
-    /** Turn grass on or off. Off is the default: it is new, it costs
-     * generation time on the main thread, and turning it off has to release
-     * what it was holding rather than merely stop drawing. */
-    void setGrassEnabled(bool enabled);
+    /** The client's groundEffectDensity: quads of each chunk planted, 16-256. */
+    void setGroundEffectDensity(uint32_t quadDraws);
+    /** The client's groundEffectDist: yards ahead the clutter reaches, up to 140. */
+    void setGroundEffectDistance(float yards);
 private:
-    bool grassEnabled_ = false;
-    float grassDensityScale_ = 1.0f;
-    float grassHeightScale_ = 1.0f;
-    float grassDistance_ = 150.0f;
-    // (biome, effectId) -> index into the profile table, built as effects are
-    // met. Grass profiles are a blend of five categories crossed with the
-    // biome overrides, so distinct ones stay far fewer than the hundreds of
-    // ground effects that map onto them.
-    std::unordered_map<uint64_t, uint32_t> grassProfileIndex_;
-    std::vector<pipeline::GrassProfile> grassProfiles_;
-    uint32_t grassProfileFor(uint32_t effectId, uint32_t areaId);
-    // The per-zone look table from assets/grass_biomes.json, loaded on first
-    // use, and a memo of which biome each area resolved to - resolution walks
-    // AreaTable parentage and runs per blade sample without it.
-    pipeline::GrassBiomeSet grassBiomes_;
-    bool grassBiomesLoaded_ = false;
     // The wind over the player's zone (WindField), from assets/wind_zones.json
     // read on the first update and the realm's clock in environment_.
     WindField wind_;
@@ -934,13 +893,6 @@ private:
     bool windUnsyncedSaid_ = false;
     bool windRealmSynced_ = false;
     void updateWind(float deltaTime);
-    std::unordered_map<uint32_t, uint32_t> grassBiomeForArea_;
-    // Session totals, reported once at shutdown. The log is bounded and the
-    // per-rebuild lines rotate out of it whenever the player stands still for
-    // a minute, so the tail is the only place a "check the log" can rely on.
-    uint32_t grassRebuilds_ = 0;
-    size_t grassLastCount_ = 0;
-    double grassWorstGenerateMs_ = 0.0;
 
     // CPU timing stats (last frame/update).
     double lastUpdateMs = 0.0;

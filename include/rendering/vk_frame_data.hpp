@@ -54,11 +54,11 @@ struct GPUPerFrameData {
     glm::mat4 contactSpaceMatrix{0.0f};
     glm::vec4 contactParams{0.0f}; // enabled, texel UV size, depth span in yards, unused
     // The wind, as wind.glsli reads it (WindField::gpu): one field over the
-    // trees, the cloth and the grass. The reflection pass copies the whole
-    // block, so reflected foliage moves with the real.
+    // trees and the cloth. The reflection pass copies the whole block, so
+    // reflected foliage moves with the real.
     glm::vec4 windDirLean{1.0f, 0.0f, 0.0f, 0.0f}; // xy toward (world, unit), z lean, w swing
     glm::vec4 windPhases{0.0f};  // x trunk, y branch, z leaf phase, w branch/leaf scale
-    glm::vec4 windTravel{0.0f};  // x cloth phase, y grass fronts (yd), z grass swells (yd), w rustle phase
+    glm::vec4 windTravel{0.0f};  // x cloth phase; y, z, w unused
     glm::vec4 skySmogColor{0.0f}; // appended: horizon band for water sky reflections
     glm::vec4 aerialSun{0.0f};   // toward visible sun; w daylight weight
     glm::vec4 aerialLight{0.0f}; // diffuse atmospheric sky fill; w = physical atmosphere enabled

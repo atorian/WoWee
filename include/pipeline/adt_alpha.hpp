@@ -10,8 +10,7 @@
 //
 // This lives beside the loader rather than inside a renderer because it is
 // knowledge about the file format, and because two copies of it had already
-// grown: one in terrain_mesh.cpp and one in terrain_manager.cpp. The grass
-// terrain adapter needed the same thing and would have made a third.
+// grown: one in terrain_mesh.cpp and one in terrain_manager.cpp.
 
 namespace wowee {
 namespace pipeline {
@@ -54,19 +53,9 @@ bool decodeLayerWeight(const MapChunk& chunk, size_t layerIdx,
 /// them, see decodeLayerAlpha - so a point at the far edge lands on the last
 /// thing that was painted.
 ///
-/// Written three times in terrain_manager alone: once for the ground clutter's
-/// road test, once for its scatter, once for the footstep sound's dominant
-/// texture. Three copies of one mapping is three places for it to drift from
-/// what the renderer's blend actually does.
+/// One mapping, so it cannot drift from what the renderer's blend does; the
+/// footstep sound's dominant texture reads it.
 size_t alphaTexelIndex(float u, float v);
-
-/// The same map read between texels rather than at one.
-///
-/// What grows where has to agree with what is painted, and a nearest-texel
-/// read disagrees with the renderer's own filtering at exactly the places that
-/// matter - the edge of a road, where a blade either stands in the dirt or
-/// does not.
-float sampleAlpha(const std::vector<uint8_t>& alpha, float u, float v);
 
 } // namespace pipeline
 } // namespace wowee

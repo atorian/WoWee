@@ -423,15 +423,11 @@ void GameScreen::render(game::GameHandler& gameHandler) {  // NOLINT(readability
             }
             }
             if (!settingsPanel_.terrainSettingsApplied_) {
-            if (auto* tm = renderer->getTerrainManager()) {
-                tm->setGroundClutterDensityScale(
-                    static_cast<float>(settingsPanel_.pendingGroundClutterDensity) / 100.0f);
-                renderer->setGrassEnabled(settingsPanel_.pendingGrassEnabled);
-                renderer->setGrassScales(
-                    static_cast<float>(settingsPanel_.pendingGrassDensity) / 100.0f,
-                    static_cast<float>(settingsPanel_.pendingGrassHeight) / 100.0f);
-                renderer->setGrassDistance(
-                    static_cast<float>(settingsPanel_.pendingGrassDistance));
+            if (renderer->getTerrainManager()) {
+                renderer->setGroundEffectDensity(
+                    static_cast<uint32_t>(settingsPanel_.pendingGroundClutterDensity));
+                renderer->setGroundEffectDistance(
+                    static_cast<float>(settingsPanel_.pendingGroundClutterDistance));
                 settingsPanel_.terrainSettingsApplied_ = true;
             }
             }

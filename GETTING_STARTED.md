@@ -133,8 +133,8 @@ This client's own settings sit under a **WoWee** heading in the game's Video, So
   - **Low**: Low-end GPUs or when performance is priority
   - **Medium**: Balanced quality and performance
   - **High**: Good GPU with modern drivers
-  - **Ultra**: High-end GPU for maximum quality (also grows grass)
-- **Detail**, **Grass**, **Upscaling** and **Display** (fullscreen, vertical sync, frame rate limit, brightness) are beside it
+  - **Ultra**: High-end GPU for maximum quality
+- **Detail** (with the original client's ground clutter density and distance), **Upscaling** and **Display** (fullscreen, vertical sync, frame rate limit, brightness) are beside it
 
 ### 2. Adjust Audio
 - Press Escape → **Sound** → **WoWee** → **Sound**

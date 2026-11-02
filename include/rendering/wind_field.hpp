@@ -65,11 +65,6 @@ struct WindInputs {
     /// The weather being drawn.
     pipeline::WeatherKind weatherKind = pipeline::WeatherKind::Clear;
     float weatherIntensity = 0.0f;
-    /// Where the player stands, render xy. The grass's travelling fronts turn
-    /// about it when the wind turns: a front measured from the world's origin
-    /// would sweep across a field thousands of yards out at the rate the wind
-    /// turns times that distance.
-    glm::dvec2 pivot{0.0};
     /// Replaces what the table says, for an offline scene.
     std::optional<WindOverride> fixedWind;
 };
@@ -83,31 +78,27 @@ struct WindState {
     // How things answer it, from the speed and the gust: 1 at kReferenceSpeed,
     // the speed the shader layers were tuned at.
     float lean = 0.0f;    ///< how far downwind foliage leans, in units of its amplitude
-    float swing = 0.0f;   ///< trunk, cloth and grass amplitude scale
+    float swing = 0.0f;   ///< trunk and cloth amplitude scale
     float detail = 0.0f;  ///< branch and leaf amplitude scale
 
     // Accumulated, never computed as time times a rate: a change of speed
     // changes how fast these advance from where they are, so nothing jumps.
-    // Phases are wrapped to [0, kPhaseWrap), distances to [0, kTravelWrap)
-    // (see wind.glsli for why those two).
+    // Phases are wrapped to [0, kPhaseWrap) (see wind.glsli for why).
     double trunkPhase = 0.0;
     double branchPhase = 0.0;
     double leafPhase = 0.0;
     double clothPhase = 0.0;
-    double rustlePhase = 0.0;
-    double waveTravel = 0.0;  ///< yards the grass fronts have travelled downwind
-    double gustTravel = 0.0;  ///< yards the grass swells have travelled
 };
 
 /// What the shaders are handed (GPUPerFrameData's wind, wind.glsli).
 struct WindGpu {
     glm::vec4 dirLean{1.0f, 0.0f, 0.0f, 0.0f};  ///< xy toward, z lean, w swing
     glm::vec4 phases{0.0f};                     ///< trunk, branch, leaf, detail
-    glm::vec4 travel{0.0f};                     ///< cloth phase, fronts, swells, rustle
+    glm::vec4 travel{0.0f};                     ///< x cloth phase; y, z, w unused
 };
 
 /// The wind over the place the player is: one field for the trees, their
-/// shadows, the cloth and the grass.
+/// shadows and the cloth.
 ///
 /// Its target is baseWindAt for the realm's clock and the zone, or a scene's
 /// override. Arriving at a new target - a zone crossed, the weather turning -
@@ -139,7 +130,6 @@ public:
     /// jumped, and the phases are taken from it again.
     static constexpr double kClockJumpSeconds = 1.0;
     static constexpr double kPhaseWrap = 20.0 * 3.14159265358979323846;
-    static constexpr double kTravelWrap = 200.0 * 3.14159265358979323846;
 
     /// Advance by `dt` seconds toward the wind `row` has (or the override).
     void update(float dt, const WindInputs& inputs, const pipeline::WindZoneRow& row,

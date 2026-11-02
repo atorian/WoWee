@@ -14,6 +14,8 @@
 namespace wowee::ui {
 
 inline constexpr float kDefaultViewDistance = 1900.0f;
-inline constexpr int   kDefaultGroundClutter = 70;
+/// The client's groundEffectDensity and groundEffectDist defaults.
+inline constexpr int   kDefaultGroundClutter = 16;
+inline constexpr int   kDefaultGroundClutterDistance = 70;
 
 }  // namespace wowee::ui

@@ -554,6 +554,13 @@ glm::vec3 TerrainMeshGenerator::chunkSurfacePoint(const float chunkPosition[3],
                                                   const HeightMap& heightMap,
                                                   float fracX, float fracY,
                                                   float unitSize) {
+    return chunkSurfaceSample(chunkPosition, heightMap, fracX, fracY, unitSize).point;
+}
+
+ChunkSurfaceSample TerrainMeshGenerator::chunkSurfaceSample(const float chunkPosition[3],
+                                                            const HeightMap& heightMap,
+                                                            float fracX, float fracY,
+                                                            float unitSize) {
     // The axes cross: world X runs against grid Y and world Y against grid X.
     const float worldX = chunkPosition[0] - fracY * unitSize;
     const float worldY = chunkPosition[1] - fracX * unitSize;
@@ -586,22 +593,37 @@ glm::vec3 TerrainMeshGenerator::chunkSurfacePoint(const float chunkPosition[3],
     // weights are the corner heights and the third is always the centre.
     float hA, hB;      // the two corners of the wedge
     float wA, wB;      // their weights
+    glm::vec2 gA, gB;  // and where they sit in the quad, in grid units
     if (u > v) {
         if (u + v < 1.0f) {          // top wedge: TL, TR
             hA = hTL; hB = hTR; wA = 1.0f - u - v; wB = u - v;
+            gA = {0.0f, 0.0f}; gB = {1.0f, 0.0f};
         } else {                      // right wedge: TR, BR
             hA = hTR; hB = hBR; wA = u - v;        wB = u + v - 1.0f;
+            gA = {1.0f, 0.0f}; gB = {1.0f, 1.0f};
         }
     } else {
         if (u + v < 1.0f) {          // left wedge: TL, BL
             hA = hTL; hB = hBL; wA = 1.0f - u - v; wB = v - u;
+            gA = {0.0f, 0.0f}; gB = {0.0f, 1.0f};
         } else {                      // bottom wedge: BL, BR
             hA = hBL; hB = hBR; wA = v - u;        wB = u + v - 1.0f;
+            gA = {0.0f, 1.0f}; gB = {1.0f, 1.0f};
         }
     }
     const float wC = 1.0f - wA - wB;
     const float worldZ = chunkPosition[2] + (hA * wA + hB * wB + hC * wC);
-    return glm::vec3(worldX, worldY, worldZ);
+
+    // The wedge's own plane, in world space with the same crossed axes.
+    auto world = [&](glm::vec2 g, float h) {
+        return glm::vec3(-g.y * unitSize, -g.x * unitSize, h);
+    };
+    const glm::vec3 a = world(gA, hA);
+    const glm::vec3 b = world(gB, hB);
+    const glm::vec3 c = world({0.5f, 0.5f}, hC);
+    glm::vec3 normal = glm::normalize(glm::cross(b - a, c - a));
+    if (normal.z < 0.0f) normal = -normal;
+    return {glm::vec3(worldX, worldY, worldZ), normal};
 }
 
 uint64_t heapBytes(const TerrainMesh& mesh) {

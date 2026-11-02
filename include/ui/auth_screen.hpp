@@ -276,13 +276,7 @@ private:
         int  pomQuality      = 1;   // 0=Low 1=Medium 2=High
         int  upscalingMode   = 0;   // 0=Off 1=FSR1 2=FSR3
         bool waterRefraction = true;
-        int  groundClutter   = kDefaultGroundClutter; // 0-150
-        // Ground cover, so that a preset picked here means what the same
-        // preset means in game. Ultra grows it; the others do not.
-        bool grass           = false;
-        int  grassDensity    = 100; // percent
-        int  grassHeight     = 100; // percent
-        int  grassDistance   = 150; // yards
+        int  groundClutter   = kDefaultGroundClutter; // groundEffectDensity, 16-256
         int  brightness      = 50;  // 0-100
         bool vsync           = true;
         bool fullscreen      = false;
