@@ -608,6 +608,16 @@ bool VkContext::selectPhysicalDevice() {
     // The water's waves near the camera are tessellated; without it the
     // water is drawn on its own mesh and its short waves only in the light.
     tessellationSupported_ = enableIfPresent(&VkPhysicalDeviceFeatures::tessellationShader);
+    // The ground's draws are made on the GPU and drawn a page at a call,
+    // each draw naming its record by its first instance. There is no other
+    // way to draw it.
+    for (const auto& [field, name] : {std::pair{&VkPhysicalDeviceFeatures::multiDrawIndirect, "multiDrawIndirect"},
+                                      std::pair{&VkPhysicalDeviceFeatures::drawIndirectFirstInstance,
+                                                "drawIndirectFirstInstance"}}) {
+        if (enableIfPresent(field)) continue;
+        LOG_ERROR("Vulkan device lacks ", name, ", which drawing the ground from the GPU's commands needs");
+        return false;
+    }
     fsr2ComputeFeaturesSupported_ =
         enableIfPresent(&VkPhysicalDeviceFeatures::shaderStorageImageWriteWithoutFormat) &&
         enableIfPresent(&VkPhysicalDeviceFeatures::shaderInt16);
@@ -889,6 +899,12 @@ bool VkContext::createLogicalDevice() {  // NOLINT(readability-function-size)
             tableSupported = false;
         }
         if (!tableSupported) return false;
+        // How many of a list's draws there are, read from the GPU; without
+        // it the list is drawn at its full room (TerrainRenderer says so).
+        if (supported12.drawIndirectCount) {
+            enabled12.drawIndirectCount = VK_TRUE;
+            drawIndirectCountSupported_ = true;
+        }
         enabled12.runtimeDescriptorArray = VK_TRUE;
         enabled12.descriptorBindingPartiallyBound = VK_TRUE;
         enabled12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;

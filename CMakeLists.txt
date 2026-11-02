@@ -2553,6 +2553,11 @@ if(WOWEE_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_cull_turn.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/cull-turn)
         set_tests_properties(scene_cull_turn PROPERTIES SKIP_RETURN_CODE 77)
+        # The ground the GPU culls and draws by level is the ground in reach.
+        wowee_add_gpu_test(scene_terrain_cull
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_terrain_cull.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/terrain-cull)
+        set_tests_properties(scene_terrain_cull PROPERTIES SKIP_RETURN_CODE 77)
         # A scene draws the same frame however long the world takes to stream in.
         wowee_add_gpu_test(scene_streamed_world_settled
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_streamed_world_settled.py

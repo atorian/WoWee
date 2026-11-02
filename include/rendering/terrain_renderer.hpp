@@ -44,17 +44,6 @@ class Frustum;
 class RtScene;
 struct WaterReflectionView;
 
-/**
- * GPU-side terrain chunk data (Vulkan)
- */
-struct TerrainSurfacePush {
-    /// x: how steep the textures' relief is drawn, 0 for flat ground.
-    glm::vec4 relief{0.0f};
-    /// x: where the colour and relief come from (TerrainSurfaceSource);
-    /// y, z: the band the bake takes over across, in yards from the camera;
-    /// w: the chunk's cell in its tile's atlas, x + 16 y.
-    glm::vec4 baked{0.0f};
-};
 
 /// A tile's chunk maps on the GPU: what every chunk's three blended layers
 /// cover and every chunk's normals, one array layer to a chunk
@@ -85,6 +74,57 @@ struct TerrainChunkRowGPU {
     int32_t pad[2] = {};
 };
 static_assert(sizeof(TerrainChunkRowGPU) == 64, "TerrainChunk in terrain_layers.glsli");
+
+/// What the ground's cull reads of a chunk (CullRow in terrain_cull.comp.glsl,
+/// std430), at the same row as its TerrainChunkRowGPU.
+struct TerrainCullRowGPU {
+    glm::vec4 sphere{0.0f};          ///< centre, radius
+    glm::vec4 lodErrors{0.0f};       ///< by level, in yards
+    uint32_t neighbours[4] = {~0u, ~0u, ~0u, ~0u};  ///< rows across edges y-1, y+1, x-1, x+1
+    uint32_t group = 0;              ///< its geometry page
+    uint32_t firstIndex = 0;
+    int32_t baseVertex = 0;
+    uint32_t offeredLods = 1;
+    uint32_t cell = 0;               ///< chunkX + 16 chunkY, its cell in the tile's atlas
+    uint32_t flags = 0;              ///< kValid, kBaked
+    float steepestUpZ = 1.0f;
+    uint32_t pad = 0;
+    uint32_t lods[4][2] = {};        ///< first, count of each level's surface
+    uint32_t skirts[16][2] = {};     ///< [level * 4 + edge]
+
+    static constexpr uint32_t kValid = 1u;
+    static constexpr uint32_t kBaked = 2u;
+};
+static_assert(sizeof(TerrainCullRowGPU) == 240, "CullRow in terrain_cull.comp.glsl");
+
+/// What the ground's shaders read of one chunk's draws (terrain_cull.comp.glsl
+/// writes it, the draw's first instance names it).
+struct TerrainDrawRecordGPU {
+    uint32_t row[4] = {};
+    glm::vec4 relief{0.0f};
+    glm::vec4 baked{0.0f};
+    glm::uvec4 lights{0u};
+};
+static_assert(sizeof(TerrainDrawRecordGPU) == 64, "DrawRecord in terrain_cull.comp.glsl");
+
+/// The cull's view of the frame (Frame in terrain_cull.comp.glsl, std140).
+struct TerrainCullFrameGPU {
+    glm::vec4 viewPlanes[6]{};
+    glm::vec4 mirrorPlanes[6]{};
+    glm::vec4 camera{0.0f};   ///< position, focal length in pixels
+    glm::vec4 limits{0.0f};   ///< reach, where the discards start, the bake band
+    glm::vec4 mirror{0.0f};   ///< reflection drawn, water height, relief strength, frustum-culled
+    glm::uvec4 counts{0u};    ///< rows, lights, levels of detail, bake
+    glm::uvec4 groups{0u};    ///< groups
+};
+
+/// What the cull counted, for the frame's statistics (Stats in
+/// terrain_cull.comp.glsl).
+struct TerrainCullStatsGPU {
+    uint32_t drawn = 0, culled = 0, baked = 0, crossfade = 0;
+    uint32_t furthestSq = 0;  ///< float bits
+    uint32_t triangles = 0, draws = 0, records = 0;
+};
 
 /// Where a chunk's maps are: its tile's arrays, and its layer in them.
 struct TerrainChunkMaps {
@@ -117,6 +157,9 @@ struct TerrainChunkGPU {
     /// Its row in the renderer's chunk table (TerrainChunkRowGPU): what the
     /// shaders read of it, its textures by handle.
     uint32_t row = kNoRow;
+    /// What its row holds for the shaders, kept to be sent again with the
+    /// cull's half when a neighbour or its bake changes.
+    TerrainChunkRowGPU shading;
 
     // The chunk's textures, held: what its row names stays resident as long
     // as the chunk does.
@@ -270,15 +313,12 @@ public:
         uint32_t firstIndex = 0, count = 0;
         int32_t baseVertex = 0;
     };
-    struct ChunkDraw {
-        uint32_t row = TerrainChunkGPU::kNoRow;
-        GeometryDraw geometry;
-        std::array<TerrainChunkGPU::LodRange, 5> ranges{};
-        TerrainSurfacePush surface;
-        LocalLightSet lights = kNoLocalLights;
-        /// Reaches the fog band or the distant-terrain hand-over, so it is
-        /// drawn by the pipeline whose shader can discard.
-        bool reachesDiscards = true;
+    /// One geometry page's draws: its buffers, and how many commands each
+    /// of its four lists - the view without the distance discards and with
+    /// them, the reflection likewise - has room for (five a chunk).
+    struct GroupDraw {
+        ::VkBuffer vertices = VK_NULL_HANDLE, indices = VK_NULL_HANDLE;
+        uint32_t capacity = 0;
     };
     using DepthDraw = TerrainDepthChunk<GeometryDraw>;
     using DepthTile = TerrainDepthTile<GeometryDraw>;
@@ -290,10 +330,14 @@ public:
         std::shared_ptr<std::atomic<bool>> complete;
     };
     struct DrawList {
-        std::vector<ChunkDraw> view;
-        /// What the water's reflection can show (WaterReflectionView), when
-        /// it was asked for.
-        std::vector<ChunkDraw> reflection;
+        /// What the cull on the GPU needs of the frame (dispatchCull), and
+        /// where each page's lists of commands start in the frame's command
+        /// buffer: four a page, view then reflection, without the discards
+        /// then with them.
+        TerrainCullFrameGPU cull;
+        std::vector<GroupDraw> groups;
+        std::vector<uint32_t> regions;
+        uint32_t commandCapacity = 0;
         std::vector<std::shared_ptr<const DepthTile>> depth;
         std::vector<BakeDraw> bake;
         std::vector<std::shared_ptr<TerrainBake::Atlas>> atlases;
@@ -302,11 +346,10 @@ public:
         /// rows the table holds.
         std::vector<uint32_t> rowSlots;
         std::vector<TerrainChunkRowGPU> rows;
+        std::vector<TerrainCullRowGPU> cullRows;
         uint32_t rowCount = 0;
         uint64_t rowsExtraction = 0;
         bool wireframe = false;
-        int culled = 0, baked = 0, crossfade = 0;
-        float furthestSq = 0;
     };
     DrawList extract(const Camera& camera, const std::vector<LocalLight>& lights,
                      const WaterReflectionView* mirror = nullptr);
@@ -323,6 +366,13 @@ public:
     /// Outside any rendering scope, before anything of the frame's terrain
     /// is recorded: the chunk rows the list carries copied into the table.
     void uploadChunkRows(VkCommandBuffer cmd, uint32_t frameIndex, const DrawList& list);
+    /// Outside any rendering scope, after uploadChunkRows and before the
+    /// view and the reflection are recorded: the cull that makes their
+    /// draws, reading `lights` - the frame's point lights, `lightCount` of
+    /// them - to pick each chunk's. Reads back what the cull of this frame
+    /// slot's last frame counted.
+    void dispatchCull(VkCommandBuffer cmd, uint32_t frameIndex, const DrawList& list, ::VkBuffer lights,
+                      uint32_t lightCount);
     /// The frame that carried the last upload was submitted: its rows count
     /// as on the GPU, and later lists leave them out.
     void frameSubmitted();
@@ -379,7 +429,7 @@ public:
 
     /// The height in pixels of the image the terrain is drawn into, which the
     /// level of detail is chosen against: a chunk is drawn at the coarsest
-    /// level whose error stays within kLodMaxErrorPixels on screen.
+    /// level whose error stays within a pixel on screen (terrain_cull.comp.glsl).
     void setLodViewportHeight(uint32_t pixels) { lodViewportHeight_ = pixels; }
     /// Each tile's resident chunks, which the distant terrain leaves alone.
     [[nodiscard]] const pipeline::TerrainCoverage& detailedCoverage() const { return chunkIndex_.coverage(); }
@@ -390,13 +440,14 @@ public:
 
 private:
 
-    struct Recorded {
-        uint32_t triangles = 0;
-        uint32_t draws = 0;
-    };
-    /// Records `draws`; the triangles and draw calls it recorded.
-    Recorded recordChunks(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
-                          const std::vector<ChunkDraw>& draws, bool wireframe);
+    /// Records the cull's draws of the view (reflection false) or the
+    /// reflection: per page, a call per pipeline.
+    void recordCulled(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const DrawList& list, bool reflection);
+    /// The cull's row of the chunk at `index` in `chunks`, from it and its
+    /// neighbours, queued with its shading row for the GPU.
+    void queueRows(uint32_t index);
+    bool createCull();
+    void destroyCull();
     GeometryDraw geometryOf(const TerrainChunkGPU& chunk) const;
     static void bindDraw(VkCommandBuffer cmd, const GeometryDraw& draw);
     TerrainChunkGPU uploadChunk(const pipeline::ChunkMesh& chunk);
@@ -421,10 +472,6 @@ private:
     /// must drop the chunk: a row naming no texture is as undefined to draw
     /// as a null image view.
     bool writeChunkRow(TerrainChunkGPU& chunk);
-    /// Whether this frame slot's chunk set names the table as it is.
-    [[nodiscard]] bool chunkRowsReady(uint32_t frameIndex) const {
-        return chunkRows_.buffer() && chunkSetVersion_[frameIndex] == chunkRows_.version();
-    }
     void destroyChunkGPU(TerrainChunkGPU& chunk);
 
     /// Point a chunk's base, layer and alpha textures at the loaded ones.
@@ -467,13 +514,13 @@ private:
     VkDescriptorSetLayout chunkSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool chunkSetPool_ = VK_NULL_HANDLE;
     VkDescriptorSet chunkSets_[MAX_FRAMES_IN_FLIGHT] = {};
-    uint32_t chunkSetVersion_[MAX_FRAMES_IN_FLIGHT] = {};
     std::vector<uint32_t> freeRows_;
     uint32_t rowCount_ = 0;
     /// Rows changed and not yet known to be on the GPU, with the first
     /// extraction that carries them. Main thread.
     struct PendingRow {
         TerrainChunkRowGPU row;
+        TerrainCullRowGPU cull;
         uint64_t extraction = 0;
     };
     std::unordered_map<uint32_t, PendingRow> pendingRows_;
@@ -483,6 +530,34 @@ private:
     /// extract on the main thread.
     uint64_t rowsUploaded_ = 0;
     std::atomic<uint64_t> rowsSubmitted_{0};
+
+    /// The ground's cull (terrain_cull.comp.glsl): its rows beside the chunk
+    /// rows, and per frame slot what it reads and writes - the per-row levels,
+    /// the draw records, the commands, each list's start and count, what it
+    /// counted (read back two frames later) and the frame's view.
+    GpuSlotTable cullRows_{sizeof(TerrainCullRowGPU), "terrain cull table"};
+    VkPipeline cullPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout cullPipelineLayout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout cullSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool cullSetPool_ = VK_NULL_HANDLE;
+    struct CullFrame {
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        AllocatedBuffer levels, records, commands, regions, counts, stats, view;
+        uint32_t rowCapacity = 0, commandCapacity = 0, groupCapacity = 0;
+        /// Versions of the tables its sets name as they were written.
+        uint32_t cullRowsVersion = 0, chunkRowsVersion = 0;
+        bool setsCurrent = false;
+        /// It ran this frame: the view and the reflection may draw from it.
+        bool culled = false;
+        /// Its stats hold a frame's counts not yet read.
+        bool counted = false;
+    };
+    CullFrame cullFrames_[MAX_FRAMES_IN_FLIGHT];
+    /// Chunks resident in each geometry page, the room its lists need.
+    std::vector<uint32_t> pageChunks_;
+    /// Draws' counts come from the GPU (drawIndirectCount); without it each
+    /// list is drawn at its full room, the rest of it empty commands.
+    bool countFromGpu_ = false;
 
     // Loaded terrain chunks
     std::vector<TerrainChunkGPU> chunks;

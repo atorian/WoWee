@@ -39,8 +39,17 @@ layout(set = 0, binding = 0) uniform PerFrame {
 
 layout(push_constant) uniform Push {
     mat4 model;
-    uvec4 localLights;  // local_lights.glsli
 } push;
+
+// What the shaders read of this draw's chunk (terrain_cull.comp.glsl), the
+// draw's first instance its place.
+struct TerrainDrawRecord {
+    uvec4 row;
+    vec4 relief;
+    vec4 baked;
+    uvec4 lights;  // local_lights.glsli
+};
+layout(std430, set = 2, binding = 1) readonly buffer TerrainDrawRecords { TerrainDrawRecord terrainRecords[]; };
 
 layout(location = 0) in vec3 aPosition;
 layout(location = 1) in vec3 aNormal;
@@ -52,9 +61,11 @@ layout(location = 1) out vec3 Normal;
 layout(location = 2) out vec2 TexCoord;
 layout(location = 3) out vec2 LayerUV;
 layout(location = 4) flat out uvec4 vLocalLights;
+layout(location = 5) flat out uint vRecord;
 
 void main() {
-    vLocalLights = push.localLights;
+    vRecord = uint(gl_InstanceIndex);
+    vLocalLights = terrainRecords[gl_InstanceIndex].lights;
     vec4 worldPos = push.model * vec4(aPosition, 1.0);
     FragPos = worldPos.xyz;
     Normal = aNormal;

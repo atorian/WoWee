@@ -59,7 +59,10 @@ AllocatedBuffer createBuffer(VmaAllocator allocator, VkDeviceSize size,
 
     VmaAllocationCreateInfo allocInfo{};
     allocInfo.usage = memoryUsage;
-    if (memoryUsage == VMA_MEMORY_USAGE_CPU_TO_GPU || memoryUsage == VMA_MEMORY_USAGE_CPU_ONLY) {
+    // Whatever the CPU writes or reads back stays mapped; a vmaMapMemory on
+    // top of it is still allowed.
+    if (memoryUsage == VMA_MEMORY_USAGE_CPU_TO_GPU || memoryUsage == VMA_MEMORY_USAGE_CPU_ONLY ||
+        memoryUsage == VMA_MEMORY_USAGE_GPU_TO_CPU) {
         allocInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
     }
 

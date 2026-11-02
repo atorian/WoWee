@@ -32,17 +32,6 @@
 namespace wowee {
 namespace rendering {
 
-// The fragment stage's push constants, after the vertex stage's
-// GPUPushConstants: the surface, then the chunk's row. Matches `Surface` in
-// terrain.frag.glsl.
-constexpr uint32_t kSurfacePushOffset = sizeof(GPUPushConstants);
-constexpr uint32_t kRowPushOffset = kSurfacePushOffset + sizeof(TerrainSurfacePush);
-static_assert(kRowPushOffset + sizeof(uint32_t) <= 128,
-              "the terrain's push constants fit the space Vulkan guarantees");
-
-// The pipelines' sets: the frame's block, the texture table, the chunk rows.
-constexpr uint32_t kTableSet = 1;
-constexpr uint32_t kChunkSet = 2;
 
 /// Chunks drawn into their atlases a frame. A tile is 256; one arriving bakes
 /// in the frame after it, and the world's first hundred tiles in seventy.
@@ -265,15 +254,24 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
     if (!lodEnabled_) {
         LOG_WARNING("WOWEE_TERRAIN_LOD=0: every terrain chunk is drawn at full detail, however far");
     }
+    // What the cull would drop drawn anyway, to compare the view against
+    // (check_terrain_cull.py).
+    if (!core::envFlagEnabled("WOWEE_TERRAIN_FRUSTUM_CULL", true)) {
+        frustumCullingEnabled = false;
+        LOG_WARNING("WOWEE_TERRAIN_FRUSTUM_CULL=0: every terrain chunk in reach is drawn, in view or not");
+    }
 
     // --- The chunk table's set, one per frame slot ---
-    const VkDescriptorSetLayoutBinding chunkBinding{.binding = 0,
-                                                    .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                                    .descriptorCount = 1,
-                                                    .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT};
-    chunkSetLayout_ = createDescriptorSetLayout(device, {chunkBinding});
+    // The chunk rows, and the frame's draw records the cull writes.
+    const VkDescriptorSetLayoutBinding chunkBindings[] = {
+        {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT},
+        {.binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT},
+    };
+    chunkSetLayout_ = createDescriptorSetLayout(device, {chunkBindings[0], chunkBindings[1]});
     const VkDescriptorPoolSize chunkPoolSize{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                             .descriptorCount = MAX_FRAMES_IN_FLIGHT};
+                                             .descriptorCount = 2 * MAX_FRAMES_IN_FLIGHT};
     VkDescriptorPoolCreateInfo poolInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     poolInfo.maxSets = MAX_FRAMES_IN_FLIGHT;
     poolInfo.poolSizeCount = 1;
@@ -293,6 +291,8 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
         }
     }
     chunkRows_.initialize(*vkCtx);
+    cullRows_.initialize(*vkCtx);
+    if (!createCull()) return false;
     const VkDescriptorSetLayout tableLayout = vkCtx->textureTable().layout();
 
     // The far ground's bake, which says itself why when it cannot be had.
@@ -303,17 +303,15 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
     }
 
     // --- Create pipeline layout ---
+    // The model matrix alone is pushed; everything of a chunk's draw is in
+    // its record (terrain_cull.comp.glsl).
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
     pushRange.offset = 0;
-    pushRange.size = sizeof(GPUPushConstants);
-    VkPushConstantRange surfaceRange{};
-    surfaceRange.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    surfaceRange.offset = kSurfacePushOffset;
-    surfaceRange.size = sizeof(TerrainSurfacePush) + sizeof(uint32_t);
+    pushRange.size = sizeof(glm::mat4);
 
     std::vector<VkDescriptorSetLayout> setLayouts = { perFrameLayout, tableLayout, chunkSetLayout_ };
-    pipelineLayout = createPipelineLayout(device, setLayouts, { pushRange, surfaceRange });
+    pipelineLayout = createPipelineLayout(device, setLayouts, { pushRange });
     if (!pipelineLayout) {
         LOG_ERROR("TerrainRenderer: failed to create pipeline layout");
         return false;
@@ -451,11 +449,11 @@ void TerrainRenderer::shutdown() {
     destroy(device, shortOfDiscardsPipeline);
     destroy(device, wireframePipeline);
     destroy(device, pipelineLayout);
+    destroyCull();
     chunkRows_.destroy();
     destroy(device, chunkSetPool_);
     destroy(device, chunkSetLayout_);
     for (auto& set : chunkSets_) set = VK_NULL_HANDLE;
-    for (auto& version : chunkSetVersion_) version = 0;
 
     // Shadow pipeline cleanup
     destroy(device, shadowPipeline_);
@@ -744,6 +742,8 @@ bool TerrainRenderer::placeInGeometryPage(TerrainChunkGPU& gpuChunk,
     gpuChunk.geometryPage = slot;
     gpuChunk.baseVertex = static_cast<int32_t>(*firstVertex);
     gpuChunk.firstIndex = *firstIndex;
+    if (pageChunks_.size() <= static_cast<size_t>(slot)) pageChunks_.resize(static_cast<size_t>(slot) + 1, 0);
+    ++pageChunks_[static_cast<size_t>(slot)];
     return true;
 }
 
@@ -940,18 +940,14 @@ bool TerrainRenderer::writeChunkRow(TerrainChunkGPU& chunk) {
             freeRows_.pop_back();
         }
     }
-    pendingRows_[chunk.row] = {row, extractions_ + 1};
+    // Queued with its row for the cull once it is among the chunks
+    // (addChunk), where its neighbours are known.
+    chunk.shading = row;
     return true;
 }
 
 namespace {
 
-/// The most a coarser level may move the ground on screen, in pixels: how
-/// far its surface strays from the full mesh (ChunkMesh::lodError), seen
-/// from the chunk's nearest point. Under a pixel the shape cannot be told
-/// from the full mesh's; the light is the same at every level, from the
-/// chunk's normal image.
-constexpr float kLodMaxErrorPixels = 1.0f;
 
 /// A tile's place on the map, as a key.
 uint64_t chunkMapKey(int gx, int gy) {
@@ -990,8 +986,6 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
     const uint32_t height = lodViewportHeight_ ? lodViewportHeight_ : vkCtx->getSwapchainExtent().height;
     const float focalPixels = std::abs(camera.getProjectionMatrix()[1][1]) * static_cast<float>(height) * 0.5f;
     const TerrainBakeBand band = terrainBakeBand(core::coords::TILE_SIZE / 16.0f, focalPixels);
-    std::vector<int8_t> levels(chunks.size(), -1);
-    std::vector<uint32_t> visible, mirrored;
     list.depth.reserve(shadowTiles_.size());
     for (auto& tile : shadowTiles_) {
         list.depth.push_back(tile.depth.extract(tile.chunks, [&](uint32_t index) {
@@ -1000,105 +994,53 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
         }));
     }
     laps.lap("depth lists");
-    // Tiles first, by the sphere round all of a tile's chunks the depth list
-    // just made: a chunk inside a tile that is out of reach, of view and of
-    // the mirror is out of each of them too. The walk went over every chunk
-    // resident - 34,500 in Dalaran - for the 5,400 it drew. The chunks of the
-    // tiles kept are tested in their list order, as before, so the draws
-    // come out the same.
-    // Whether a sphere is in reach and in view, and whether the water's
-    // reflection can show it - the far side of a hill over a lake, which the
-    // camera may not see itself. One test for a tile's sphere and a chunk's:
-    // a sphere inside another passes no test the other fails.
-    struct Seen { float distanceSq; bool view, mirror; };
-    const auto seen = [&](const glm::vec3& centre, float radius) {
-        const glm::vec2 step = glm::vec2(centre - camPos);
-        const float distanceSq = glm::dot(step, step);
-        const float limit = maxViewDistance_ + radius;
-        const bool inReach = distanceSq <= limit * limit;
-        return Seen{distanceSq, inReach && (!frustumCullingEnabled || frustum.intersectsSphere(centre, radius)),
-                    inReach && mirror && mirror->canSee(centre, radius)};
-    };
-    std::vector<uint64_t> toTest((chunks.size() + 63) / 64, 0);
-    for (size_t t = 0; t < shadowTiles_.size(); ++t) {
-        const Seen tile = seen(list.depth[t]->centre, list.depth[t]->radius);
-        if (!tile.view && !tile.mirror) {
-            // Every chunk resident is valid and has its material.
-            list.culled += static_cast<int>(shadowTiles_[t].chunks.size());
-            continue;
+    // Which chunks the view and the water's reflection see, at what level,
+    // with which skirts, lights and surface, is the cull's on the GPU
+    // (terrain_cull.comp.glsl), over every row; here only what it reads of
+    // the frame. The rules are the ones the walk here used: Frustum and
+    // WaterReflectionView, terrainLodFor, terrainSurfaceSourceFor,
+    // pickLocalLights, terrainChunkShortOfDiscards.
+    TerrainCullFrameGPU& cull = list.cull;
+    const auto planeOf = [](const Plane& p) { return glm::vec4(p.normal, p.distance); };
+    for (int i = 0; i < 6; ++i) cull.viewPlanes[i] = planeOf(frustum.getPlane(static_cast<Frustum::Side>(i)));
+    if (mirror) {
+        for (int i = 0; i < 6; ++i) cull.mirrorPlanes[i] = planeOf(mirror->seen.getPlane(static_cast<Frustum::Side>(i)));
+    }
+    cull.camera = glm::vec4(camPos, focalPixels);
+    cull.limits = glm::vec4(maxViewDistance_, std::min(maxViewDistance_, kDistantTerrainStart), band.start, band.end);
+    cull.mirror = glm::vec4(mirror ? 1.0f : 0.0f, mirror ? mirror->height : 0.0f,
+                            normalMappingEnabled_ ? normalMapStrength_ : 0.0f, frustumCullingEnabled ? 1.0f : 0.0f);
+    cull.counts = glm::uvec4(rowCount_, static_cast<uint32_t>(lights.size()), lodEnabled_ ? 1u : 0u,
+                             bakeEnabled_ ? 1u : 0u);
+    // Each page's lists have room for five commands a chunk it holds: its
+    // level and up to four skirts.
+    list.groups.resize(geometryPages_.size());
+    list.regions.resize(geometryPages_.size() * 4);
+    for (size_t g = 0; g < geometryPages_.size(); ++g) {
+        GroupDraw& group = list.groups[g];
+        if (geometryPages_[g]) {
+            group.vertices = geometryPages_[g]->vertices.buffer;
+            group.indices = geometryPages_[g]->indices.buffer;
         }
-        for (const uint32_t index : shadowTiles_[t].chunks) toTest[index / 64] |= uint64_t{1} << (index % 64);
-    }
-    std::vector<uint32_t> candidates;
-    for (size_t word = 0; word < toTest.size(); ++word) {
-        for (uint64_t bits = toTest[word]; bits != 0; bits &= bits - 1)
-            candidates.push_back(static_cast<uint32_t>(word * 64 + static_cast<size_t>(std::countr_zero(bits))));
-    }
-    for (const uint32_t i : candidates) {
-        const auto& ch = chunks[i];
-        if (!ch.isValid()) continue;
-        if (ch.row == TerrainChunkGPU::kNoRow) continue;
-        const Seen chunk = seen(ch.boundingSphereCenter, ch.boundingSphereRadius);
-        if (!chunk.view) ++list.culled;
-        if (!chunk.view && !chunk.mirror) continue;
-        const float nearest = glm::length(ch.boundingSphereCenter - camPos) - ch.boundingSphereRadius;
-        levels[i] = static_cast<int8_t>(lodEnabled_ ? pipeline::terrainLodFor(ch.lodErrors, ch.offeredLods,
-                                                     nearest, focalPixels, kLodMaxErrorPixels) : 0);
-        if (chunk.view) {
-            visible.push_back(i);
-            list.furthestSq = std::max(list.furthestSq, chunk.distanceSq);
+        group.capacity = (g < pageChunks_.size() ? pageChunks_[g] : 0u) * 5u;
+        for (size_t l = 0; l < 4; ++l) {
+            list.regions[g * 4 + l] = list.commandCapacity;
+            list.commandCapacity += group.capacity;
         }
-        if (chunk.mirror) mirrored.push_back(i);
     }
-    laps.lap("walk");
-    // A chunk's draw, and where its surface is read from.
-    const auto drawOf = [&](uint32_t i) -> std::pair<ChunkDraw, TerrainSurfaceSource> {
-        const auto& ch = chunks[i];
-        const size_t level = static_cast<size_t>(levels[i]);
-        ChunkDraw draw;
-        draw.row = ch.row;
-        draw.geometry = geometryOf(ch);
-        draw.ranges[0] = ch.lods[level];
-        // A skirt where the neighbour across an edge is missing or drawn at
-        // another level.
-        for (size_t edge = 0; edge < TerrainChunkIndex::kEdges; ++edge) {
-            const uint32_t neighbour = chunkIndex_.neighbour(i, edge);
-            if (neighbour == TerrainChunkIndex::kNone || levels[neighbour] != levels[i])
-                draw.ranges[edge + 1] = ch.skirts[level][edge];
-        }
-        const float distance = glm::length(ch.boundingSphereCenter - camPos);
-        const auto source = bakeEnabled_ && ch.bakeComplete->load()
-            ? terrainSurfaceSourceFor(band, distance - ch.boundingSphereRadius,
-                                      distance + ch.boundingSphereRadius, ch.steepestUpZ)
-            : TerrainSurfaceSource::Layers;
-        draw.surface.baked = glm::vec4(static_cast<float>(source), band.start, band.end,
-                                       source == TerrainSurfaceSource::Layers ? 0.0f : static_cast<float>(ch.chunkX + 16 * ch.chunkY));
-        draw.surface.relief.x = normalMappingEnabled_ ? normalMapStrength_ : 0.0f;
-        draw.lights = lights.empty() ? kNoLocalLights : pickLocalLights(lights, ch.boundingSphereCenter,
-                                                                       ch.boundingSphereRadius);
-        draw.reachesDiscards = !terrainChunkShortOfDiscards(
-            glm::length(glm::vec2(ch.boundingSphereCenter - camPos)), ch.boundingSphereRadius,
-            maxViewDistance_, kDistantTerrainStart);
-        return {draw, source};
-    };
-    list.view.reserve(visible.size());
-    for (const uint32_t i : visible) {
-        auto [draw, source] = drawOf(i);
-        if (source == TerrainSurfaceSource::Baked) ++list.baked;
-        if (source == TerrainSurfaceSource::Crossfade) ++list.crossfade;
-        list.view.push_back(std::move(draw));
-    }
-    laps.lap("view draws");
-    list.reflection.reserve(mirrored.size());
-    for (const uint32_t i : mirrored) list.reflection.push_back(drawOf(i).first);
-    laps.lap("reflection draws");
+    cull.groups = glm::uvec4(static_cast<uint32_t>(list.groups.size()), 0u, 0u, 0u);
+    laps.lap("cull frame");
     if (bakeEnabled_) {
         list.atlases = bake_.extractNewAtlases();
         // A skipped frame keeps its jobs pending. Recording acknowledges them
         // through a completion token, never by writing into the live chunk.
+        // A chunk baked is read from its bake by the cull from now on.
         std::erase_if(bakeQueue_, [&](const std::pair<int, int>& place) {
             const uint32_t found = chunkIndex_.find(place.first, place.second);
-            return found == TerrainChunkIndex::kNone || chunks[found].bakeComplete->load();
+            if (found == TerrainChunkIndex::kNone) return true;
+            if (!chunks[found].bakeComplete->load()) return false;
+            queueRows(found);
+            return true;
         });
         const size_t take = std::min(bakeQueue_.size(), kBakeChunksPerFrame);
         for (size_t i = 0; i < take; ++i) {
@@ -1123,29 +1065,279 @@ TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const s
     list.rowCount = rowCount_;
     list.rowSlots.reserve(pendingRows_.size());
     list.rows.reserve(pendingRows_.size());
+    list.cullRows.reserve(pendingRows_.size());
     for (const auto& [slot, pending] : pendingRows_) {
         list.rowSlots.push_back(slot);
         list.rows.push_back(pending.row);
+        list.cullRows.push_back(pending.cull);
     }
     return list;
 }
 
+void TerrainRenderer::queueRows(uint32_t index) {
+    const TerrainChunkGPU& chunk = chunks[index];
+    if (chunk.row == TerrainChunkGPU::kNoRow || !chunk.isValid()) return;
+    TerrainCullRowGPU cull;
+    cull.sphere = glm::vec4(chunk.boundingSphereCenter, chunk.boundingSphereRadius);
+    for (size_t level = 0; level < 4; ++level) cull.lodErrors[static_cast<int>(level)] = chunk.lodErrors[level];
+    for (size_t edge = 0; edge < TerrainChunkIndex::kEdges; ++edge) {
+        const uint32_t neighbour = chunkIndex_.neighbour(index, edge);
+        cull.neighbours[edge] = neighbour == TerrainChunkIndex::kNone ? ~0u : chunks[neighbour].row;
+    }
+    cull.group = static_cast<uint32_t>(chunk.geometryPage);
+    cull.firstIndex = chunk.firstIndex;
+    cull.baseVertex = chunk.baseVertex;
+    cull.offeredLods = chunk.offeredLods;
+    cull.cell = static_cast<uint32_t>(chunk.chunkX + 16 * chunk.chunkY);
+    cull.flags = TerrainCullRowGPU::kValid | (chunk.bakeComplete->load() ? TerrainCullRowGPU::kBaked : 0u);
+    cull.steepestUpZ = chunk.steepestUpZ;
+    for (size_t level = 0; level < 4; ++level) {
+        cull.lods[level][0] = chunk.lods[level].first;
+        cull.lods[level][1] = chunk.lods[level].count;
+        for (size_t edge = 0; edge < 4; ++edge) {
+            cull.skirts[level * 4 + edge][0] = chunk.skirts[level][edge].first;
+            cull.skirts[level * 4 + edge][1] = chunk.skirts[level][edge].count;
+        }
+    }
+    pendingRows_[chunk.row] = {chunk.shading, cull, extractions_ + 1};
+}
+
 void TerrainRenderer::uploadChunkRows(VkCommandBuffer cmd, uint32_t frameIndex, const DrawList& list) {
-    if (list.rowCount == 0 || !chunkRows_.reserve(cmd, list.rowCount)) return;
-    if (!chunkRows_.write(cmd, frameIndex, list.rowSlots, list.rows.data())) return;
+    cullFrames_[frameIndex].culled = false;
+    if (list.rowCount == 0) return;
+    if (!chunkRows_.reserve(cmd, list.rowCount) || !cullRows_.reserve(cmd, list.rowCount)) return;
+    if (!chunkRows_.write(cmd, frameIndex, list.rowSlots, list.rows.data()) ||
+        !cullRows_.write(cmd, frameIndex, list.rowSlots, list.cullRows.data())) {
+        return;
+    }
     rowsUploaded_ = list.rowsExtraction;
-    // This slot's set is rewritten after its fence, before any pass binds
-    // it, and only when the table it names was replaced.
-    if (chunkSetVersion_[frameIndex] == chunkRows_.version()) return;
-    const VkDescriptorBufferInfo table{.buffer = chunkRows_.buffer(), .offset = 0, .range = chunkRows_.bytes()};
-    VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    write.dstSet = chunkSets_[frameIndex];
-    write.dstBinding = 0;
-    write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    write.pBufferInfo = &table;
-    vkUpdateDescriptorSets(vkCtx->getDevice(), 1, &write, 0, nullptr);
-    chunkSetVersion_[frameIndex] = chunkRows_.version();
+}
+
+namespace {
+
+// A buffer the cull writes or reads, at least `bytes` large; replaced (the
+// old one released after the frames in flight) when it is not.
+bool ensureCullBuffer(VkContext& ctx, AllocatedBuffer& buffer, VkDeviceSize bytes, VkBufferUsageFlags usage,
+                      VmaMemoryUsage memory, const char* what) {
+    if (buffer.buffer && buffer.info.size >= bytes) return true;
+    DeferredResources retire(ctx);
+    if (buffer.buffer) retire.buffer(buffer);
+    buffer = createBuffer(ctx.getAllocator(), std::max<VkDeviceSize>(bytes, 256), usage, memory);
+    if (buffer.buffer) return true;
+    static core::LogBudget budget(4, "terrain cull buffers");
+    if (budget.take())
+        LOG_ERROR("Terrain cull: no memory for its ", what, " (", bytes, " bytes); the ground is not drawn");
+    return false;
+}
+
+}  // namespace
+
+bool TerrainRenderer::createCull() {
+    VkDevice device = vkCtx->getDevice();
+    countFromGpu_ = vkCtx->isDrawIndirectCountSupported();
+    if (!countFromGpu_) {
+        LOG_WARNING("Terrain: the device has no drawIndirectCount; each page's lists of ground draws are "
+                    "drawn at their full room, five commands a chunk, the unused ones empty");
+    }
+    // terrain_cull.comp.glsl: the frame's view at 1, the rest storage.
+    std::vector<VkDescriptorSetLayoutBinding> bindings(9);
+    for (uint32_t b = 0; b < 9; ++b) {
+        bindings[b] = {.binding = b,
+                       .descriptorType = b == 1 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                       .descriptorCount = 1,
+                       .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT};
+    }
+    cullSetLayout_ = createDescriptorSetLayout(device, bindings);
+    const VkDescriptorPoolSize sizes[] = {
+        {.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 8 * MAX_FRAMES_IN_FLIGHT},
+        {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = MAX_FRAMES_IN_FLIGHT},
+    };
+    VkDescriptorPoolCreateInfo poolInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    poolInfo.maxSets = MAX_FRAMES_IN_FLIGHT;
+    poolInfo.poolSizeCount = 2;
+    poolInfo.pPoolSizes = sizes;
+    if (!cullSetLayout_ || vkCreateDescriptorPool(device, &poolInfo, nullptr, &cullSetPool_) != VK_SUCCESS) {
+        LOG_ERROR("TerrainRenderer: could not make the cull's sets; the ground is not drawn");
+        return false;
+    }
+    for (auto& frame : cullFrames_) {
+        VkDescriptorSetAllocateInfo allocInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        allocInfo.descriptorPool = cullSetPool_;
+        allocInfo.descriptorSetCount = 1;
+        allocInfo.pSetLayouts = &cullSetLayout_;
+        if (vkAllocateDescriptorSets(device, &allocInfo, &frame.set) != VK_SUCCESS) {
+            LOG_ERROR("TerrainRenderer: could not allocate the cull's sets; the ground is not drawn");
+            return false;
+        }
+    }
+    const VkPushConstantRange pass{.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0, .size = sizeof(uint32_t)};
+    cullPipelineLayout_ = createPipelineLayout(device, {cullSetLayout_}, {pass});
+    VkShaderModule shader;
+    if (!cullPipelineLayout_ || !shader.loadFromFile(device, "assets/shaders/terrain_cull.comp.spv")) {
+        LOG_ERROR("TerrainRenderer: terrain_cull.comp.spv or its layout is missing; the ground is not drawn");
+        return false;
+    }
+    VkComputePipelineCreateInfo info{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    info.stage = shader.stageInfo(VK_SHADER_STAGE_COMPUTE_BIT);
+    info.layout = cullPipelineLayout_;
+    const VkResult made = vkCreateComputePipelines(device, vkCtx->getPipelineCache(), 1, &info, nullptr,
+                                                   &cullPipeline_);
+    shader.destroy();
+    if (made != VK_SUCCESS) {
+        LOG_ERROR("TerrainRenderer: the cull pipeline could not be made (VkResult ", static_cast<int>(made),
+                  "); the ground is not drawn");
+        return false;
+    }
+    return true;
+}
+
+void TerrainRenderer::destroyCull() {
+    VkDevice device = vkCtx->getDevice();
+    VmaAllocator allocator = vkCtx->getAllocator();
+    for (auto& frame : cullFrames_) {
+        for (AllocatedBuffer* buffer : {&frame.levels, &frame.records, &frame.commands, &frame.regions, &frame.counts,
+                                        &frame.stats, &frame.view}) {
+            if (buffer->buffer) destroyBuffer(allocator, *buffer);
+        }
+        frame = CullFrame{};
+    }
+    cullRows_.destroy();
+    destroy(device, cullPipeline_);
+    destroy(device, cullPipelineLayout_);
+    destroy(device, cullSetPool_);
+    destroy(device, cullSetLayout_);
+}
+
+void TerrainRenderer::dispatchCull(VkCommandBuffer cmd, uint32_t frameIndex, const DrawList& list, ::VkBuffer lights,
+                                   uint32_t lightCount) {
+    CullFrame& frame = cullFrames_[frameIndex];
+    // What this slot's last cull counted: its frame has finished on the GPU.
+    if (frame.counted && frame.stats.info.pMappedData) {
+        TerrainCullStatsGPU counted;
+        std::memcpy(&counted, frame.stats.info.pMappedData, sizeof(counted));
+        renderedChunks = static_cast<int>(counted.drawn);
+        culledChunks = static_cast<int>(counted.culled);
+        bakedDrawnChunks_ = static_cast<int>(counted.baked);
+        crossfadeDrawnChunks_ = static_cast<int>(counted.crossfade);
+        std::memcpy(&furthestDrawnSq_, &counted.furthestSq, sizeof(float));
+        renderedTriangles_ = counted.triangles;
+        renderedDraws_ = counted.draws;
+        frame.counted = false;
+    }
+    frame.culled = false;
+    if (!cullPipeline_ || list.rowCount == 0 || !chunkRows_.buffer() || !cullRows_.buffer() ||
+        rowsUploaded_ != list.rowsExtraction || !lights) {
+        return;
+    }
+    const uint32_t groups = std::max<uint32_t>(1, static_cast<uint32_t>(list.groups.size()));
+    const uint32_t commands = std::max<uint32_t>(1, list.commandCapacity);
+    constexpr VkBufferUsageFlags kStorage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bool replaced = !frame.setsCurrent;
+    const auto ensure = [&](AllocatedBuffer& buffer, VkDeviceSize bytes, VkBufferUsageFlags usage,
+                            VmaMemoryUsage memory, const char* what) {
+        const ::VkBuffer before = buffer.buffer;
+        if (!ensureCullBuffer(*vkCtx, buffer, bytes, usage, memory, what)) return false;
+        replaced |= buffer.buffer != before;
+        return true;
+    };
+    if (!ensure(frame.levels, VkDeviceSize(list.rowCount) * sizeof(int32_t), kStorage, VMA_MEMORY_USAGE_GPU_ONLY,
+                "levels") ||
+        !ensure(frame.records, VkDeviceSize(list.rowCount) * sizeof(TerrainDrawRecordGPU), kStorage,
+                VMA_MEMORY_USAGE_GPU_ONLY, "draw records") ||
+        !ensure(frame.commands, VkDeviceSize(commands) * sizeof(VkDrawIndexedIndirectCommand),
+                kStorage | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY, "commands") ||
+        !ensure(frame.regions, VkDeviceSize(groups) * 4 * sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VMA_MEMORY_USAGE_CPU_TO_GPU, "list starts") ||
+        !ensure(frame.counts, VkDeviceSize(groups) * 4 * sizeof(uint32_t),
+                kStorage | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY, "list counts") ||
+        !ensure(frame.stats, sizeof(TerrainCullStatsGPU), kStorage, VMA_MEMORY_USAGE_GPU_TO_CPU, "statistics") ||
+        !ensure(frame.view, sizeof(TerrainCullFrameGPU), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                VMA_MEMORY_USAGE_CPU_TO_GPU, "frame view")) {
+        return;
+    }
+    // This slot's sets are rewritten after its fence, before anything binds
+    // them, when a buffer or a table they name was replaced.
+    if (replaced || frame.cullRowsVersion != cullRows_.version() || frame.chunkRowsVersion != chunkRows_.version()) {
+        const VkDescriptorBufferInfo infos[] = {
+            {cullRows_.buffer(), 0, cullRows_.bytes()},
+            {frame.view.buffer, 0, sizeof(TerrainCullFrameGPU)},
+            {frame.levels.buffer, 0, VK_WHOLE_SIZE},
+            {frame.records.buffer, 0, VK_WHOLE_SIZE},
+            {frame.commands.buffer, 0, VK_WHOLE_SIZE},
+            {frame.regions.buffer, 0, VK_WHOLE_SIZE},
+            {frame.counts.buffer, 0, VK_WHOLE_SIZE},
+            {frame.stats.buffer, 0, VK_WHOLE_SIZE},
+            {lights, 0, VK_WHOLE_SIZE},
+        };
+        VkWriteDescriptorSet writes[11] = {};
+        for (uint32_t b = 0; b < 9; ++b) {
+            writes[b] = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            writes[b].dstSet = frame.set;
+            writes[b].dstBinding = b;
+            writes[b].descriptorCount = 1;
+            writes[b].descriptorType = b == 1 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[b].pBufferInfo = &infos[b];
+        }
+        const VkDescriptorBufferInfo chunkInfos[] = {{chunkRows_.buffer(), 0, chunkRows_.bytes()},
+                                                     {frame.records.buffer, 0, VK_WHOLE_SIZE}};
+        for (uint32_t b = 0; b < 2; ++b) {
+            writes[9 + b] = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            writes[9 + b].dstSet = chunkSets_[frameIndex];
+            writes[9 + b].dstBinding = b;
+            writes[9 + b].descriptorCount = 1;
+            writes[9 + b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[9 + b].pBufferInfo = &chunkInfos[b];
+        }
+        vkUpdateDescriptorSets(vkCtx->getDevice(), 11, writes, 0, nullptr);
+        frame.cullRowsVersion = cullRows_.version();
+        frame.chunkRowsVersion = chunkRows_.version();
+        frame.setsCurrent = true;
+    }
+    // The lights bound are this frame's, so their count is too.
+    TerrainCullFrameGPU view = list.cull;
+    view.counts.y = lightCount;
+    std::memcpy(frame.view.info.pMappedData, &view, sizeof(view));
+    std::memcpy(frame.regions.info.pMappedData, list.regions.data(), list.regions.size() * sizeof(uint32_t));
+
+    // After every earlier frame's draws from these buffers, before this one's.
+    const auto barrier = [&](VkPipelineStageFlags2 src, VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dst,
+                             VkAccessFlags2 dstAccess) {
+        VkMemoryBarrier2 b{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        b.srcStageMask = src;
+        b.srcAccessMask = srcAccess;
+        b.dstStageMask = dst;
+        b.dstAccessMask = dstAccess;
+        VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dep.memoryBarrierCount = 1;
+        dep.pMemoryBarriers = &b;
+        cmdPipelineBarrier2(cmd, dep);
+    };
+    constexpr VkPipelineStageFlags2 kDraws = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
+                                             VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+                                             VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    barrier(kDraws | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    vkCmdFillBuffer(cmd, frame.counts.buffer, 0, VK_WHOLE_SIZE, 0);
+    vkCmdFillBuffer(cmd, frame.stats.buffer, 0, VK_WHOLE_SIZE, 0);
+    // Without the count from the GPU every list is drawn at its full room:
+    // what the cull leaves of it must be empty commands.
+    if (!countFromGpu_) vkCmdFillBuffer(cmd, frame.commands.buffer, 0, VK_WHOLE_SIZE, 0);
+    barrier(VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cullPipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cullPipelineLayout_, 0, 1, &frame.set, 0, nullptr);
+    const uint32_t workgroups = (list.rowCount + 63) / 64;
+    for (uint32_t second = 0; second < 2; ++second) {
+        vkCmdPushConstants(cmd, cullPipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(second), &second);
+        vkCmdDispatch(cmd, workgroups, 1, 1);
+        // The second pass reads every chunk's level the first wrote.
+        barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | kDraws,
+                VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT | VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT);
+    }
+    frame.culled = true;
+    frame.counted = true;
 }
 
 void TerrainRenderer::frameSubmitted() {
@@ -1155,82 +1347,49 @@ void TerrainRenderer::frameSubmitted() {
 }
 
 void TerrainRenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const DrawList& list) {
-    const Recorded recorded = recordChunks(cmd, perFrameSet, list.view, list.wireframe);
-    renderedTriangles_ = recorded.triangles;
-    renderedDraws_ = recorded.draws;
-    renderedChunks = static_cast<int>(list.view.size());
-    culledChunks = list.culled;
-    furthestDrawnSq_ = list.furthestSq;
-    bakedDrawnChunks_ = list.baked;
-    crossfadeDrawnChunks_ = list.crossfade;
+    recordCulled(cmd, perFrameSet, list, false);
 }
 
 void TerrainRenderer::recordReflection(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const DrawList& list) {
-    recordChunks(cmd, perFrameSet, list.reflection, list.wireframe);
+    recordCulled(cmd, perFrameSet, list, true);
 }
 
-TerrainRenderer::Recorded TerrainRenderer::recordChunks(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
-                                                        const std::vector<ChunkDraw>& draws, bool wireframe) {
-    if (!pipeline || draws.empty()) return {};
+void TerrainRenderer::recordCulled(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const DrawList& list,
+                                   bool reflection) {
     const uint32_t frameIndex = vkCtx->getCurrentFrame();
-    // Without this frame's rows the ground is not drawn; the table said why.
-    if (!chunkRowsReady(frameIndex)) return {};
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      wireframe && wireframePipeline ? wireframePipeline : pipeline);
+    const CullFrame& frame = cullFrames_[frameIndex];
+    // Without this frame's cull the ground is not drawn; what kept it said why.
+    if (!pipeline || !frame.culled) return;
     const VkDescriptorSet sets[] = {perFrameSet, vkCtx->textureTable().set(), chunkSets_[frameIndex]};
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 3, sets, 0, nullptr);
-    GPUPushConstants push{};
-    push.model = glm::mat4(1.0f);
-    vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
-    Recorded recorded;
-    ::VkBuffer boundVertices = VK_NULL_HANDLE, boundIndices = VK_NULL_HANDLE;
-    LocalLightSet pushedLights = push.localLights;
-    TerrainSurfacePush pushedSurface;
-    bool surfacePushed = false;
-    auto recordChunk = [&](const ChunkDraw& draw) {
-        vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, kRowPushOffset, sizeof(draw.row),
-                           &draw.row);
-        if (draw.lights != pushedLights) {
-            vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT,
-                               offsetof(GPUPushConstants, localLights), sizeof(draw.lights), &draw.lights);
-            pushedLights = draw.lights;
-        }
-        if (!surfacePushed || draw.surface.baked != pushedSurface.baked || draw.surface.relief != pushedSurface.relief) {
-            vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT,
-                               kSurfacePushOffset, sizeof(draw.surface), &draw.surface);
-            pushedSurface = draw.surface;
-            surfacePushed = true;
-        }
-        if (boundVertices != draw.geometry.vertices || boundIndices != draw.geometry.indices) {
-            bindDraw(cmd, draw.geometry);
-            boundVertices = draw.geometry.vertices;
-            boundIndices = draw.geometry.indices;
-        }
-        for (const auto& range : draw.ranges) {
-            if (!range.count) continue;
-            vkCmdDrawIndexed(cmd, range.count, 1, draw.geometry.firstIndex + range.first,
-                              draw.geometry.baseVertex, 0);
-            recorded.triangles += range.count / 3;
-            ++recorded.draws;
-        }
-    };
-    // Chunks short of the distance discards first, through the pipeline whose
-    // shader cannot discard; the rest after, through the one that can.
-    // Terrain is opaque and depth-tested, so the order between chunks does
-    // not change what is drawn.
-    if (wireframe || !shortOfDiscardsPipeline) {
-        for (const auto& draw : draws) recordChunk(draw);
-    } else {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shortOfDiscardsPipeline);
-        for (const auto& draw : draws) {
-            if (!draw.reachesDiscards) recordChunk(draw);
-        }
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-        for (const auto& draw : draws) {
-            if (draw.reachesDiscards) recordChunk(draw);
+    const glm::mat4 model(1.0f);
+    vkCmdPushConstants(cmd, pipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(model), &model);
+    // Per page, the chunks short of the distance discards through the
+    // pipeline whose shader cannot discard, the rest through the one that
+    // can. Terrain is opaque and depth-tested, so the order between chunks
+    // does not change what is drawn.
+    const uint32_t firstList = reflection ? 2u : 0u;
+    for (size_t g = 0; g < list.groups.size(); ++g) {
+        const GroupDraw& group = list.groups[g];
+        if (group.capacity == 0 || !group.vertices) continue;
+        bindDraw(cmd, GeometryDraw{.vertices = group.vertices, .indices = group.indices});
+        for (uint32_t discards = 0; discards < 2; ++discards) {
+            VkPipeline chosen = pipeline;
+            if (list.wireframe && wireframePipeline) chosen = wireframePipeline;
+            else if (discards == 0 && shortOfDiscardsPipeline) chosen = shortOfDiscardsPipeline;
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, chosen);
+            const uint32_t at = static_cast<uint32_t>(g) * 4u + firstList + discards;
+            const VkDeviceSize offset = VkDeviceSize(list.regions[at]) * sizeof(VkDrawIndexedIndirectCommand);
+            if (countFromGpu_) {
+                vkCmdDrawIndexedIndirectCount(cmd, frame.commands.buffer, offset, frame.counts.buffer,
+                                              VkDeviceSize(at) * sizeof(uint32_t), group.capacity,
+                                              sizeof(VkDrawIndexedIndirectCommand));
+            } else {
+                vkCmdDrawIndexedIndirect(cmd, frame.commands.buffer, offset, group.capacity,
+                                         sizeof(VkDrawIndexedIndirectCommand));
+            }
         }
     }
-    return recorded;
 }
 
 void TerrainRenderer::addChunk(TerrainChunkGPU&& chunk) {
@@ -1255,6 +1414,12 @@ void TerrainRenderer::addChunk(TerrainChunkGPU&& chunk) {
     tile.chunks.push_back(index);
     tile.depth.invalidate();
     queueBake(added);
+    // Its row for the cull names its neighbours, and theirs now name it.
+    queueRows(index);
+    for (size_t edge = 0; edge < TerrainChunkIndex::kEdges; ++edge) {
+        const uint32_t neighbour = chunkIndex_.neighbour(index, edge);
+        if (neighbour != TerrainChunkIndex::kNone) queueRows(neighbour);
+    }
 }
 
 void TerrainRenderer::queueBake(const TerrainChunkGPU& chunk) {
@@ -1267,7 +1432,7 @@ void TerrainRenderer::recordBake(VkCommandBuffer cmd, const DrawList& list) {
     bake_.prepareNewAtlases(cmd, list.atlases);
     const uint32_t frameIndex = vkCtx->getCurrentFrame();
     // Without this frame's rows nothing is baked; the chunks wait.
-    if (!chunkRowsReady(frameIndex)) return;
+    if (!cullFrames_[frameIndex].culled) return;
     const VkDescriptorSet sets[] = {vkCtx->textureTable().set(), chunkSets_[frameIndex]};
     for (size_t begin = 0; begin < list.bake.size();) {
         size_t end = begin + 1;
@@ -1387,6 +1552,14 @@ void TerrainRenderer::removeTile(int tileX, int tileY) {
         // Highest first: everything past the place being filled has gone or
         // stays, so the chunk moved into it is never one still to leave.
         std::sort(leaving.begin(), leaving.end(), std::greater<>());
+        // The chunks beside the tile lose a neighbour: their rows for the
+        // cull are written again once the tile's chunks are gone.
+        std::vector<std::pair<int, int>> beside;
+        for (const uint32_t index : leaving) {
+            const TerrainChunkGPU& chunk = chunks[index];
+            const int gx = chunk.tileX * 16 + chunk.chunkX, gy = chunk.tileY * 16 + chunk.chunkY;
+            beside.insert(beside.end(), {{gx, gy - 1}, {gx, gy + 1}, {gx - 1, gy}, {gx + 1, gy}});
+        }
         for (const uint32_t index : leaving) {
             TerrainChunkGPU& chunk = chunks[index];
             chunkIndex_.removeSwapLast(index);
@@ -1400,6 +1573,10 @@ void TerrainRenderer::removeTile(int tileX, int tileY) {
                 *std::find(moversTile.begin(), moversTile.end(), last) = index;
             }
             chunks.pop_back();
+        }
+        for (const auto& [gx, gy] : beside) {
+            const uint32_t found = chunkIndex_.find(gx, gy);
+            if (found != TerrainChunkIndex::kNone) queueRows(found);
         }
         // The tile's entry goes the same way.
         const auto lastSlot = static_cast<uint32_t>(shadowTiles_.size() - 1);
@@ -1547,10 +1724,15 @@ void TerrainRenderer::destroyChunkGPU(TerrainChunkGPU& chunk) {
     // Its row may go to the next chunk at once: a frame in flight draws from
     // what the table holds now, and the next chunk's row is copied in by a
     // later frame, after that one's draws in the queue.
+    // The cull must stop drawing it, from that frame on: its row goes as one
+    // nothing draws, unless the next chunk given it writes it first.
     if (chunk.row != TerrainChunkGPU::kNoRow) {
-        pendingRows_.erase(chunk.row);
+        pendingRows_[chunk.row] = {TerrainChunkRowGPU{}, TerrainCullRowGPU{}, extractions_ + 1};
         freeRows_.push_back(chunk.row);
         chunk.row = TerrainChunkGPU::kNoRow;
+    }
+    if (chunk.geometryPage >= 0 && static_cast<size_t>(chunk.geometryPage) < pageChunks_.size()) {
+        --pageChunks_[static_cast<size_t>(chunk.geometryPage)];
     }
     // The chunk's ranges in its geometry page, given back once no frame in
     // flight draws them; until then nothing else is copied over them.

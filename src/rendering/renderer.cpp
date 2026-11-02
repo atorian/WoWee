@@ -1993,7 +1993,15 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
     // The terrain's chunk rows, before the bake and every pass that draws
     // the ground reads them.
     if (terrainRenderer && vkCtx && frameInputs_.scene) {
-        terrainRenderer->uploadChunkRows(currentCmd, vkCtx->getCurrentFrame(), frameInputs_.scene->terrain);
+        CpuStage stage(stages, "beginFrame", "terrain cull");
+        GpuPass pass(*vkCtx, currentCmd, "terrain cull");
+        const uint32_t frame = vkCtx->getCurrentFrame();
+        terrainRenderer->uploadChunkRows(currentCmd, frame, frameInputs_.scene->terrain);
+        // The frame's point lights, uploaded at the top of beginFrame: the
+        // cull picks each chunk's from them.
+        terrainRenderer->dispatchCull(currentCmd, frame, frameInputs_.scene->terrain,
+                                      localLightBuffers_[frame].buffer,
+                                      static_cast<uint32_t>(currentFrameData.localLightMeta.x));
     }
 
     // Grass culls here too, for the same reason: a dispatch has to be recorded

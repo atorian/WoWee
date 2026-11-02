@@ -46,20 +46,23 @@ layout(set = 0, binding = 0) uniform PerFrame {
 #include "aerial_frame.glsli"
 #include "terrain_distance.glsli"
 
-// After the vertex stage's model matrix and lights (GPUPushConstants).
-layout(push_constant) uniform Surface {
-    layout(offset = 80) vec4 relief;  // x = how steeply the relief is drawn, 0 for flat ground
+// What the shaders read of this draw's chunk (terrain_cull.comp.glsl).
+struct TerrainDrawRecord {
+    uvec4 row;      // x: the chunk's row in the terrain's chunk table
+    vec4 relief;    // x = how steeply the relief is drawn, 0 for flat ground
     // x: 0 the layers, 1 the layers giving way to the bake between y and z
     // yards from the camera, 2 the bake alone. w: the chunk's cell in its
     // tile's atlas, x + 16 y.
     vec4 baked;
-    // The chunk's row in the terrain's chunk table.
-    uint chunk;
-} surface;
+    uvec4 lights;
+};
+layout(std430, set = 2, binding = 1) readonly buffer TerrainDrawRecords { TerrainDrawRecord terrainRecords[]; };
+layout(location = 5) flat in uint vRecord;
+#define surface (terrainRecords[vRecord])
 
 #define TEXTURE_TABLE_SET 1
 #define TERRAIN_CHUNK_SET 2
-#define TERRAIN_CHUNK surface.chunk
+#define TERRAIN_CHUNK (surface.row.x)
 #include "terrain_layers.glsli"
 
 // The chunk's own normals, every vertex's, as a 17x17 image (ChunkMesh::
