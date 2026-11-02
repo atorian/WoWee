@@ -1,4 +1,5 @@
 // Public renderer APIs -> real RtScene handoff. Requires Vulkan and WotLK data.
+#include "asset_tables.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_loader.hpp"
@@ -15,6 +16,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <stdexcept>
 
 using namespace wowee;
@@ -137,6 +139,7 @@ int main() {
     {
         Surface surface;
         pipeline::AssetManager assets;
+        std::optional<test::AssetTables> tables;
         rendering::Renderer renderer;
         try {
             require(surface.context.initialize(window), "Vulkan initialization failed");
@@ -145,6 +148,7 @@ int main() {
             assets.setExpansionDataPath(data + "/expansions/wotlk");
             require(assets.initialize(data + "/expansions/wotlk"), "WotLK assets unavailable");
             assets.setBaseFallbackPath(data, "wotlk");
+            renderer.setGameTables(tables.emplace(assets, data));
             require(renderer.initialize(&surface), "renderer initialization failed");
             require(renderer.initializeRenderers(&assets, "Northrend"), "world renderers initialization failed");
             renderer.getTerrainManager()->setStreamingEnabled(false);

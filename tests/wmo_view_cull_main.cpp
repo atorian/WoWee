@@ -1,10 +1,8 @@
 // Which groups of a building each colour pass of the WMO renderer draws:
 // the camera's view and the water's reflection, each from its own eye.
 // Requires Vulkan and WotLK data; exits 77 without a device.
+#include "asset_tables.hpp"
 #include "pipeline/asset_manager.hpp"
-#include "pipeline/dbc_layout.hpp"
-#include "pipeline/dbc_loader.hpp"
-#include "pipeline/game_tables.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/render_surface.hpp"
@@ -17,6 +15,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <set>
 #include <span>
 #include <stdexcept>
@@ -36,29 +35,6 @@ public:
     int getHeight() const override { return 240; }
     int getDrawableWidth() const override { return 320; }
     int getDrawableHeight() const override { return 240; }
-};
-
-// The expansion's tables, read through the asset manager as the client reads
-// them; a table that cannot be read fails the test.
-class AssetTables final : public pipeline::GameTables {
-public:
-    explicit AssetTables(pipeline::AssetManager& assets) : assets_(assets) {}
-    [[nodiscard]] bool has(const std::string& dbc) const override {
-        const Table t = assets_.loadDBC(dbc);
-        return t && t->isLoaded();
-    }
-    [[nodiscard]] Table table(const std::string& dbc, uint32_t, std::string_view neededFor) const override {
-        Table t = assets_.loadDBC(dbc);
-        if (!t || !t->isLoaded()) stop(dbc, neededFor, "could not be read");
-        return t;
-    }
-    [[noreturn]] void stop(const std::string& what, std::string_view neededFor,
-                           const std::string& why) const override {
-        throw std::runtime_error(what + " " + why + " (" + std::string(neededFor) + ")");
-    }
-
-private:
-    pipeline::AssetManager& assets_;
 };
 
 // A wall four yards square facing -X, standing at `centre`.
@@ -162,8 +138,8 @@ int main() {
     {
         Surface surface;
         pipeline::AssetManager assets;
+        std::optional<test::AssetTables> tables;
         rendering::Renderer renderer;
-        AssetTables tables(assets);
         try {
             require(surface.context.initialize(window), "Vulkan initialization failed");
             const char* root = std::getenv("WOW_DATA_PATH");
@@ -171,12 +147,7 @@ int main() {
             assets.setExpansionDataPath(data + "/expansions/wotlk");
             require(assets.initialize(data + "/expansions/wotlk"), "WotLK assets unavailable");
             assets.setBaseFallbackPath(data, "wotlk");
-            // The expansion's column layouts, as the client sets them before
-            // the renderer reads its tables through them.
-            static pipeline::DBCLayout layouts;
-            require(layouts.loadFromJson(data + "/expansions/wotlk/dbc_layouts.json"), "WotLK DBC layouts unavailable");
-            pipeline::setActiveDBCLayout(&layouts);
-            renderer.setGameTables(tables);
+            renderer.setGameTables(tables.emplace(assets, data));
             require(renderer.initialize(&surface), "renderer initialization failed");
             require(renderer.initializeRenderers(&assets, "Northrend"), "world renderers initialization failed");
             renderer.getTerrainManager()->setStreamingEnabled(false);
