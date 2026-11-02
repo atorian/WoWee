@@ -46,7 +46,7 @@ layout(set = 0, binding = 0) uniform PerFrame {
 #include "interior_light.glsli"
 
 layout(push_constant) uniform Push {
-    mat4 model;          // read by character.vert
+    uvec4 pose;          // read by character.vert
     vec4 interiorAmbient;
     vec4 interiorDirect;
     uvec4 localLights;   // local_lights.glsli

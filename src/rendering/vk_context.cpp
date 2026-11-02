@@ -618,6 +618,13 @@ bool VkContext::selectPhysicalDevice() {
         LOG_ERROR("Vulkan device lacks ", name, ", which drawing the ground from the GPU's commands needs");
         return false;
     }
+    // Skeletons are posed on the GPU from the pool's pages, a page a
+    // workgroup picks by its request (skeleton.comp.glsl).
+    if (!enableIfPresent(&VkPhysicalDeviceFeatures::shaderStorageBufferArrayDynamicIndexing)) {
+        LOG_ERROR("Vulkan device lacks shaderStorageBufferArrayDynamicIndexing, which posing skeletons on the "
+                  "GPU needs");
+        return false;
+    }
     fsr2ComputeFeaturesSupported_ =
         enableIfPresent(&VkPhysicalDeviceFeatures::shaderStorageImageWriteWithoutFormat) &&
         enableIfPresent(&VkPhysicalDeviceFeatures::shaderInt16);

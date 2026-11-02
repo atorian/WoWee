@@ -1,6 +1,7 @@
 #pragma once
 #include "rendering/frame_pool.hpp"
 #include "rendering/geometry_pool.hpp"
+#include "rendering/skeleton_pool.hpp"
 #include <span>
 
 #include "rendering/normal_map_builder.hpp"
@@ -55,6 +56,7 @@ struct WeaponAttachment {
     glm::vec3 offset;
     glm::mat4 localTransform{1.0f}; // sheath/hand orientation after attachment point
     float sheathPush = 0.0f;   // smoothed outward push when the arm swings into the blade
+    glm::vec3 shift{0.0f};     // that push, out from the spine in the world, as the GPU applies it
     std::vector<WeaponEffectAttachment> effects;
 };
 
@@ -124,14 +126,15 @@ public:
     /// what billboard bones turn against; without one they stay as authored.
     void update(float deltaTime, const glm::vec3& cameraPos, const glm::mat4* view);
 
-    /// Gives each posed instance its bone buffer for this frame slot and fills
-    /// it, once, where the slot's copy is older than the pose. Main thread,
-    /// after the slot's fence and before any pass draws a character - the
-    /// shadow maps included - so every pass only binds.
+    /// Poses this frame's skeletons on the GPU (skeleton.comp): its requests
+    /// into this frame slot's buffer, a dispatch a level, and the bones the
+    /// CPU reads copied back; and takes what the slot's last frame copied
+    /// back. After the slot's fence and before any pass draws a character -
+    /// the shadow maps included - so every pass only binds.
     struct Frame;
     std::shared_ptr<const Frame> extract(const Camera& camera, const std::vector<LocalLight>& lights);
     void useFrame(std::shared_ptr<const Frame> frame) { recording_ = std::move(frame); }
-    void prepareRender(uint32_t frameIndex);
+    void prepareRender(VkCommandBuffer cmd, uint32_t frameIndex);
     /// Which instances a render call draws. A faded one - an aura's
     /// translucent body, a ghost, a fade-in - writes depth, so whatever is
     /// drawn after it inside or behind it is hidden: Shadowform's fire,
@@ -399,6 +402,10 @@ private:
         /// Where its vertices and indices live (geometry_); unplaced for a
         /// model of emitters alone, or one the pool had no room for.
         GeometryPool::Range geometry;
+        /// Its bones and keys (skeletons_), which the GPU poses it from;
+        /// unplaced for a model with no bones, or one the pool had no room
+        /// for - drawn in its bind pose.
+        SkeletonPool::Skeleton skeleton;
         uint32_t indexCount = 0;
         uint32_t vertexCount = 0;
 
@@ -474,15 +481,18 @@ private:
         int currentSequenceIndex = -1;  // Index into M2Model::sequences
         int armSequenceIndex[2] = {-1, -1};  // Left, right arm on their own sequences; -1 follows the body
         bool armSequenceLoops[2] = {false, false};  // Idle arm loops; a reaching arm holds its last frame
-        std::vector<int8_t> boneArm;  // Per bone: 0 left arm, 1 right arm, -1 neither; built by setArmAnimations
         float animationTime = 0.0f;
         float animationSpeed = 1.0f;     // Sequence time per real time; global sequences keep real time
         float globalSequenceTime = 0.0f; // Separate timer for global sequences (accumulates without wrapping at sequence duration)
         bool animationLoop = true;
         uint32_t oneShotReturnAnim = 0; // Anim to resume when a one-shot ends (0 = Stand)
-        std::vector<glm::mat4> boneMatrices;  // Current bone transforms
-        /// Moved on whenever boneMatrices are written, so each frame slot's
-        /// bone buffer is filled when its copy is older, and only then.
+        /// The bones the CPU reads - its attachment points', its lights',
+        /// its emitters' - as the GPU posed them two frames ago, in model
+        /// space; identity for the others and until the first is read.
+        /// The skeleton itself is posed on the GPU alone (skeleton.comp).
+        std::vector<glm::mat4> readBones;
+        /// Which bones are read back, sorted.
+        std::vector<uint16_t> watchedBones;
 
         /// See CharacterDress; replaced, never changed in place.
         std::shared_ptr<const CharacterDress> dress = std::make_shared<const CharacterDress>();
@@ -529,10 +539,8 @@ private:
         bool isSceneModel = false;
 
 
-        // Bone update throttling for characters outside normal gameplay range.
-        uint32_t boneUpdateCounter = 0;
-        /// The last update() moved this instance - its clock, its skeleton or,
-        /// for a weapon, its place on its wielder. Not when it was out of
+        /// The last update() moved this instance - its clock or, for a
+        /// weapon, its place on its wielder. Not when it was out of
         /// animation range and left as it was.
         bool posedThisFrame = false;
         const M2ModelGPU* cachedModel = nullptr;  // Avoid per-frame hash lookups
@@ -555,8 +563,11 @@ private:
         /// Valid for the frame: models are unloaded only between frames.
         std::shared_ptr<const M2ModelGPU> model;
         std::shared_ptr<const CharacterDress> dress;
-        /// This frame slot's bones; null for an instance without any.
+        /// Its skeleton request this frame (models[] on the GPU), its first
+        /// bone and how many (bones[]).
         uint32_t pose = 0;
+        uint32_t boneBase = 0;
+        uint32_t boneCount = 0;
         InteriorLightGPU interiorLight;
         LocalLightSet localLights = kNoLocalLights;
         glm::vec3 stateTint{1.0f};
@@ -585,14 +596,17 @@ private:
 
     void setupModelBuffers(M2ModelGPU& gpuModel);
     void calculateBindPose(M2ModelGPU& gpuModel);
-    void calculateBoneMatrices(CharacterInstance& instance);
     /// One instance's clock: its sequence and its global sequences.
     void advanceAnimation(uint32_t instanceId, CharacterInstance& instance, float deltaTime);
-    /// calculateBoneMatrices for each, spread over the frame workers.
-    void poseInstances(std::vector<std::reference_wrapper<CharacterInstance>>& instances);
-    glm::mat4 getBoneTransform(const pipeline::M2Bone& bone, float animTime, float globalSeqTime,
-                               int sequenceIndex, const std::vector<uint32_t>& globalSeqDurations);
     [[nodiscard]] glm::mat4 getModelMatrix(const CharacterInstance& instance) const;
+    /// The bone read back from now on; its readBones entry stays the
+    /// identity until the first frame that posed it is done.
+    static void watchBone(CharacterInstance& instance, uint16_t bone);
+    /// The bones read back since the last call, into their instances.
+    void takeReadBones();
+    /// The model matrix a request rides its parent with: the attachment's
+    /// offset and turn, after the bone.
+    [[nodiscard]] static glm::mat4 attachmentPlacement(const WeaponAttachment& attachment);
     /// Whose opacity and aura look `instance` is drawn with: its body's for
     /// an attachment, its own otherwise.
     [[nodiscard]] const CharacterInstance& drawnAs(const CharacterInstance& instance) const;
@@ -753,11 +767,56 @@ private:
 
     // Maximum bones supported
     static constexpr int MAX_BONES = 240;
-    uint32_t numAnimThreads_ = 1;
-    std::vector<std::future<void>> animFutures_;
-    std::vector<std::reference_wrapper<CharacterInstance>> toUpdate_;  // reused across frames
-    /// The view update() was given, for the billboard bones it poses.
+    /// The view update() was given, which billboard bones turn against.
     std::optional<glm::mat4> boneView_;
+
+    /// Every character model's skeleton on the GPU.
+    SkeletonPool skeletons_;
+    /// What skeleton.comp reads of one instance (Request there, std430).
+    struct SkeletonRequestGPU {
+        uint32_t page = 0, blob = 0, outBase = 0, flags = 0;
+        int32_t sequence = -1;
+        float time = 0.0f, globalTime = 0.0f, torsoYaw = 0.0f;
+        glm::ivec2 armSequence{-1};
+        glm::vec2 armTime{0.0f};
+        int32_t parent = -1;
+        uint32_t parentBone = ~0u;
+        uint32_t pad0 = 0, pad1 = 0;
+        glm::mat4 placement{1.0f};
+        /// Moved by this in the world after it is placed: a weapon on the
+        /// back eased out of the arm swinging into it.
+        glm::vec4 shift{0.0f};
+    };
+    /// The skeleton pass: its pipeline, and per frame slot the requests
+    /// (written by the CPU), the bones and models it writes (read by the
+    /// draws), the bones copied back for the CPU, and the sets naming them.
+    VkPipeline skeletonPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout skeletonPipelineLayout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout skeletonSetLayout_ = VK_NULL_HANDLE;
+    /// Its sets come from boneDescPool_, with the draw sets.
+    struct SkeletonSlot {
+        AllocatedBuffer requests, bones, models, readback;
+        uint32_t requestRoom = 0, boneRoom = 0, readRoom = 0;
+        VkDescriptorSet computeSet = VK_NULL_HANDLE;
+        VkDescriptorSet drawSet = VK_NULL_HANDLE;
+        uint32_t pagesVersion = 0;
+        bool setsCurrent = false;
+        /// The bones the slot's last frame copied back, in readback order:
+        /// whose and which. Read once its fence has passed.
+        std::vector<std::pair<uint32_t, uint16_t>> readOf;
+    };
+    SkeletonSlot skeletonSlots_[2];
+    /// Read back on the render thread, taken by the main thread.
+    struct ReadBone {
+        uint32_t instanceId;
+        uint16_t bone;
+        glm::mat4 matrix;
+    };
+    std::mutex readBonesMutex_;
+    std::vector<ReadBone> readBones_;
+    /// Room for this slot's frame; false, said, when there was no memory.
+    bool ensureSkeletonSlot(uint32_t slot, uint32_t requests, uint32_t bones, uint32_t reads);
+    bool createSkeletonPipeline();
 
     // Shadow pipeline resources
     VkPipeline shadowPipeline_ = VK_NULL_HANDLE;
@@ -807,23 +866,30 @@ public:
         float normalStrength = 1;
         std::vector<DrawCharacter> drawLists[3];
         std::vector<DrawCharacter> depth;
-        struct Pose { uint32_t first, count; };
-        std::vector<Pose> poses;
-        std::vector<glm::mat4> bones;
+        /// The skeletons to pose, those placed by their own matrix first and
+        /// then each level that rides the one before; levelEnds[i] is where
+        /// level i ends. boneCount bones in all.
+        std::vector<SkeletonRequestGPU> requests;
+        std::vector<uint32_t> levelEnds;
+        uint32_t boneCount = 0;
+        /// The view billboard bones turn against.
+        glm::mat4 view{1.0f};
+        /// The pool's pages as they were, and their version.
+        std::vector<::VkBuffer> skeletonPages;
+        uint32_t skeletonPagesVersion = 0;
+        /// The bones copied back to the CPU: whose, which, and where in
+        /// bones[].
+        struct Read {
+            uint32_t instanceId;
+            uint16_t bone;
+            uint32_t source;
+        };
+        std::vector<Read> reads;
         std::vector<std::pair<uint32_t, uint32_t>> poseById;
     };
 private:
     FramePool<Frame> framePool_;
     std::shared_ptr<const Frame> recording_ = std::make_shared<Frame>();
-    struct PoseSlot {
-        bool failed = false;
-        VkBuffer buffer = VK_NULL_HANDLE;
-        VmaAllocation allocation = VK_NULL_HANDLE;
-        VkDescriptorSet set = VK_NULL_HANDLE;
-        void* mapped = nullptr;
-    };
-    std::vector<PoseSlot> poseSlots_[2];
-
 };
 
 } // namespace rendering

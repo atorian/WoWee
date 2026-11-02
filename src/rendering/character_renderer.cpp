@@ -81,12 +81,20 @@ constexpr uint8_t kCharacterNormalMapStrengthKey = static_cast<uint8_t>(kCharact
 // The main pass's push constants: character.vert reads the model matrix and
 // character.frag the interior light.
 struct CharacterPushConstants {
-    glm::mat4 model;
+    /// x its skeleton request (models[]), y its first bone, z how many.
+    glm::uvec4 pose{0};
     InteriorLightGPU interiorLight;
     /// The point lights that reach the unit (local_lights.glsli).
     LocalLightSet localLights = kNoLocalLights;
 };
-static_assert(sizeof(CharacterPushConstants) == 112, "matches Push in character.vert/frag");
+static_assert(sizeof(CharacterPushConstants) == 64, "matches Push in character.vert/frag");
+
+/// character_shadow.vert's Push: the map's matrix and the pose.
+struct CharacterShadowPush {
+    glm::mat4 lightSpace{1.0f};
+    glm::uvec4 pose{0};
+};
+static_assert(sizeof(CharacterShadowPush) == sizeof(ShadowPush), "the shadow pipeline's push range");
 
 // How far an instance moves before the WMO is asked again where it stands.
 constexpr float kInteriorLightRequeryDistance = 0.5f;
@@ -205,7 +213,6 @@ void applyMagentaKeyIfNeeded(pipeline::BLPImage& image, const std::string& path)
 
 // Descriptor pool sizing
 static constexpr uint32_t MAX_MATERIAL_SETS = 4096;
-static constexpr uint32_t MAX_BONE_SETS = 8192;
 
 // Texture compositing sizes (NPC skin upscale)
 static constexpr int kBaseTexSize    = 256;  // NPC baked texture default
@@ -464,18 +471,14 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
     core::Logger::getInstance().info("Initializing character renderer (Vulkan)...");
 
     vkCtx_ = ctx;
-    if (vkCtx_) geometry_.initialize(*vkCtx_);
+    if (vkCtx_) {
+        geometry_.initialize(*vkCtx_);
+        skeletons_.initialize(*vkCtx_);
+    }
     assetManager = am;
     perFrameLayout_ = perFrameLayout;
     renderPassOverride_ = renderPassOverride;
     msaaSamplesOverride_ = msaaSamples;
-    const unsigned hc = std::thread::hardware_concurrency();
-    const size_t availableCores = (hc > 1u) ? static_cast<size_t>(hc - 1u) : 1ull;
-    // Character updates run alongside M2/WMO work; default to a smaller share.
-    const size_t defaultAnimThreads = std::max<size_t>(1, availableCores / 4);
-    numAnimThreads_ = static_cast<uint32_t>(std::max<size_t>(
-        1, envSizeOrDefault("WOWEE_CHAR_ANIM_THREADS", defaultAnimThreads)));
-    core::Logger::getInstance().info("Character anim threads: ", numAnimThreads_);
 
     VkDevice device = vkCtx_->getDevice();
 
@@ -509,17 +512,20 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
         vkCreateDescriptorSetLayout(device, &ci, nullptr, &materialSetLayout_);
     }
 
-    // Bone set layout (set 2): binding 0 = STORAGE_BUFFER (bone matrices)
+    // Bone set layout (set 2): binding 0 = the frame's bones, binding 1 =
+    // each request's model matrix, as skeleton.comp posed them
     {
-        VkDescriptorSetLayoutBinding binding{};
-        binding.binding = 0;
-        binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        binding.descriptorCount = 1;
-        binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        VkDescriptorSetLayoutBinding bindings[2] = {};
+        for (uint32_t b = 0; b < 2; ++b) {
+            bindings[b].binding = b;
+            bindings[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            bindings[b].descriptorCount = 1;
+            bindings[b].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        }
 
         VkDescriptorSetLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        ci.bindingCount = 1;
-        ci.pBindings = &binding;
+        ci.bindingCount = 2;
+        ci.pBindings = bindings;
         vkCreateDescriptorSetLayout(device, &ci, nullptr, &boneSetLayout_);
     }
 
@@ -538,17 +544,20 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
         ci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
         vkCreateDescriptorPool(device, &ci, nullptr, &materialDescPool);
     }
+    // Each frame slot's draw set (bones, models) and skeleton set (the
+    // pool's pages, the requests, bones and models).
     {
         VkDescriptorPoolSize sizes[] = {
-            {.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = MAX_BONE_SETS},
+            {.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+             .descriptorCount = 2 * (2 + SkeletonPool::kMaxPages + 3)},
         };
         VkDescriptorPoolCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-        ci.maxSets = MAX_BONE_SETS;
+        ci.maxSets = 4;
         ci.poolSizeCount = 1;
         ci.pPoolSizes = sizes;
-        ci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
         vkCreateDescriptorPool(device, &ci, nullptr, &boneDescPool_);
     }
+    if (!createSkeletonPipeline()) return false;
 
     // --- Material UBO ring buffers (one per frame slot) ---
     {
@@ -690,15 +699,17 @@ void CharacterRenderer::shutdown() {
         boneDescPool_ = VK_NULL_HANDLE;
     }
     retired.destroy(materialSetLayout_);
-    for (auto& slots : poseSlots_) {
-        for (auto& slot : slots) if (slot.buffer) {
-            AllocatedBuffer buffer{};
-            buffer.buffer = slot.buffer;
-            buffer.allocation = slot.allocation;
-            retired.buffer(buffer);
-        }
-        slots.clear();
+    // The skeleton pass: its slots' buffers (their sets went with the pool
+    // above), its pipeline and the skeletons themselves.
+    for (auto& slot : skeletonSlots_) {
+        for (AllocatedBuffer* buffer : {&slot.requests, &slot.bones, &slot.models, &slot.readback})
+            if (buffer->buffer) retired.buffer(*buffer);
+        slot = SkeletonSlot{};
     }
+    retired.destroy(skeletonPipeline_);
+    retired.destroy(skeletonPipelineLayout_);
+    retired.destroy(skeletonSetLayout_);
+    skeletons_.destroy();
     retired.destroy(boneSetLayout_);
 
     // Shadow resources
@@ -760,6 +771,7 @@ void CharacterRenderer::createFallbackTextures() {
 void CharacterRenderer::destroyModelGPU(const M2ModelGPU& model) {
     if (!vkCtx_) return;
     geometry_.release(model.geometry);
+    skeletons_.release(model.skeleton);
 }
 
 size_t CharacterRenderer::pendingNormalMapJobs() const {
@@ -1802,6 +1814,8 @@ bool CharacterRenderer::loadModel(pipeline::M2Model&& parsed, uint32_t id) {
 
     // Setup GPU buffers
     setupModelBuffers(gpuModel);
+    // Its bones and keys, which it is posed from on the GPU.
+    gpuModel.skeleton = skeletons_.place(model, MAX_BONES, model.name.c_str());
 
     // Calculate bind pose
     calculateBindPose(gpuModel);
@@ -2001,9 +2015,14 @@ uint32_t CharacterRenderer::createInstance(uint32_t modelId, const glm::vec3& po
     instance.rotation = rotation;
     instance.scale = scale;
 
-    // Initialize bone matrices to identity
+    // The bones the CPU reads of it from the start: its lights' and its
+    // emitters'. Its attachment points are watched when first asked for.
     auto& gpuRef = (*modelIt->second);
-    instance.boneMatrices.resize(std::max(static_cast<size_t>(1), gpuRef.data->bones.size()), glm::mat4(1.0f));
+    instance.readBones.assign(gpuRef.data->bones.size(), glm::mat4(1.0f));
+    for (const auto& light : gpuRef.data->lights)
+        if (light.bone >= 0) watchBone(instance, static_cast<uint16_t>(light.bone));
+    for (const auto& emitter : gpuRef.data->particleEmitters) watchBone(instance, emitter.bone);
+    for (const auto& emitter : gpuRef.data->ribbonEmitters) watchBone(instance, static_cast<uint16_t>(emitter.bone));
     instance.cachedModel = &gpuRef;
 
     uint32_t id = instance.id;
@@ -2097,58 +2116,14 @@ void CharacterRenderer::advanceAnimation(uint32_t instanceId, CharacterInstance&
     }
 }
 
-void CharacterRenderer::poseInstances(std::vector<std::reference_wrapper<CharacterInstance>>& instances) {
-    const size_t count = instances.size();
-    if (count < 8 || numAnimThreads_ <= 1) {
-        for (auto& instRef : instances) calculateBoneMatrices(instRef.get());
-        return;
-    }
-
-    // Thread bone matrix computation in chunks
-    static const size_t minAnimWorkPerThread = std::max<size_t>(
-        8, envSizeOrDefault("WOWEE_CHAR_ANIM_WORK_PER_THREAD", 16));
-    const size_t maxUsefulThreads = std::max<size_t>(
-        1, (count + minAnimWorkPerThread - 1) / minAnimWorkPerThread);
-    const size_t numThreads = std::min(static_cast<size_t>(numAnimThreads_), maxUsefulThreads);
-
-    if (numThreads <= 1) {
-        for (auto& instRef : instances) calculateBoneMatrices(instRef.get());
-        return;
-    }
-
-    const size_t chunkSize = count / numThreads;
-    const size_t remainder = count % numThreads;
-
-    auto processRange = [this, &instances](size_t begin, size_t end) {
-        for (size_t i = begin; i < end; i++) {
-            calculateBoneMatrices(instances[i].get());
-        }
-    };
-
-    animFutures_.clear();
-    if (animFutures_.capacity() < numThreads) {
-        animFutures_.reserve(numThreads);
-    }
-
-    // Dispatch all but the last chunk to the shared pool; process the
-    // last chunk on this thread so the pool is never a hard dependency
-    // for finishing this frame's bone work.
-    size_t start = 0;
-    for (size_t t = 0; t + 1 < numThreads; t++) {
-        size_t end = start + chunkSize + (t < remainder ? 1 : 0);
-        animFutures_.push_back(core::ThreadPool::frameWorkers().submit(
-            "character bones: chunk",
-            [processRange, start, end]() { processRange(start, end); }));
-        start = end;
-    }
-    processRange(start, count);
-
-    for (auto& f : animFutures_) {
-        f.get();
-    }
-}
-
 void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos, const glm::mat4* view) {
+    // Its steps timed apart in the frame profile: the bones read back, the
+    // walk that advances each clock, the attachments.
+    CpuStageLaps laps(vkCtx_ ? &vkCtx_->gameCpuStages() : nullptr, "rendererUpdate/characters");
+    // The skeletons are posed on the GPU from the clocks advanced here; what
+    // the CPU reads of them came back since the last update.
+    takeReadBones();
+    laps.lap("read bones");
     // What billboard bones turn against this frame; with no view they stay
     // as authored.
     boneView_ = view ? std::optional<glm::mat4>(*view) : std::nullopt;
@@ -2165,9 +2140,7 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos, cons
     const float birdUpdateRadius = static_cast<float>(envSizeOrDefault("WOWEE_CHAR_RENDER_RADIUS", 130));
     const float birdUpdateRadiusSq = birdUpdateRadius * birdUpdateRadius;
 
-    // Single pass: fade-in, movement, and animation bone collection
-    toUpdate_.clear();
-
+    // Single pass: fade-in and each clock.
     for (auto& pair : scene_->instances) {
         auto& inst = pair.second;
         inst.posedThisFrame = false;
@@ -2192,33 +2165,14 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos, cons
         inst.posedThisFrame = true;
 
         advanceAnimation(pair.first, inst, deltaTime);
-
-        // Keep combat-range creatures at the render frame rate. Aggressive
-        // throttling used to begin at 10 yards and reached every eighth frame
-        // at 40 yards, making ordinary monster locomotion look like a slideshow.
-        // Reserve frame skipping for models far enough away that bone detail is
-        // much less noticeable, consistent with the generic M2 renderer.
-        uint32_t boneInterval = 1;
-        if (!isSkyBird) {
-            if (distSq > 90.0f * 90.0f) boneInterval = 4;
-            else if (distSq > 45.0f * 45.0f) boneInterval = 2;
-        }
-
-        inst.boneUpdateCounter++;
-        bool needsBones = (inst.boneUpdateCounter >= boneInterval) || inst.boneMatrices.empty();
-        if (needsBones) {
-            inst.boneUpdateCounter = 0;
-            toUpdate_.push_back(std::ref(inst));
-        }
     }
+    laps.lap("advance");
 
-    poseInstances(toUpdate_);
-
-    // Place the attachments on their wielders' bones, now those are posed,
-    // and then pose the attachments themselves. An item model animates on its
-    // own clock - Thunderfury's arcs crackle, a glaive's glow pulses - and
-    // its billboard bones turn against the view from where it now stands.
-    toUpdate_.clear();
+    // The attachments' clocks, and where they stand as far as the CPU needs
+    // to know - what culls them, what their lights and emitters ride: on
+    // their wielders' bones as last read back. The GPU places them on the
+    // bones it posed this frame. An item model animates on its own clock -
+    // Thunderfury's arcs crackle, a glaive's glow pulses.
     for (auto& pair : scene_->instances) {
         auto& instance = pair.second;
         if (instance.weaponAttachments.empty()) continue;
@@ -2232,17 +2186,17 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos, cons
             auto weapIt = scene_->instances.find(wa.weaponInstanceId);
             if (weapIt == scene_->instances.end()) continue;
 
-            // Get the bone matrix for the attachment bone
+            // The attachment bone as last read back.
+            watchBone(instance, wa.boneIndex);
             glm::mat4 boneMat(1.0f);
-            if (wa.boneIndex < instance.boneMatrices.size()) {
-                boneMat = instance.boneMatrices[wa.boneIndex];
+            if (wa.boneIndex < instance.readBones.size()) {
+                boneMat = instance.readBones[wa.boneIndex];
             }
 
             // Weapon model matrix = character model * bone transform * attachment
-            // offset * item/sheath orientation.
-            glm::mat4 weaponMat =
-                charModelMat * boneMat * glm::translate(glm::mat4(1.0f), wa.offset) *
-                wa.localTransform;
+            // offset * item/sheath orientation (attachmentPlacement), as the
+            // GPU places it.
+            glm::mat4 weaponMat = charModelMat * boneMat * attachmentPlacement(wa);
 
             // Back-sheathed weapons: the swinging left arm passes through the
             // canted blade while running. Sample the whole arm - shoulder,
@@ -2289,21 +2243,20 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos, cons
                 }
 
                 wa.sheathPush += (targetPush - wa.sheathPush) * std::min(1.0f, deltaTime * 14.0f);
+                wa.shift = glm::vec3(0.0f);
                 if (wa.sheathPush > 0.001f) {
                     // Horizontal direction from the spine out through the weapon.
                     glm::vec3 outward = glm::vec3(weaponMat[3]) - glm::vec3(charModelMat[3]);
                     outward.z = 0.0f;
                     const float len = glm::length(outward);
-                    if (len > 0.001f) {
-                        weaponMat = glm::translate(glm::mat4(1.0f), (outward / len) * wa.sheathPush) * weaponMat;
-                    }
+                    if (len > 0.001f) wa.shift = (outward / len) * wa.sheathPush;
                 }
+                weaponMat = glm::translate(glm::mat4(1.0f), wa.shift) * weaponMat;
             }
             weapIt->second.overrideModelMatrix = weaponMat;
             weapIt->second.hasOverrideModelMatrix = true;
             weapIt->second.posedThisFrame = true;
             advanceAnimation(wa.weaponInstanceId, weapIt->second, deltaTime);
-            toUpdate_.push_back(std::ref(weapIt->second));
 
             // Enchant visuals ride the weapon, offset to their attachment point on it.
             for (const auto& fx : wa.effects) {
@@ -2317,17 +2270,34 @@ void CharacterRenderer::update(float deltaTime, const glm::vec3& cameraPos, cons
                 fxIt->second.position = instance.position;
                 fxIt->second.posedThisFrame = true;
                 advanceAnimation(fx.effectInstanceId, fxIt->second, deltaTime);
-                toUpdate_.push_back(std::ref(fxIt->second));
             }
         }
     }
-    poseInstances(toUpdate_);
+    laps.lap("attachments");
 }
-// --- Bone transform calculation ---
 
-constexpr int32_t kKeyBoneShoulderL = 2;
-constexpr int32_t kKeyBoneShoulderR = 3;
-constexpr int32_t kKeyBoneSpineLow = 4;
+void CharacterRenderer::watchBone(CharacterInstance& instance, uint16_t bone) {
+    if (bone >= instance.readBones.size()) return;
+    const auto at = std::lower_bound(instance.watchedBones.begin(), instance.watchedBones.end(), bone);
+    if (at == instance.watchedBones.end() || *at != bone) instance.watchedBones.insert(at, bone);
+}
+
+void CharacterRenderer::takeReadBones() {
+    std::vector<ReadBone> read;
+    {
+        std::lock_guard lock(readBonesMutex_);
+        read.swap(readBones_);
+    }
+    for (const ReadBone& bone : read) {
+        auto it = scene_->instances.find(bone.instanceId);
+        if (it == scene_->instances.end() || bone.bone >= it->second.readBones.size()) continue;
+        it->second.readBones[bone.bone] = bone.matrix;
+    }
+}
+
+glm::mat4 CharacterRenderer::attachmentPlacement(const WeaponAttachment& attachment) {
+    return glm::translate(glm::mat4(1.0f), attachment.offset) * attachment.localTransform;
+}
 
 void CharacterRenderer::setArmAnimations(uint32_t instanceId, uint32_t leftArmAnim, uint32_t rightArmAnim) {
     auto it = scene_->instances.find(instanceId);
@@ -2346,255 +2316,218 @@ void CharacterRenderer::setArmAnimations(uint32_t instanceId, uint32_t leftArmAn
             }
         }
     }
-
-    // Which arm each bone is in - a shoulder and everything below it. Parents
-    // come first, so one pass finds both.
-    instance.boneArm.assign(model.bones.size(), -1);
-    for (size_t i = 0; i < model.bones.size(); i++) {
-        const auto& bone = model.bones[i];
-        instance.boneArm[i] = bone.keyBoneId == kKeyBoneShoulderL ? 0
-                            : bone.keyBoneId == kKeyBoneShoulderR ? 1
-                            : bone.parentBone >= 0 && static_cast<size_t>(bone.parentBone) < i
-                                ? instance.boneArm[bone.parentBone] : -1;
-    }
+    // Which bones are in which arm is the skeleton's (SkeletonPool).
 }
 
-void CharacterRenderer::calculateBoneMatrices(CharacterInstance& instance) {
-    if (!instance.cachedModel) return;
-    const auto& model = *instance.cachedModel->data;
-
-    if (model.bones.empty()) {
-        return;
-    }
-
-    size_t numBones = model.bones.size();
-    instance.boneMatrices.resize(numBones);
-
-    const auto& gsd = model.globalSequenceDurations;
-
-    // One-time diagnostic: check bone ordering (parents must precede children)
-    static bool checkedBoneOrder = false;
-    if (!checkedBoneOrder) {
-        checkedBoneOrder = true;
-        for (size_t i = 0; i < numBones; i++) {
-            const auto& bone = model.bones[i];
-            if (bone.parentBone >= 0 && static_cast<size_t>(bone.parentBone) >= i) {
-                LOG_WARNING("Bone ", i, " references parent ", bone.parentBone,
-                            " which comes AFTER it - will use stale matrix!");
-            }
-        }
-    }
-
-    // How many more calls the extreme-translation probe below runs for.
-    // Declared here rather than inside the loop so it can be advanced once per
-    // call, after it, instead of on a bone the loop happens to reach.
-    static int diagFrames = 0;
-
-    const bool armsOwnSequences = (instance.armSequenceIndex[0] >= 0 || instance.armSequenceIndex[1] >= 0) &&
-                                  instance.boneArm.size() == numBones;
-
-    // Model to view, for billboard bones; made when the first one needs it.
-    glm::mat4 viewModel(1.0f), invViewModel(1.0f);
-    bool haveViewModel = false;
-
-    for (size_t i = 0; i < numBones; i++) {
-        const auto& bone = model.bones[i];
-
-        int sequence = instance.currentSequenceIndex;
-        float time = instance.animationTime;
-        const int arm = armsOwnSequences ? instance.boneArm[i] : -1;
-        if (arm >= 0 && instance.armSequenceIndex[arm] >= 0) {
-            sequence = instance.armSequenceIndex[arm];
-            const float duration = static_cast<float>(model.sequences[sequence].duration);
-            if (duration > 0.0f) {
-                time = instance.armSequenceLoops[arm] ? std::fmod(time, duration) : std::min(time, duration);
-            }
-        }
-
-        // Local transform includes pivot bracket: T(pivot)*T*R*S*T(-pivot)
-        // At rest this is identity, so no separate bind pose is needed
-        glm::mat4 localTransform = getBoneTransform(bone, time, instance.globalSequenceTime,
-                                                    sequence, gsd);
-
-        if (bone.keyBoneId == kKeyBoneSpineLow && instance.torsoYawOverrideRad != 0.0f) {
-            glm::mat4 extraYaw = glm::translate(glm::mat4(1.0f), bone.pivot)
-                                * glm::rotate(glm::mat4(1.0f), instance.torsoYawOverrideRad, glm::vec3(0.0f, 0.0f, 1.0f))
-                                * glm::translate(glm::mat4(1.0f), -bone.pivot);
-            localTransform = extraYaw * localTransform;
-        }
-
-        // Compose with parent
-        if (bone.parentBone >= 0 && static_cast<size_t>(bone.parentBone) < numBones) {
-            instance.boneMatrices[i] = instance.boneMatrices[bone.parentBone] * localTransform;
-        } else {
-            instance.boneMatrices[i] = localTransform;
-        }
-
-        // A billboard bone is rebuilt in view space, after its whole parent
-        // chain and the model's placement, and brought back into model space;
-        // its children follow it - as M2Renderer turns a doodad's. A weapon's
-        // glow card left as authored is a flat sheet through the blade.
-        if (boneView_ && (bone.flags & kM2BoneBillboardMask) != 0) {
-            if (!haveViewModel) {
-                viewModel = *boneView_ * (instance.hasOverrideModelMatrix ? instance.overrideModelMatrix
-                                                                          : getModelMatrix(instance));
-                invViewModel = glm::inverse(viewModel);
-                haveViewModel = true;
-            }
-            // localTransform is T(pivot) T R S T(-pivot): its 3x3 is the bone's
-            // own rotation and scale.
-            instance.boneMatrices[i] = invViewModel *
-                m2BillboardBone(bone.flags, viewModel * instance.boneMatrices[i],
-                                glm::mat3(localTransform), bone.pivot);
-        }
-
-        // Diagnostic: detect bones with extreme translation. Gated so the abs()
-        // probes and the post-loop counter bump only run for the first few frames.
-        if (diagFrames < 3) {
-            float tx = std::abs(instance.boneMatrices[i][3][0]);
-            float ty = std::abs(instance.boneMatrices[i][3][1]);
-            float tz = std::abs(instance.boneMatrices[i][3][2]);
-            if (tx > 50.0f || ty > 50.0f || tz > 50.0f) {
-                LOG_DEBUG("BONE DIAG: bone[", i, "] keyBone=", bone.keyBoneId,
-                            " flags=0x", std::hex, bone.flags, std::dec,
-                            " parent=", bone.parentBone,
-                            " pivot=(", bone.pivot.x, ",", bone.pivot.y, ",", bone.pivot.z, ")",
-                            " mat_t=(", instance.boneMatrices[i][3][0], ",",
-                            instance.boneMatrices[i][3][1], ",", instance.boneMatrices[i][3][2], ")",
-                            " local_t=(", localTransform[3][0], ",", localTransform[3][1], ",",
-                            localTransform[3][2], ")",
-                            " animTime=", instance.animationTime,
-                            " gsTime=", instance.globalSequenceTime,
-                            " seqIdx=", instance.currentSequenceIndex);
-            }
-        }
-    }
-    // Once per call, not once per last bone. The bump used to sit inside the
-    // loop under `i == numBones - 1`, which this loop does reach - but a
-    // counter that only advances on a condition inside the block it guards is
-    // the shape that had a light-volume diagnostic logging every frame of every
-    // session (a5080cec), and one `continue` added above would make this the
-    // same fault. tools/bounded_log_check.py reports it.
-    if (diagFrames < 3) diagFrames++;
-}
-
-glm::mat4 CharacterRenderer::getBoneTransform(const pipeline::M2Bone& bone, float animTime, float globalSeqTime,
-                                               int sequenceIndex, const std::vector<uint32_t>& globalSeqDurations) {
-    // Resolve global sequences: bones with globalSequence >= 0 use sequence 0
-    // with time wrapped at the global sequence duration, independent of the
-    // character's current animation.
-    glm::vec3 translation = m2_track::sampleVec3(
-        bone.translation, sequenceIndex, animTime, globalSeqTime,
-        globalSeqDurations, glm::vec3(0.0f));
-    glm::quat rotation = m2_track::sampleQuat(
-        bone.rotation, sequenceIndex, animTime, globalSeqTime,
-        globalSeqDurations);
-    glm::vec3 scale = m2_track::sampleVec3(
-        bone.scale, sequenceIndex, animTime, globalSeqTime,
-        globalSeqDurations, glm::vec3(1.0f));
-
-    // M2 bone transform: T(pivot) * T(trans) * R(rot) * S(scale) * T(-pivot).
-    // Build directly instead of chaining glm::translate/rotate/scale (each of
-    // those is a full mat4 multiply). The composed matrix has:
-    //   linear part      = R * diag(scale)     (3 column scales of R)
-    //   translation part = pivot + trans - RS * pivot
-    glm::mat3 R = glm::mat3_cast(rotation);
-    glm::vec3 c0 = R[0] * scale.x;
-    glm::vec3 c1 = R[1] * scale.y;
-    glm::vec3 c2 = R[2] * scale.z;
-    glm::vec3 t  = (bone.pivot + translation)
-                   - (c0 * bone.pivot.x + c1 * bone.pivot.y + c2 * bone.pivot.z);
-    glm::mat4 transform;
-    transform[0] = glm::vec4(c0, 0.0f);
-    transform[1] = glm::vec4(c1, 0.0f);
-    transform[2] = glm::vec4(c2, 0.0f);
-    transform[3] = glm::vec4(t,  1.0f);
-    return transform;
-}
 
 // --- Rendering ---
 
-void CharacterRenderer::prepareRender(uint32_t frameIndex) {
-    if (!scenePipes_.opaque) return;
-    if (frameIndex >= 2 || boneDescPool_ == VK_NULL_HANDLE || boneSetLayout_ == VK_NULL_HANDLE) return;
-
-    auto& slots = poseSlots_[frameIndex];
-    if (slots.size() < recording_->poses.size()) slots.resize(recording_->poses.size());
-    for (size_t index = 0; index < recording_->poses.size(); ++index) {
-        const auto range = recording_->poses[index];
-        const auto pose = std::span<const glm::mat4>(recording_->bones).subspan(range.first, range.count);
-        auto& slot = slots[index];
-        const uint32_t id = static_cast<uint32_t>(index);
-        if (slot.failed) continue;
-        if (!slot.buffer) {
-            VkBufferCreateInfo bci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-            bci.size = MAX_BONES * sizeof(glm::mat4);
-            bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-            VmaAllocationCreateInfo aci{};
-            aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-            aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
-            VmaAllocationInfo allocInfo{};
-            if (gpuCreateBuffer(vkCtx_->getAllocator(), &bci, &aci,
-                            &slot.buffer, &slot.allocation, &allocInfo) != VK_SUCCESS) {
-                slot.buffer = VK_NULL_HANDLE;
-                slot.allocation = VK_NULL_HANDLE;
-                slot.mapped = nullptr;
-                slot.failed = true;
-                LOG_ERROR("CharacterRenderer: pose buffer allocation failed (pose=", id,
-                          ", frame=", frameIndex, "); character is omitted");
-                continue;
-            }
-            slot.mapped = allocInfo.pMappedData;
-
-            // Initialize all bone slots to identity so out-of-range indices
-            // produce correct (neutral) transforms instead of GPU garbage
-            if (slot.mapped) {
-                auto* dst = static_cast<glm::mat4*>(slot.mapped);
-                for (int j = 0; j < MAX_BONES; j++) dst[j] = glm::mat4(1.0f);
-            }
-
-            VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-            ai.descriptorPool = boneDescPool_;
-            ai.descriptorSetCount = 1;
-            ai.pSetLayouts = &boneSetLayout_;
-            VkResult dsRes = vkCtx_->allocateDescriptorSets(ai, &slot.set);
-            if (dsRes != VK_SUCCESS) {
-                slot.failed = true;
-                LOG_ERROR("CharacterRenderer::prepareRender: bone descriptor alloc failed; character is omitted (pose=",
-                          id, ", frame=", frameIndex, ", vk=", static_cast<int>(dsRes), ")");
-                if (slot.buffer) {
-                    gpuDestroyBuffer(vkCtx_->getAllocator(),
-                                     slot.buffer, slot.allocation);
-                    slot.buffer = VK_NULL_HANDLE;
-                    slot.allocation = VK_NULL_HANDLE;
-                    slot.mapped = nullptr;
-                }
-                continue;
-            }
-
-            if (slot.set) {
-                VkDescriptorBufferInfo bufInfo{};
-                bufInfo.buffer = slot.buffer;
-                bufInfo.offset = 0;
-                bufInfo.range = bci.size;
-                VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-                write.dstSet = slot.set;
-                write.dstBinding = 0;
-                write.descriptorCount = 1;
-                write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                write.pBufferInfo = &bufInfo;
-                vkUpdateDescriptorSets(vkCtx_->getDevice(), 1, &write, 0, nullptr);
-            }
+bool CharacterRenderer::createSkeletonPipeline() {
+    VkDevice device = vkCtx_->getDevice();
+    // Binding 0: the pool's pages, as many as are made (partially bound).
+    // 1: the requests. 2: the bones. 3: the models.
+    VkDescriptorSetLayoutBinding bindings[4] = {};
+    for (uint32_t b = 0; b < 4; ++b) {
+        bindings[b].binding = b;
+        bindings[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[b].descriptorCount = b == 0 ? SkeletonPool::kMaxPages : 1;
+        bindings[b].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    const VkDescriptorBindingFlags bindingFlags[4] = {VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, 0, 0, 0};
+    VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{
+        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
+    flagsInfo.bindingCount = 4;
+    flagsInfo.pBindingFlags = bindingFlags;
+    VkDescriptorSetLayoutCreateInfo layoutCi{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    layoutCi.pNext = &flagsInfo;
+    layoutCi.bindingCount = 4;
+    layoutCi.pBindings = bindings;
+    if (vkCreateDescriptorSetLayout(device, &layoutCi, nullptr, &skeletonSetLayout_) != VK_SUCCESS) {
+        LOG_ERROR("CharacterRenderer: could not create the skeleton pass's set layout; characters are not drawn");
+        return false;
+    }
+    const VkPushConstantRange push{.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT, .offset = 0,
+                                   .size = sizeof(glm::mat4) + sizeof(glm::uvec4)};
+    skeletonPipelineLayout_ = createPipelineLayout(device, {skeletonSetLayout_}, {push});
+    VkShaderModule shader;
+    if (!skeletonPipelineLayout_ || !shader.loadFromFile(device, "assets/shaders/skeleton.comp.spv")) {
+        LOG_ERROR("CharacterRenderer: could not load the skeleton pass; characters are not drawn");
+        return false;
+    }
+    VkComputePipelineCreateInfo pipelineCi{.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    pipelineCi.stage = shader.stageInfo(VK_SHADER_STAGE_COMPUTE_BIT);
+    pipelineCi.layout = skeletonPipelineLayout_;
+    const VkResult made = vkCreateComputePipelines(device, vkCtx_->getPipelineCache(), 1, &pipelineCi, nullptr,
+                                                   &skeletonPipeline_);
+    shader.destroy();
+    if (made != VK_SUCCESS) {
+        LOG_ERROR("CharacterRenderer: could not build the skeleton pass (", static_cast<int>(made),
+                  "); characters are not drawn");
+        return false;
+    }
+    for (auto& slot : skeletonSlots_) {
+        const VkDescriptorSetLayout layouts[2] = {skeletonSetLayout_, boneSetLayout_};
+        VkDescriptorSet sets[2] = {};
+        VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        ai.descriptorPool = boneDescPool_;
+        ai.descriptorSetCount = 2;
+        ai.pSetLayouts = layouts;
+        if (vkCtx_->allocateDescriptorSets(ai, sets) != VK_SUCCESS) {
+            LOG_ERROR("CharacterRenderer: could not allocate the skeleton pass's sets; characters are not drawn");
+            return false;
         }
+        slot.computeSet = sets[0];
+        slot.drawSet = sets[1];
+    }
+    return true;
+}
 
-        if (slot.mapped) {
-            auto* dst = static_cast<glm::mat4*>(slot.mapped);
-            std::memcpy(dst, pose.data(), pose.size() * sizeof(glm::mat4));
-            // A slot can draw a different skeleton next frame. Bones outside
-            // its pose must remain neutral, rather than keeping the last unit.
-            std::fill(dst + pose.size(), dst + MAX_BONES, glm::mat4(1.0f));
-            vmaFlushAllocation(vkCtx_->getAllocator(), slot.allocation, 0, VK_WHOLE_SIZE);
+bool CharacterRenderer::ensureSkeletonSlot(uint32_t index, uint32_t requests, uint32_t bones, uint32_t reads) {
+    SkeletonSlot& slot = skeletonSlots_[index];
+    const VmaAllocator allocator = vkCtx_->getAllocator();
+    DeferredResources retired(*vkCtx_);
+    const auto grow = [&](AllocatedBuffer& buffer, uint32_t& room, uint32_t wanted, VkDeviceSize each,
+                          VkBufferUsageFlags usage, VmaMemoryUsage memory, const char* what) {
+        if (wanted <= room && buffer.buffer) return true;
+        const uint32_t next = std::max({wanted, room + room / 2, 64u});
+        AllocatedBuffer made = createBuffer(allocator, VkDeviceSize(next) * each, usage, memory);
+        if (!made.buffer) {
+            static core::LogBudget budget(4, "skeleton pass buffers");
+            if (budget.take())
+                LOG_ERROR("CharacterRenderer: no memory for the skeleton pass's ", what, " (", next,
+                          ") - characters are not drawn this frame");
+            return false;
         }
+        if (buffer.buffer) retired.buffer(buffer);
+        buffer = made;
+        room = next;
+        slot.setsCurrent = false;
+        return true;
+    };
+    uint32_t requestRoom = slot.requestRoom, modelRoom = slot.requestRoom;
+    if (!grow(slot.requests, requestRoom, requests, sizeof(SkeletonRequestGPU), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+              VMA_MEMORY_USAGE_CPU_TO_GPU, "requests") ||
+        !grow(slot.models, modelRoom, requests, sizeof(glm::mat4), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+              VMA_MEMORY_USAGE_GPU_ONLY, "models") ||
+        !grow(slot.bones, slot.boneRoom, bones, sizeof(glm::mat4),
+              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_GPU_ONLY,
+              "bones") ||
+        !grow(slot.readback, slot.readRoom, std::max(reads, 1u), sizeof(glm::mat4), VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+              VMA_MEMORY_USAGE_GPU_TO_CPU, "bones read back")) {
+        return false;
+    }
+    slot.requestRoom = std::min(requestRoom, modelRoom);
+    return true;
+}
+
+void CharacterRenderer::prepareRender(VkCommandBuffer cmd, uint32_t frameIndex) {
+    if (!scenePipes_.opaque || !skeletonPipeline_ || frameIndex >= 2) return;
+    SkeletonSlot& slot = skeletonSlots_[frameIndex];
+
+    // What this slot's last frame copied back: its fence has passed.
+    if (!slot.readOf.empty() && slot.readback.info.pMappedData) {
+        vmaInvalidateAllocation(vkCtx_->getAllocator(), slot.readback.allocation, 0, VK_WHOLE_SIZE);
+        const auto* matrices = static_cast<const glm::mat4*>(slot.readback.info.pMappedData);
+        std::lock_guard lock(readBonesMutex_);
+        for (size_t i = 0; i < slot.readOf.size(); ++i)
+            readBones_.push_back({.instanceId = slot.readOf[i].first, .bone = slot.readOf[i].second,
+                                  .matrix = matrices[i]});
+    }
+    slot.readOf.clear();
+
+    const Frame& frame = *recording_;
+    if (frame.requests.empty()) return;
+    const auto requestCount = static_cast<uint32_t>(frame.requests.size());
+    const auto readCount = static_cast<uint32_t>(frame.reads.size());
+    if (!ensureSkeletonSlot(frameIndex, requestCount, std::max(frame.boneCount, 1u), readCount)) return;
+    std::memcpy(slot.requests.info.pMappedData, frame.requests.data(), frame.requests.size() * sizeof(SkeletonRequestGPU));
+    vmaFlushAllocation(vkCtx_->getAllocator(), slot.requests.allocation, 0, VK_WHOLE_SIZE);
+
+    // The sets, after the slot's fence, when a buffer or the pages changed.
+    if (!slot.setsCurrent || slot.pagesVersion != frame.skeletonPagesVersion) {
+        std::vector<VkDescriptorBufferInfo> pages;
+        std::vector<uint32_t> pageAt;
+        for (size_t p = 0; p < frame.skeletonPages.size() && p < SkeletonPool::kMaxPages; ++p) {
+            if (!frame.skeletonPages[p]) continue;
+            pages.push_back({.buffer = frame.skeletonPages[p], .offset = 0, .range = VK_WHOLE_SIZE});
+            pageAt.push_back(static_cast<uint32_t>(p));
+        }
+        const VkDescriptorBufferInfo requests{.buffer = slot.requests.buffer, .offset = 0, .range = VK_WHOLE_SIZE};
+        const VkDescriptorBufferInfo bones{.buffer = slot.bones.buffer, .offset = 0, .range = VK_WHOLE_SIZE};
+        const VkDescriptorBufferInfo models{.buffer = slot.models.buffer, .offset = 0, .range = VK_WHOLE_SIZE};
+        std::vector<VkWriteDescriptorSet> writes;
+        const auto write = [&](VkDescriptorSet set, uint32_t binding, uint32_t element,
+                               const VkDescriptorBufferInfo* info) {
+            VkWriteDescriptorSet w{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            w.dstSet = set;
+            w.dstBinding = binding;
+            w.dstArrayElement = element;
+            w.descriptorCount = 1;
+            w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            w.pBufferInfo = info;
+            writes.push_back(w);
+        };
+        for (size_t p = 0; p < pages.size(); ++p) write(slot.computeSet, 0, pageAt[p], &pages[p]);
+        write(slot.computeSet, 1, 0, &requests);
+        write(slot.computeSet, 2, 0, &bones);
+        write(slot.computeSet, 3, 0, &models);
+        write(slot.drawSet, 0, 0, &bones);
+        write(slot.drawSet, 1, 0, &models);
+        vkUpdateDescriptorSets(vkCtx_->getDevice(), static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+        slot.setsCurrent = true;
+        slot.pagesVersion = frame.skeletonPagesVersion;
+    }
+
+    // A dispatch a level: a request reads what the level before posed.
+    const auto barrier = [&](VkPipelineStageFlags2 src, VkAccessFlags2 srcAccess, VkPipelineStageFlags2 dst,
+                             VkAccessFlags2 dstAccess) {
+        VkMemoryBarrier2 b{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        b.srcStageMask = src;
+        b.srcAccessMask = srcAccess;
+        b.dstStageMask = dst;
+        b.dstAccessMask = dstAccess;
+        VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dep.memoryBarrierCount = 1;
+        dep.pMemoryBarriers = &b;
+        cmdPipelineBarrier2(cmd, dep);
+    };
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, skeletonPipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, skeletonPipelineLayout_, 0, 1, &slot.computeSet, 0,
+                            nullptr);
+    struct {
+        glm::mat4 view;
+        glm::uvec4 level;
+    } push{.view = frame.view, .level = glm::uvec4(0)};
+    uint32_t first = 0;
+    for (const uint32_t end : frame.levelEnds) {
+        if (end > first) {
+            push.level.x = first;
+            vkCmdPushConstants(cmd, skeletonPipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+            vkCmdDispatch(cmd, end - first, 1, 1);
+            barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT,
+                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+                        VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                    VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_TRANSFER_READ_BIT);
+        }
+        first = end;
+    }
+
+    // The bones the CPU reads, copied back for it to take once this slot's
+    // fence has passed.
+    if (readCount > 0) {
+        std::vector<VkBufferCopy> regions;
+        regions.reserve(readCount);
+        slot.readOf.reserve(readCount);
+        for (uint32_t i = 0; i < readCount; ++i) {
+            const Frame::Read& read = frame.reads[i];
+            regions.push_back({.srcOffset = VkDeviceSize(read.source) * sizeof(glm::mat4),
+                               .dstOffset = VkDeviceSize(i) * sizeof(glm::mat4),
+                               .size = sizeof(glm::mat4)});
+            slot.readOf.emplace_back(read.instanceId, read.bone);
+        }
+        vkCmdCopyBuffer(cmd, slot.bones.buffer, slot.readback.buffer, readCount, regions.data());
+        barrier(VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_HOST_BIT,
+                VK_ACCESS_2_HOST_READ_BIT);
     }
 }
 
@@ -2604,7 +2537,9 @@ void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
 void CharacterRenderer::Frame::clear() noexcept {
     for (auto& list : drawLists) list.clear();
-    depth.clear(); poses.clear(); bones.clear(); poseById.clear();
+    depth.clear(); requests.clear(); levelEnds.clear(); reads.clear(); poseById.clear();
+    skeletonPages.clear();
+    boneCount = 0;
 }
 
 uint32_t CharacterRenderer::Frame::poseIndex(uint32_t id) const {
@@ -2621,18 +2556,102 @@ std::shared_ptr<const CharacterRenderer::Frame> CharacterRenderer::extract(const
     frame->normalMapping = normalMappingEnabled_;
     frame->normalStrength = normalMapStrength_;
     frameLights_ = &lights;
+    frame->view = boneView_.value_or(glm::mat4(1.0f));
+    frame->skeletonPages = skeletons_.pageBuffers();
+    frame->skeletonPagesVersion = skeletons_.version();
+
+    // Each shown instance a request: those placed by their own matrix, then
+    // the weapons on their wielders' bones, then the enchants on the weapons
+    // - each level dispatched after the one it rides.
+    std::unordered_set<uint32_t> riders;
     for (const auto& [id, inst] : scene_->instances) {
-        if (!isShown(inst) || !inst.cachedModel || !inst.cachedModel->geometry.placed()) continue;
-        const uint32_t pose = static_cast<uint32_t>(frame->poses.size());
-        frame->poseById.emplace_back(id, pose);
-        const size_t count = std::min(inst.boneMatrices.size(), static_cast<size_t>(MAX_BONES));
-        const auto first = static_cast<uint32_t>(frame->bones.size());
-        frame->bones.insert(frame->bones.end(), inst.boneMatrices.begin(), inst.boneMatrices.begin() + count);
-        if (count == 0) frame->bones.emplace_back(1.0f);
-        frame->poses.push_back({first, static_cast<uint32_t>(std::max(count, size_t(1)))});
-        frame->depth.push_back({.modelMatrix = inst.hasOverrideModelMatrix ? inst.overrideModelMatrix : getModelMatrix(inst),
-            .model = models.at(inst.modelId), .dress = inst.dress, .pose = pose, .id = inst.id, .modelId = inst.modelId});
+        for (const auto& wa : inst.weaponAttachments) {
+            riders.insert(wa.weaponInstanceId);
+            for (const auto& fx : wa.effects) riders.insert(fx.effectInstanceId);
+        }
     }
+    const auto request = [&](uint32_t id, const CharacterInstance& inst, int32_t parent, uint32_t parentBone,
+                             const glm::mat4& placement, const glm::vec3& shift) {
+        const M2ModelGPU& model = *inst.cachedModel;
+        SkeletonRequestGPU r;
+        r.parent = parent;
+        r.parentBone = parentBone;
+        r.placement = placement;
+        r.shift = glm::vec4(shift, 0.0f);
+        r.outBase = frame->boneCount;
+        const uint32_t boneCount = model.skeleton.placed() ? model.skeleton.boneCount : 0;
+        if (boneCount > 0) {
+            r.page = static_cast<uint32_t>(model.skeleton.page);
+            r.blob = model.skeleton.first;
+            r.sequence = inst.currentSequenceIndex;
+            r.time = inst.animationTime;
+            r.globalTime = inst.globalSequenceTime;
+            r.torsoYaw = inst.torsoYawOverrideRad;
+            if (boneView_) r.flags |= 1u;
+            if (inst.armSequenceIndex[0] >= 0 || inst.armSequenceIndex[1] >= 0) {
+                r.flags |= 2u;
+                const auto& sequences = model.data->sequences;
+                for (int arm = 0; arm < 2; ++arm) {
+                    const int sequence = inst.armSequenceIndex[arm];
+                    r.armSequence[arm] = sequence;
+                    if (sequence < 0 || static_cast<size_t>(sequence) >= sequences.size()) continue;
+                    const float duration = static_cast<float>(sequences[sequence].duration);
+                    float time = inst.animationTime;
+                    if (duration > 0.0f)
+                        time = inst.armSequenceLoops[arm] ? std::fmod(time, duration) : std::min(time, duration);
+                    r.armTime[arm] = time;
+                }
+            }
+        } else {
+            r.flags = 4u;
+        }
+        const auto index = static_cast<uint32_t>(frame->requests.size());
+        frame->requests.push_back(r);
+        frame->poseById.emplace_back(id, index);
+        frame->boneCount += boneCount;
+        for (const uint16_t bone : inst.watchedBones)
+            if (bone < boneCount) frame->reads.push_back({.instanceId = id, .bone = bone, .source = r.outBase + bone});
+        if (model.geometry.placed()) {
+            frame->depth.push_back({.modelMatrix = inst.hasOverrideModelMatrix ? inst.overrideModelMatrix
+                                                                               : getModelMatrix(inst),
+                                    .model = models.at(inst.modelId), .dress = inst.dress, .pose = index,
+                                    .boneBase = r.outBase, .boneCount = boneCount, .id = inst.id,
+                                    .modelId = inst.modelId});
+        }
+        return index;
+    };
+    const auto shown = [&](const CharacterInstance& inst) { return inst.cachedModel && isShown(inst); };
+    std::vector<std::pair<uint32_t, uint32_t>> wielders;  // instance, its request
+    for (const auto& [id, inst] : scene_->instances) {
+        if (riders.contains(id) || !shown(inst)) continue;
+        const uint32_t index = request(id, inst, -1, ~0u,
+                                       inst.hasOverrideModelMatrix ? inst.overrideModelMatrix : getModelMatrix(inst),
+                                       glm::vec3(0.0f));
+        if (!inst.weaponAttachments.empty()) wielders.emplace_back(id, index);
+    }
+    frame->levelEnds.push_back(static_cast<uint32_t>(frame->requests.size()));
+    std::vector<std::pair<const WeaponAttachment*, uint32_t>> weapons;  // attachment, the weapon's request
+    for (const auto& [id, parent] : wielders) {
+        const CharacterInstance& wielder = scene_->instances.at(id);
+        const uint32_t parentBones = frame->requests[parent].flags & 4u ? 0 : wielder.cachedModel->skeleton.boneCount;
+        for (const auto& wa : wielder.weaponAttachments) {
+            auto it = scene_->instances.find(wa.weaponInstanceId);
+            if (it == scene_->instances.end() || !shown(it->second)) continue;
+            const uint32_t bone = wa.boneIndex < parentBones ? wa.boneIndex : ~0u;
+            weapons.emplace_back(&wa, request(wa.weaponInstanceId, it->second, static_cast<int32_t>(parent), bone,
+                                              attachmentPlacement(wa), wa.shift));
+        }
+    }
+    frame->levelEnds.push_back(static_cast<uint32_t>(frame->requests.size()));
+    for (const auto& [wa, weapon] : weapons) {
+        for (const auto& fx : wa->effects) {
+            auto it = scene_->instances.find(fx.effectInstanceId);
+            if (it == scene_->instances.end() || !shown(it->second)) continue;
+            request(fx.effectInstanceId, it->second, static_cast<int32_t>(weapon), ~0u,
+                    glm::translate(glm::mat4(1.0f), fx.offset), glm::vec3(0.0f));
+        }
+    }
+    frame->levelEnds.push_back(static_cast<uint32_t>(frame->requests.size()));
     std::sort(frame->poseById.begin(), frame->poseById.end());
     cullCharacters(camera, Part::All, frame->drawLists[0], *frame);
     for (const auto& draw : frame->drawLists[0]) frame->drawLists[draw.opacity < 0.999f ? 2 : 1].push_back(draw);
@@ -2703,11 +2722,15 @@ void CharacterRenderer::cullCharacters(const Camera& camera, Part part,
         // Set model matrix (use override for weapon instances)
         const glm::mat4 modelMatrix = instance.hasOverrideModelMatrix ? instance.overrideModelMatrix
                                                                       : getModelMatrix(instance);
+        const uint32_t pose = frame.poseIndex(instance.id);
+        const SkeletonRequestGPU& posed = frame.requests[pose];
         list.push_back(DrawCharacter{
             .modelMatrix = modelMatrix,
             .model = models.at(instance.modelId),
             .dress = instance.dress,
-            .pose = frame.poseIndex(instance.id),
+            .pose = pose,
+            .boneBase = posed.outBase,
+            .boneCount = (posed.flags & 4u) ? 0u : gpuModel.skeleton.boneCount,
             .interiorLight = instance.interiorLight,
             // The lights nearest the unit's origin, as the client picks them
             // for any model.
@@ -2828,6 +2851,10 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
     // Bind per-frame descriptor set (set 0) -- shared across all draws
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             pipelineLayout_, 0, 1, &perFrameSet, 0, nullptr);
+    // The frame's bones and models (set 2), posed by prepareRender.
+    const VkDescriptorSet boneSet = skeletonSlots_[frameIndex].drawSet;
+    if (!boneSet || recording_->requests.empty()) return;
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 2, 1, &boneSet, 0, nullptr);
 
     auto pipelineFor = [&](CharacterBlendPipeline p) -> VkPipeline {
         switch (p) {
@@ -2852,19 +2879,13 @@ void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet pe
         const float drawOpacity = instance.opacity;
 
         const CharacterPushConstants push{
-            .model = instance.modelMatrix,
+            .pose = glm::uvec4(instance.pose, instance.boneBase, instance.boneCount, 0u),
             .interiorLight = instance.interiorLight,
             .localLights = instance.localLights,
         };
         vkCmdPushConstants(cmd, pipelineLayout_,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(push), &push);
-
-        // Bind bone descriptor set (set 2), filled by prepareRender.
-        const VkDescriptorSet boneSet = poseSlots_[frameIndex][instance.pose].set;
-        if (!boneSet) continue;
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                pipelineLayout_, 2, 1, &boneSet, 0, nullptr);
 
         geometry_.bind(cmd, gpuModel.geometry);
 
@@ -3457,7 +3478,6 @@ void CharacterRenderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4
     VkDescriptorSet currentTexSet = VK_NULL_HANDLE;
     for (const DrawCharacter& inst : list) {
         const M2ModelGPU& gpuModel = *inst.model;
-        const glm::mat4& modelMat = inst.modelMatrix;
 
         // Params at set 1 and bones at set 2, together, per instance.
         //
@@ -3469,16 +3489,18 @@ void CharacterRenderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4
         // from a set the GPU no longer considered bound, which GPU-assisted
         // validation reports as indexing a descriptor array of length zero,
         // thousands of times a session.
-        const VkDescriptorSet boneSet = poseSlots_[frameIndex][inst.pose].set;
-        if (!boneSet) continue;
+        const VkDescriptorSet boneSet = skeletonSlots_[frameIndex].drawSet;
+        if (!boneSet || recording_->requests.empty()) return;
         VkDescriptorSet sets[2] = {shadowParams_.set, boneSet};
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
             0, 2, sets, 0, nullptr);
         currentTexSet = shadowParams_.set;
 
-        ShadowPush push{.lightSpaceModel = lightSpaceMatrix * modelMat};
+        // The map's matrix; the model is the one the GPU posed it at.
+        const CharacterShadowPush push{.lightSpace = lightSpaceMatrix,
+                                       .pose = glm::uvec4(inst.pose, inst.boneBase, inst.boneCount, 0u)};
         vkCmdPushConstants(cmd, shadowPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
-                           0, sizeof(ShadowPush), &push);
+                           0, sizeof(CharacterShadowPush), &push);
 
         geometry_.bind(cmd, gpuModel.geometry);
 
@@ -3613,8 +3635,9 @@ void CharacterRenderer::gatherLocalLights(const Camera& camera, std::vector<Loca
                 m2_track::sampleFloat(light.diffuseIntensity, seq, t, gt, gsd, 1.0f) * alpha;
             if (std::max({color.r, color.g, color.b}) <= 0.0f) continue;
             glm::mat4 bone(1.0f);
-            if (light.bone >= 0 && static_cast<size_t>(light.bone) < inst.boneMatrices.size()) {
-                bone = inst.boneMatrices[static_cast<size_t>(light.bone)];
+            // As the GPU posed it, read back (watched from the instance's start).
+            if (light.bone >= 0 && static_cast<size_t>(light.bone) < inst.readBones.size()) {
+                bone = inst.readBones[static_cast<size_t>(light.bone)];
             }
             out.push_back({.position = glm::vec3(modelMatrix * bone * glm::vec4(light.position, 1.0f)),
                            .color = color});
@@ -3761,7 +3784,8 @@ void CharacterRenderer::forEachEmitterSource(
         source.modelMatrix = inst.hasOverrideModelMatrix ? inst.overrideModelMatrix
                                                          : getModelMatrix(inst);
         source.scale = inst.scale;
-        source.bones = &inst.boneMatrices;
+        // Its emitters' bones as the GPU posed them, read back.
+        source.bones = &inst.readBones;
         source.sequenceIndex = inst.currentSequenceIndex;
         source.animationTimeMs = inst.animationTime;
         source.globalSequenceTimeMs = inst.globalSequenceTime;
@@ -4458,7 +4482,7 @@ void CharacterRenderer::detachWeaponEffects(uint32_t charInstanceId, uint32_t at
 bool CharacterRenderer::getAttachmentTransform(uint32_t instanceId, uint32_t attachmentId, glm::mat4& outTransform) {
     auto instIt = scene_->instances.find(instanceId);
     if (instIt == scene_->instances.end()) return false;
-    const auto& instance = instIt->second;
+    auto& instance = instIt->second;
 
     // Find attachment point using shared lookup logic
     uint16_t boneIndex = 0;
@@ -4467,10 +4491,12 @@ bool CharacterRenderer::getAttachmentTransform(uint32_t instanceId, uint32_t att
         return false;
     }
 
-    // Get bone matrix
+    // The bone as the GPU posed it, read back two frames late; the place is
+    // the instance's own now. Read from now on if it was not.
+    watchBone(instance, boneIndex);
     glm::mat4 boneMat(1.0f);
-    if (boneIndex < instance.boneMatrices.size()) {
-        boneMat = instance.boneMatrices[boneIndex];
+    if (boneIndex < instance.readBones.size()) {
+        boneMat = instance.readBones[boneIndex];
     }
 
     // Compute world transform: modelMatrix * boneMatrix * offsetTranslation

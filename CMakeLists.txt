@@ -1087,6 +1087,7 @@ set(WOWEE_SOURCES
     src/rendering/texture_table.cpp
     src/rendering/gpu_slot_table.cpp
     src/rendering/geometry_pool.cpp
+    src/rendering/skeleton_pool.cpp
     src/rendering/texture_upload.cpp
     src/rendering/normal_map_builder.cpp
     src/rendering/normal_map_encoding.cpp
@@ -2571,6 +2572,11 @@ if(WOWEE_BUILD_TESTS)
                         --scene-mutations --object ${object})
             set_tests_properties(scene_frame_scene_${object} PROPERTIES SKIP_RETURN_CODE 77)
         endforeach()
+        # A creature is drawn in the pose its animation puts it in.
+        wowee_add_gpu_test(scene_character_skinning
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_character_skinning.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/character-skinning)
+        set_tests_properties(scene_character_skinning PROPERTIES SKIP_RETURN_CODE 77)
         # A tree's shadow is cut by its leaves.
         wowee_add_gpu_test(scene_m2_foliage_shadow
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_m2_foliage_shadow.py

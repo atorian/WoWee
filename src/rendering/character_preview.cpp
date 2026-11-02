@@ -1447,7 +1447,7 @@ OffscreenComposite::Request CharacterPreview::extractComposite() {
         const uint32_t fi = slot % MAX_FRAMES;
         std::memcpy(owner->previewUBOMapped_[fi], &ubo, sizeof(ubo));
         owner->charRenderer_->useFrame(characters);
-        owner->charRenderer_->prepareRender(fi);
+        owner->charRenderer_->prepareRender(cmd, fi);
         owner->renderTarget_->beginPass(cmd, clear);
         owner->charRenderer_->render(cmd, owner->previewPerFrameSet_[fi], camera);
         owner->renderTarget_->endPass(cmd);

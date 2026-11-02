@@ -1914,7 +1914,7 @@ void Renderer::beginFrame(const FrameInputs& inputs) {
     // this only binds them.
     if (characterRenderer) {
         CpuStage stage(stages, "beginFrame", "prepare characters");
-        characterRenderer->prepareRender(vkCtx->getCurrentFrame());
+        characterRenderer->prepareRender(currentCmd, vkCtx->getCurrentFrame());
     }
 
     {

@@ -1,7 +1,5 @@
 #version 450
 
-#define MAX_BONES 240u  // must match CharacterRenderer::MAX_BONES
-
 layout(set = 0, binding = 0) uniform PerFrame {
     mat4 view;
     mat4 projection;
@@ -40,7 +38,7 @@ layout(set = 0, binding = 0) uniform PerFrame {
 };
 
 layout(push_constant) uniform Push {
-    mat4 model;
+    uvec4 pose;            // x its posed request, y its first bone, z its bone count
     vec4 interiorAmbient;  // read by character.frag
     vec4 interiorDirect;   // read by character.frag
     uvec4 localLights;     // read by character.frag
@@ -48,9 +46,19 @@ layout(push_constant) uniform Push {
 
 #include "character_material.glsli"
 
+// The frame's skeletons as skeleton.comp posed them, and each request's
+// model matrix - a weapon's on its wielder's hand.
 layout(set = 2, binding = 0) readonly buffer BoneSSBO {
     mat4 bones[];
 };
+layout(set = 2, binding = 1) readonly buffer ModelSSBO {
+    mat4 models[];
+};
+
+// A bone past the skeleton's own count is the identity.
+mat4 boneAt(uint index) {
+    return index < push.pose.z ? bones[push.pose.y + index] : mat4(1.0);
+}
 
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec4 aBoneWeights;
@@ -86,20 +94,19 @@ vec3 fallbackTangent(vec3 n) {
 }
 
 void main() {
-    // Bone slots past the model's own count stay identity, so clamping keeps a
-    // stray index harmless instead of reading past the buffer.
-    uvec4 bi = min(aBoneIndices, uvec4(MAX_BONES - 1u));
-    mat4 skinMat = bones[bi.x] * aBoneWeights.x
-                 + bones[bi.y] * aBoneWeights.y
-                 + bones[bi.z] * aBoneWeights.z
-                 + bones[bi.w] * aBoneWeights.w;
+    uvec4 bi = aBoneIndices;
+    mat4 skinMat = boneAt(bi.x) * aBoneWeights.x
+                 + boneAt(bi.y) * aBoneWeights.y
+                 + boneAt(bi.z) * aBoneWeights.z
+                 + boneAt(bi.w) * aBoneWeights.w;
 
     vec4 skinnedPos = skinMat * vec4(aPos, 1.0);
     vec3 skinnedNorm = mat3(skinMat) * aNormal;
     vec3 skinnedTan = mat3(skinMat) * aTangent.xyz;
 
-    vec4 worldPos = push.model * skinnedPos;
-    mat3 modelMat3 = mat3(push.model);
+    const mat4 model = models[push.pose.x];
+    vec4 worldPos = model * skinnedPos;
+    mat3 modelMat3 = mat3(model);
     FragPos = worldPos.xyz;
     Normal = modelMat3 * skinnedNorm;
     // Env-mapped armour and metal sample eye-space sphere coordinates, not
