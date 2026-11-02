@@ -1,4 +1,5 @@
 #version 450
+#extension GL_ARB_shader_draw_parameters : require
 
 layout(set = 0, binding = 0) uniform PerFrame {
     mat4 view;
@@ -37,12 +38,16 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 lightningColor;
 };
 
-// Per-draw push constants: where the draw's instances start and its batch's
-// material.
+// A call's draws - one, or a run of an indirect call - name their records
+// from here: draw gl_DrawID's material row is drawMaterials[drawBase +
+// gl_DrawID]. Where a draw's instances start in InstanceSSBO is its first
+// instance, so gl_InstanceIndex is the entry.
 layout(push_constant) uniform Push {
-    int instanceDataOffset;  // Base index into InstanceSSBO for this draw group
-    uint material;           // its row of m2Materials
+    uint drawBase;
 } push;
+layout(set = 3, binding = 3) readonly buffer DrawMaterials {
+    uint drawMaterials[];
+};
 
 #include "m2_material.glsli"
 
@@ -124,10 +129,10 @@ vec2 uvTransform(vec4 row0, vec4 row1, vec2 uv) {
 }
 
 void main() {
-    const M2Material material = m2Materials[push.material];
-    vMaterial = push.material;
+    vMaterial = drawMaterials[push.drawBase + uint(gl_DrawIDARB)];
+    const M2Material material = m2Materials[vMaterial];
     // Fetch per-instance data from SSBO
-    int instIdx = push.instanceDataOffset + gl_InstanceIndex;
+    int instIdx = gl_InstanceIndex;
     uint slot = instanceData[instIdx].slot;
     mat4 model = instanceStatics[slot].model;
     float fade = instanceData[instIdx].fadeAlpha;

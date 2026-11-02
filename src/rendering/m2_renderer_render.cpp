@@ -814,32 +814,73 @@ bool M2Renderer::prepareInstanceStorage(uint32_t slot,uint64_t entries) {
     if(entries>limit) return fail("storage-buffer range exceeded");
     const uint32_t capacity=static_cast<uint32_t>(std::min(limit,
         std::max(entries,uint64_t(instanceCapacity_[slot])*2)));
-    const VkDeviceSize bytes=VkDeviceSize(capacity)*sizeof(M2InstanceGPU);
-    VkBufferCreateInfo bci{.sType=VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    bci.size=bytes; bci.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-    VmaAllocationCreateInfo aci{};
-    aci.usage=VMA_MEMORY_USAGE_CPU_TO_GPU;
-    aci.flags=VMA_ALLOCATION_CREATE_MAPPED_BIT;
-    AllocatedBuffer next;
-    if(gpuCreateBuffer(vkCtx_->getAllocator(),&bci,&aci,&next.buffer,&next.allocation,&next.info)!=VK_SUCCESS)
-        return fail("mapped GPU allocation failed");
-    if(!next.info.pMappedData) {
-        gpuDestroyBuffer(vkCtx_->getAllocator(),next.buffer,next.allocation);
-        return fail("GPU allocation has no CPU mapping");
-    }
     // prepareRender runs after this slot's fence, before any M2 command is
-    // recorded. The other slot's descriptor and buffer remain untouched.
-    VkDescriptorBufferInfo info{next.buffer,0,bytes};
-    VkWriteDescriptorSet write{.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    write.dstSet=instanceSet_[slot]; write.dstBinding=0; write.descriptorCount=1;
-    write.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; write.pBufferInfo=&info;
-    vkUpdateDescriptorSets(vkCtx_->getDevice(),1,&write,0,nullptr);
+    // recorded. The other slot's descriptor and buffers remain untouched.
+    if(!makeDrawStorage(slot,capacity)) return fail("mapped GPU allocation failed");
+    LOG_INFO("M2 instance storage: slot ",slot," grew to ",capacity," records (",
+        VkDeviceSize(capacity)*sizeof(M2InstanceGPU)/1024," KiB), frame requires ",entries);
+    return true;
+}
+
+uint32_t& M2Renderer::frameDrawCursor() {
+    const uint64_t frame = vkCtx_->frameNumber();
+    if (frame != drawCursorFrame_) {
+        drawCursorFrame_ = frame;
+        drawCursor_ = 0;
+    }
+    return drawCursor_;
+}
+
+bool M2Renderer::makeDrawStorage(uint32_t slot, uint32_t capacity) {
+    const VmaAllocator allocator = vkCtx_->getAllocator();
+    const auto make = [&](VkDeviceSize bytes, VkBufferUsageFlags usage, AllocatedBuffer& out) {
+        VkBufferCreateInfo bci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bci.size = bytes;
+        bci.usage = usage;
+        VmaAllocationCreateInfo aci{};
+        aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+        aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        if (gpuCreateBuffer(allocator, &bci, &aci, &out.buffer, &out.allocation, &out.info) != VK_SUCCESS) {
+            out = {};
+            return false;
+        }
+        if (!out.info.pMappedData) {
+            destroyBuffer(allocator, out);
+            return false;
+        }
+        return true;
+    };
+    // An entry per drawn instance and batch at most, so as many draws a pass.
+    const VkDeviceSize draws = VkDeviceSize(capacity) * kDrawRoomPerEntry;
+    AllocatedBuffer instances, records, commands;
+    if (!make(VkDeviceSize(capacity) * sizeof(M2InstanceGPU), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, instances) ||
+        !make(draws * sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, records) ||
+        !make(draws * sizeof(VkDrawIndexedIndirectCommand), VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, commands)) {
+        if (instances.buffer) destroyBuffer(allocator, instances);
+        if (records.buffer) destroyBuffer(allocator, records);
+        return false;
+    }
+    const VkDescriptorBufferInfo infos[] = {{instances.buffer, 0, VK_WHOLE_SIZE}, {records.buffer, 0, VK_WHOLE_SIZE}};
+    VkWriteDescriptorSet writes[2] = {};
+    for (uint32_t w = 0; w < 2; ++w) {
+        writes[w] = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        writes[w].dstSet = instanceSet_[slot];
+        writes[w].dstBinding = w == 0 ? 0 : 3;
+        writes[w].descriptorCount = 1;
+        writes[w].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[w].pBufferInfo = &infos[w];
+    }
+    vkUpdateDescriptorSets(vkCtx_->getDevice(), 2, writes, 0, nullptr);
     DeferredResources retire(*vkCtx_);
-    retire.buffer(instanceBuffer_[slot],instanceAlloc_[slot]);
-    instanceBuffer_[slot]=next.buffer; instanceAlloc_[slot]=next.allocation;
-    instanceMapped_[slot]=next.info.pMappedData; instanceCapacity_[slot]=capacity;
-    LOG_INFO("M2 instance storage: slot ",slot," grew to ",capacity," records (",bytes/1024,
-        " KiB), frame requires ",entries);
+    if (instanceBuffer_[slot]) retire.buffer(instanceBuffer_[slot], instanceAlloc_[slot]);
+    if (drawRecords_[slot].buffer) retire.buffer(drawRecords_[slot]);
+    if (drawCommands_[slot].buffer) retire.buffer(drawCommands_[slot]);
+    instanceBuffer_[slot] = instances.buffer;
+    instanceAlloc_[slot] = instances.allocation;
+    instanceMapped_[slot] = instances.info.pMappedData;
+    drawRecords_[slot] = records;
+    drawCommands_[slot] = commands;
+    instanceCapacity_[slot] = capacity;
     return true;
 }
 
@@ -1150,13 +1191,65 @@ void M2Renderer::dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex) {
 
 namespace {
 
-// Where a draw's instances start in the instance SSBO, and its batch's
-// material row; everything else of the batch is in that row.
+// A call's first draw record: draw gl_DrawID of the call reads its material
+// row from drawMaterials[drawBase + gl_DrawID] (m2.vert).
 struct M2PushConstants {
-    int32_t instanceDataOffset;
-    uint32_t material;
+    uint32_t drawBase;
 };
 static_assert(sizeof(M2PushConstants) == kM2PushConstantBytes, "m2.vert's Push block");
+
+// Draws that follow one another with the same pipeline, faces and geometry
+// page, recorded as one indirect call. Each draw is written in order into
+// the frame slot's command and record buffers, so a call draws exactly what
+// its draws one by one did, in the same order; the caller flushes before
+// it changes any of that state.
+class DrawRuns {
+public:
+    DrawRuns(VkCommandBuffer cmd, VkPipelineLayout layout, ::VkBuffer commands, void* commandData, void* recordData,
+             uint32_t& cursor, uint32_t capacity, uint32_t maxPerCall)
+        : cmd_(cmd), layout_(layout), commands_(commands),
+          commandData_(static_cast<VkDrawIndexedIndirectCommand*>(commandData)),
+          recordData_(static_cast<uint32_t*>(recordData)), cursor_(cursor), first_(cursor), capacity_(capacity),
+          maxPerCall_(std::max(1u, maxPerCall)) {}
+    /// The draw added to the run; false when the frame slot's room is used up.
+    bool add(const VkDrawIndexedIndirectCommand& draw, uint32_t material) {
+        if (cursor_ >= capacity_) return false;
+        commandData_[cursor_] = draw;
+        recordData_[cursor_] = material;
+        ++cursor_;
+        if (cursor_ - first_ >= maxPerCall_) flush();
+        return true;
+    }
+    /// The run so far recorded as one call.
+    void flush() {
+        const uint32_t count = cursor_ - first_;
+        if (count == 0) return;
+        const M2PushConstants push{.drawBase = first_};
+        vkCmdPushConstants(cmd_, layout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
+        vkCmdDrawIndexedIndirect(cmd_, commands_, VkDeviceSize(first_) * sizeof(VkDrawIndexedIndirectCommand), count,
+                                 sizeof(VkDrawIndexedIndirectCommand));
+        first_ = cursor_;
+    }
+
+private:
+    VkCommandBuffer cmd_;
+    VkPipelineLayout layout_;
+    ::VkBuffer commands_;
+    VkDrawIndexedIndirectCommand* commandData_;
+    uint32_t* recordData_;
+    uint32_t& cursor_;
+    uint32_t first_;
+    uint32_t capacity_;
+    uint32_t maxPerCall_;
+};
+
+/// Said once a stretch when a frame slot's draws outgrow its room.
+void sayDrawRoomFull(uint32_t capacity) {
+    static core::LogBudget budget(4, "M2 draw room full");
+    if (budget.take())
+        LOG_WARNING("M2Renderer: this frame's ", capacity, " draws filled the frame slot's command room - the rest "
+                    "of its models are not drawn this frame");
+}
 
 // The level of detail a model is drawn at this far away. Down to the nearest
 // level the model actually has, not all the way back to full detail: a model
@@ -2079,6 +2172,14 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
     // Reset instance SSBO write cursor for this frame
     instanceDataCount_ = 0;
     auto* instSSBO = static_cast<M2InstanceGPU*>(instanceMapped_[frameIndex]);
+    // The draws, a call per run of the same state; the geometry page bound
+    // and the faces shown are part of that state.
+    DrawRuns runs(cmd, pipelineLayout_, drawCommands_[frameIndex].buffer, drawCommands_[frameIndex].info.pMappedData,
+                  drawRecords_[frameIndex].info.pMappedData, frameDrawCursor(), drawRoom(frameIndex),
+                  maxDrawsPerCall_);
+    ::VkBuffer currentPage = VK_NULL_HANDLE;
+    std::optional<bool> currentTwoSided;
+    bool roomFull = false;
 
     // =====================================================================
     // Opaque pass - instanced draws grouped by (modelId, LOD)
@@ -2145,9 +2246,6 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
             // Sort by targetLOD so each sub-group occupies a contiguous SSBO range
             std::sort(pending.begin(), pending.end(),
                       [](const PendingInstance& a, const PendingInstance& b) { return a.targetLOD < b.targetLOD; });
-
-            // Bind the model's geometry page once per model group
-            geometry_.bind(cmd, model.geometry);
 
             // Write base instance data to SSBO (no texture animation - overridden for tex-anim batches)
             uint32_t baseSSBOOffset = instanceDataCount_;
@@ -2217,8 +2315,11 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                     if (drawStars && recording_->suppressStars && batch.starLayer &&
                         batch.blendMode <= 1 && !batch.blendedByOpacity &&
                         !opaqueBatchSkip(model, bi, lod, diagThisModel, false)) {
+                        runs.flush();
                         recordStarReplacement(cmd, perFrameSet, model, drawStars);
                         currentPipeline = VK_NULL_HANDLE;
+                        currentTwoSided.reset();
+                        currentPage = model.geometry.vertices;
                     }
                     if (diagThisModel) {
                         static std::set<std::pair<const void*, size_t>> saidDraw;
@@ -2319,22 +2420,36 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                         ? cutoutPipeline_
                         : blendPipeline(m2BlendPipeline(drawState.drawBlendMode));
                     if (skyMode_ && drawState.drawBlendMode <= 1) desiredPipeline = scenePipes_.alpha;
-                    if (desiredPipeline != currentPipeline) {
-                        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
-                        faces.pipelineBound();
-                        currentPipeline = desiredPipeline;
-                    }
-                    faces.show(skyMode_ || m2MaterialTwoSided(batch.materialFlags));
+                    const bool twoSided = skyMode_ || m2MaterialTwoSided(batch.materialFlags);
 
                     // A batch with no material row is not drawn (said when it got none).
-                    if (batch.materialRow == kNoMaterialRow) continue;
+                    if (batch.materialRow == kNoMaterialRow || roomFull) continue;
 
-                    // Push constants + instanced draw
-                    M2PushConstants pc{.instanceDataOffset = static_cast<int32_t>(drawOffset),
-                                       .material = batch.materialRow};
-                    vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
-                    vkCmdDrawIndexed(cmd, batch.indexCount, groupSize, model.geometry.firstIndex + batch.indexStart,
-                                     model.geometry.baseVertex, 0);
+                    // A new run where the state changes.
+                    if (desiredPipeline != currentPipeline || currentTwoSided != twoSided ||
+                        model.geometry.vertices != currentPage) {
+                        runs.flush();
+                        if (desiredPipeline != currentPipeline) {
+                            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
+                            faces.pipelineBound();
+                            currentPipeline = desiredPipeline;
+                        }
+                        faces.show(twoSided);
+                        currentTwoSided = twoSided;
+                        if (model.geometry.vertices != currentPage) {
+                            geometry_.bind(cmd, model.geometry);
+                            currentPage = model.geometry.vertices;
+                        }
+                    }
+                    // Its instances are the entries from its first instance on.
+                    if (!runs.add({.indexCount = batch.indexCount, .instanceCount = groupSize,
+                                   .firstIndex = model.geometry.firstIndex + batch.indexStart,
+                                   .vertexOffset = model.geometry.baseVertex, .firstInstance = drawOffset},
+                                  batch.materialRow)) {
+                        sayDrawRoomFull(drawRoom(frameIndex));
+                        roomFull = true;
+                        continue;
+                    }
                     if (skyMode_) ++skyDiagDrawsOpaque_;
                     lastDrawCallCount++;
                 }
@@ -2344,6 +2459,7 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
 
             visStart = groupEnd;
         }
+        runs.flush();
     }
 
     // With the water out of the scene pass, the blended half waits for it:
@@ -2412,6 +2528,12 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
     bool currentModelValid = false;
     VkPipeline currentPipeline = VK_NULL_HANDLE;
     FaceCulling faces(*vkCtx_, cmd);
+    DrawRuns runs(cmd, pipelineLayout_, drawCommands_[frameIndex].buffer, drawCommands_[frameIndex].info.pMappedData,
+                  drawRecords_[frameIndex].info.pMappedData, frameDrawCursor(), drawRoom(frameIndex),
+                  maxDrawsPerCall_);
+    ::VkBuffer currentPage = VK_NULL_HANDLE;
+    std::optional<bool> currentTwoSided;
+    bool roomFull = false;
 
     for (const auto& entry : transparentVisible_) {
         const DrawInstance& instance = drawInstances_[entry.draw];
@@ -2426,7 +2548,6 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             if (!currentModel->hasTransparentBatches) continue;
             if (!currentModel->geometry.placed()) continue;
             currentModelValid = true;
-            geometry_.bind(cmd, currentModel->geometry);
         }
         if (!currentModelValid) continue;
 
@@ -2475,8 +2596,11 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
 
             if (recording_->suppressStars && batch.starLayer) {
                 if (drawStars) {
+                    runs.flush();
                     recordStarReplacement(cmd, perFrameSet, model, drawStars);
                     currentPipeline = VK_NULL_HANDLE;
+                    currentTwoSided.reset();
+                    currentPage = model.geometry.vertices;
                 }
                 continue;
             }
@@ -2571,28 +2695,43 @@ void M2Renderer::recordTransparentPass(VkCommandBuffer cmd, VkDescriptorSet perF
             if ((instanceFaded || layerOpacity < kM2BatchOpaqueOpacity) && drawBlendMode <= 1) {
                 desiredPipeline = blended().alpha;
             }
-            if (desiredPipeline != currentPipeline) {
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
-                faces.pipelineBound();
-                currentPipeline = desiredPipeline;
-            }
             // A faded opaque layer is blended and writes no depth: culled,
             // its far side no longer shows through its near one.
-            faces.show(skyMode_ || m2MaterialTwoSided(batch.materialFlags));
+            const bool twoSided = skyMode_ || m2MaterialTwoSided(batch.materialFlags);
 
-            if (batch.materialRow == kNoMaterialRow) continue;
+            if (batch.materialRow == kNoMaterialRow || roomFull) continue;
 
-            // Push constants + single-instance draw
-            M2PushConstants pc{.instanceDataOffset = static_cast<int32_t>(drawOffset),
-                               .material = batch.materialRow};
-            vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
-            vkCmdDrawIndexed(cmd, batch.indexCount, 1, model.geometry.firstIndex + batch.indexStart,
-                             model.geometry.baseVertex, 0);
+            // A new run where the state changes; within one the draws keep
+            // their order back to front.
+            if (desiredPipeline != currentPipeline || currentTwoSided != twoSided ||
+                model.geometry.vertices != currentPage) {
+                runs.flush();
+                if (desiredPipeline != currentPipeline) {
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
+                    faces.pipelineBound();
+                    currentPipeline = desiredPipeline;
+                }
+                faces.show(twoSided);
+                currentTwoSided = twoSided;
+                if (model.geometry.vertices != currentPage) {
+                    geometry_.bind(cmd, model.geometry);
+                    currentPage = model.geometry.vertices;
+                }
+            }
+            if (!runs.add({.indexCount = batch.indexCount, .instanceCount = 1,
+                           .firstIndex = model.geometry.firstIndex + batch.indexStart,
+                           .vertexOffset = model.geometry.baseVertex, .firstInstance = drawOffset},
+                          batch.materialRow)) {
+                sayDrawRoomFull(drawRoom(frameIndex));
+                roomFull = true;
+                continue;
+            }
             if (skyMode_) ++skyDiagDrawsTransparent_;
             lastDrawCallCount++;
             lastBlendedDrawCallCount++;
         }
     }
+    runs.flush();
 
     // Render glow sprites as billboarded additive point lights
     const VkPipeline glowPipeline =

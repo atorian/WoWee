@@ -507,6 +507,11 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     instanceTable_.initialize(*ctx);
     materialTable_.initialize(*ctx);
     geometry_.initialize(*ctx);
+    {
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(ctx->getPhysicalDevice(), &properties);
+        maxDrawsPerCall_ = std::max(1u, properties.limits.maxDrawIndirectCount);
+    }
 
     // Announce the renderer diagnostics this build understands, and which of
     // them are active. A run that logs this line is definitely a build that has
@@ -546,11 +551,12 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     }
 
     // Instance data set layout (set 3): binding 0 = this frame's per-draw
-    // records, binding 1 = the instance table (by slot), binding 2 = the
-    // material table (by row), which the fragment shader reads too
+    // instance records, binding 1 = the instance table (by slot), binding 2
+    // = the material table (by row), which the fragment shader reads too,
+    // binding 3 = this frame's material row per draw (by gl_DrawID)
     {
-        VkDescriptorSetLayoutBinding bindings[3] = {};
-        for (uint32_t b = 0; b < 3; ++b) {
+        VkDescriptorSetLayoutBinding bindings[4] = {};
+        for (uint32_t b = 0; b < 4; ++b) {
             bindings[b].binding = b;
             bindings[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             bindings[b].descriptorCount = 1;
@@ -559,7 +565,7 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
         bindings[2].stageFlags |= VK_SHADER_STAGE_FRAGMENT_BIT;
 
         VkDescriptorSetLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        ci.bindingCount = 3;
+        ci.bindingCount = 4;
         ci.pBindings = bindings;
         vkCreateDescriptorSetLayout(device, &ci, nullptr, &instanceSetLayout_);
     }
@@ -685,47 +691,24 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
         static_assert(sizeof(InstanceStaticGPU) == 96, "InstanceStaticGPU must be 96 bytes (std430)");
         static_assert(sizeof(M2MaterialGPU) == 80 && offsetof(M2MaterialGPU, tint) == 32,
                       "M2MaterialGPU must match M2Material in m2_material.glsli (std430)");
-        const VkDeviceSize instBufSize = kInitialInstanceCapacity * sizeof(M2InstanceGPU);
-
-        // Descriptor pool for 2 sets (double-buffered), three buffers each
-        VkDescriptorPoolSize poolSize{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 6};
+        // Descriptor pool for 2 sets (double-buffered), four buffers each
+        VkDescriptorPoolSize poolSize{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 8};
         VkDescriptorPoolCreateInfo poolCi{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         poolCi.maxSets = 2;
         poolCi.poolSizeCount = 1;
         poolCi.pPoolSizes = &poolSize;
         vkCreateDescriptorPool(device, &poolCi, nullptr, &instanceDescPool_);
 
-        for (int i = 0; i < 2; i++) {
-            instanceCapacity_[i]=kInitialInstanceCapacity;
+        for (uint32_t i = 0; i < 2; i++) {
             instanceGrowthFailed_[i]=false;
-            VkBufferCreateInfo bci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-            bci.size = instBufSize;
-            bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-            VmaAllocationCreateInfo aci{};
-            aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-            aci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
-            VmaAllocationInfo allocInfo{};
-            gpuCreateBuffer(ctx->getAllocator(), &bci, &aci,
-                            &instanceBuffer_[i], &instanceAlloc_[i], &allocInfo);
-            instanceMapped_[i] = allocInfo.pMappedData;
-
             VkDescriptorSetAllocateInfo setAi{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
             setAi.descriptorPool = instanceDescPool_;
             setAi.descriptorSetCount = 1;
             setAi.pSetLayouts = &instanceSetLayout_;
             vkAllocateDescriptorSets(device, &setAi, &instanceSet_[i]);
-
-            VkDescriptorBufferInfo bufInfo{};
-            bufInfo.buffer = instanceBuffer_[i];
-            bufInfo.offset = 0;
-            bufInfo.range = instBufSize;
-            VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            write.dstSet = instanceSet_[i];
-            write.dstBinding = 0;
-            write.descriptorCount = 1;
-            write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            write.pBufferInfo = &bufInfo;
-            vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+            if (!makeDrawStorage(i, kInitialInstanceCapacity)) {
+                LOG_ERROR("M2Renderer: no memory for frame slot ", i, "'s draw storage - M2 models are not drawn");
+            }
         }
     }
 
@@ -1010,6 +993,8 @@ void M2Renderer::shutdown() {
     for (int i = 0; i < 2; i++) {
         destroy(alloc, instanceBuffer_[i], instanceAlloc_[i]);
         instanceMapped_[i] = nullptr;
+        destroyBuffer(alloc, drawRecords_[i]);
+        destroyBuffer(alloc, drawCommands_[i]);
         instanceSet_[i] = VK_NULL_HANDLE;
     }
     destroy(device, instanceDescPool_);

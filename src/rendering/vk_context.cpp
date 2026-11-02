@@ -899,6 +899,14 @@ bool VkContext::createLogicalDevice() {  // NOLINT(readability-function-size)
             tableSupported = false;
         }
         if (!tableSupported) return false;
+        // An indirect call's draws name their records by gl_DrawID (the M2
+        // batches: their material rows). Core since 1.1 as a feature, and
+        // MoltenVK has it.
+        if (!supported11.shaderDrawParameters) {
+            LOG_ERROR("Vulkan device lacks shaderDrawParameters, which drawing models by indirect calls needs");
+            return false;
+        }
+        enabled11.shaderDrawParameters = VK_TRUE;
         // How many of a list's draws there are, read from the GPU; without
         // it the list is drawn at its full room (TerrainRenderer says so).
         if (supported12.drawIndirectCount) {

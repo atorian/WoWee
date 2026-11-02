@@ -1126,6 +1126,26 @@ private:
     uint32_t instanceCapacity_[2] = {kInitialInstanceCapacity,kInitialInstanceCapacity};
     bool instanceGrowthFailed_[2] = {};
     bool prepareInstanceStorage(uint32_t slot,uint64_t entries);
+    /// This slot's mapped per-frame buffers, room for `capacity` each: the
+    /// instance records, a material row per draw (binding 3, read by
+    /// gl_DrawID) and the indirect commands. The ones they replace go after
+    /// the frames in flight. False when there was no memory: the old stay.
+    bool makeDrawStorage(uint32_t slot, uint32_t capacity);
+    AllocatedBuffer drawRecords_[2];
+    AllocatedBuffer drawCommands_[2];
+    /// Draws a frame may record per instance entry it has room for: a pass
+    /// draws at most one per entry, and the sky's models are recorded in up
+    /// to three passes a frame.
+    static constexpr uint32_t kDrawRoomPerEntry = 4;
+    [[nodiscard]] uint32_t drawRoom(uint32_t slot) const { return instanceCapacity_[slot] * kDrawRoomPerEntry; }
+    /// Where this frame's next draw goes in its slot's command room: every
+    /// pass of a frame records into it after the ones before, since the GPU
+    /// reads the room only once the whole frame is recorded.
+    uint32_t& frameDrawCursor();
+    uint32_t drawCursor_ = 0;
+    uint64_t drawCursorFrame_ = UINT64_MAX;
+    /// The device's maxDrawIndirectCount: a run longer than it is split.
+    uint32_t maxDrawsPerCall_ = 1;
     VkDescriptorSetLayout instanceSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool instanceDescPool_ = VK_NULL_HANDLE;
     ::VkBuffer instanceBuffer_[2] = {};
