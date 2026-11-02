@@ -5334,7 +5334,9 @@ VkExtent2D Renderer::sceneRenderExtent() const {
 
 void Renderer::recordRtLighting(VkImage sceneDepth, VkExtent2D sceneExtent, bool depthIsMsaa,
                                 std::string_view stageGroup) {
-    if (!rtLighting_ || !rtLighting_->active() || !frameCamera()) return;
+    // Lit from the world's depth: a login or loading screen has none, and
+    // tracing it cost the login screen half its GPU time.
+    if (!worldDrawnThisFrame_ || !rtLighting_ || !rtLighting_->active() || !frameCamera()) return;
     rtRecordedThisFrame_ = true;
     RtLighting::FrameInputs in{};
     in.view = frameCamera()->getViewMatrix();

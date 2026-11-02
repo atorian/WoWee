@@ -874,8 +874,9 @@ private:
     std::unique_ptr<Bloom> bloom_;
     std::unique_ptr<SunShafts> sunShafts_;
     bool sunShaftsEnabled_ = true;
-    /// renderWorld ran this frame. The shafts are built from the world's
-    /// picture, and a login screen or a loading screen is not one.
+    /// renderWorld ran this frame. The shafts and the ray traced lighting are
+    /// built from the world's picture, and a login screen or a loading screen
+    /// is not one.
     bool worldDrawnThisFrame_ = false;
     void recordSunShafts();
 
