@@ -125,6 +125,11 @@ public:
 
     // Immediate submit for one-off GPU work (descriptor pool creation, etc.)
     void immediateSubmit(std::function<void(VkCommandBuffer cmd)>&& function);
+    /// The thread that runs the frame while a character is in the world; none
+    /// out of it. With WOWEE_FRAME_PROFILE set, every immediateSubmit it makes
+    /// outside an upload batch - a submit and a wait for the GPU, in the frame -
+    /// is said with how long it waited.
+    void setFrameThread(std::thread::id id) { frameThread_.store(id, std::memory_order_relaxed); }
 
     // Batch upload mode: records multiple upload commands into a single
     // command buffer, then submits with ONE fence wait instead of one per upload.
@@ -453,6 +458,8 @@ public:
     static VkContext* globalInstance() { return sInstance_; }
 
 private:
+    /// setFrameThread's; workers read it while the main thread sets it.
+    std::atomic<std::thread::id> frameThread_{};
     bool createInstance(SDL_Window* window);
     bool createSurface(SDL_Window* window);
     bool selectPhysicalDevice();

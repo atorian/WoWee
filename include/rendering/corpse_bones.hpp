@@ -4,12 +4,14 @@
 
 #include <glm/glm.hpp>
 #include <cstdint>
+#include <future>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace wowee {
-namespace pipeline { class AssetManager; }
+namespace pipeline { class AssetManager; struct M2Model; }
 namespace rendering {
 
 class M2Renderer;
@@ -40,9 +42,12 @@ private:
     static constexpr uint32_t FIRST_MODEL_ID = 999910;
     static constexpr uint32_t LAST_MODEL_ID = 999949;
 
-    /// The model id a skeleton is loaded under, loading it if needed; 0 if
-    /// it cannot be had.
+    /// The model id a skeleton is loaded under; 0 while it is read and parsed
+    /// on a worker, and for one that cannot be had (modelIds_ says which).
     uint32_t modelFor(M2Renderer* m2, pipeline::AssetManager* assets, const std::string& path);
+    /// Skeletons being read and parsed on an IO worker, by path: the frame
+    /// only uploads what one hands back. Null for a file that is not there.
+    std::unordered_map<std::string, std::future<std::shared_ptr<pipeline::M2Model>>> reading_;
 
     struct Placed {
         uint32_t instanceId = 0;

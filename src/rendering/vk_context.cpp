@@ -3451,9 +3451,21 @@ void VkContext::immediateSubmit(std::function<void(VkCommandBuffer cmd)>&& funct
         if (l.batchCmd != VK_NULL_HANDLE) function(l.batchCmd);
         return;
     }
+    static const bool frameProfile = core::envFlagEnabled("WOWEE_FRAME_PROFILE", false);
+    const bool reported = frameProfile && std::this_thread::get_id() == frameThread_.load(std::memory_order_relaxed);
+    const auto start = reported ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     VkCommandBuffer cmd = beginSingleTimeCommands();
     function(cmd);
     endSingleTimeCommands(cmd);
+    if (reported) {
+        // The frame stopped for the GPU here. Only this thread takes the budget.
+        static core::LogBudget said(300, "Immediate GPU submits the frame thread waited for");
+        if (said.take()) {
+            LOG_WARNING("Frame thread waited ",
+                        std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count(),
+                        " ms for an immediate GPU submit outside an upload batch");
+        }
+    }
 }
 
 void VkContext::beginUploadBatch() {

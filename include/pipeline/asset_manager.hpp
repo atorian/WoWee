@@ -7,6 +7,7 @@
 #include "pipeline/asset_manifest.hpp"
 #include "pipeline/loose_file_reader.hpp"
 #include <atomic>
+#include <chrono>
 #include <list>
 #include <memory>
 #include <string>
@@ -15,6 +16,7 @@
 #include <unordered_map>
 #include <mutex>
 #include <shared_mutex>
+#include <thread>
 
 namespace wowee {
 namespace pipeline {
@@ -183,6 +185,12 @@ public:
     [[nodiscard]] size_t dbcCacheEntries() const;
     [[nodiscard]] size_t getFileCacheHits() const { return fileCacheHits; }
     [[nodiscard]] size_t getFileCacheMisses() const { return fileCacheMisses; }
+
+    /// The thread that runs the frame while a character is in the world; none
+    /// out of it. With WOWEE_FRAME_PROFILE set, every whole file it reads is
+    /// said, from the cache or the disk and how long the read took: what reads
+    /// a file parses or decodes it next, and the player sees that frame stop.
+    void setFrameThread(std::thread::id id) { frameThread_.store(id, std::memory_order_relaxed); }
     /// The bytes the file cache may hold before it lets the least recently
     /// read files go; a file over half of it is read and not kept. Replaces
     /// the default (1 GB, or WOWEE_FILE_CACHE_MB) and evicts down to it now.
@@ -319,6 +327,12 @@ private:
     /// The file from where it lives - the override dir, the archive layer,
     /// what was extracted - bypassing the cache. Empty when it is not there.
     [[nodiscard]] std::vector<uint8_t> readFromSource(const std::string& normalizedPath) const;
+    /// Whether this read is the frame thread's, with the frame profile on.
+    [[nodiscard]] bool reportsFrameReads() const;
+    void reportFrameRead(const std::string& normalizedPath, size_t bytes, bool cached,
+                         std::chrono::steady_clock::time_point start) const;
+    /// Workers read it while the main thread sets it.
+    std::atomic<std::thread::id> frameThread_{};
     /// The bytes just read, kept for the next read when they fit the budget.
     FileBytes keepFile(const std::string& normalizedPath, std::vector<uint8_t>&& data,
                        uint64_t generation) const;

@@ -3,6 +3,8 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "core/logger.hpp"
+#include "core/thread_pool.hpp"
+#include <chrono>
 #include <unordered_set>
 
 namespace wowee {
@@ -22,21 +24,36 @@ uint32_t CorpseBones::modelFor(M2Renderer* m2, pipeline::AssetManager* assets, c
         }
     } else {
         if (nextModelId_ > LAST_MODEL_ID) return 0;
-        modelId = nextModelId_++;
     }
 
-    const auto data = assets ? assets->readFile(path) : std::vector<uint8_t>{};
-    pipeline::M2Model model = data.empty() ? pipeline::M2Model{} : pipeline::M2Loader::load(data);
-    if (model.vertices.empty()) {
+    // Read and parsed on a worker; the frame waits for neither.
+    auto reading = reading_.find(path);
+    if (reading == reading_.end()) {
+        if (!assets) return 0;
+        reading_.emplace(path, core::ThreadPool::ioWorkers().submit("corpse skeleton", [assets, path]() {
+            const auto data = assets->readFile(path);
+            auto model = std::make_shared<pipeline::M2Model>(
+                data.empty() ? pipeline::M2Model{} : pipeline::M2Loader::load(data));
+            if (model->vertices.empty()) return std::shared_ptr<pipeline::M2Model>{};
+            if (model->name.empty()) model->name = path;
+            if (model->version >= 264) {
+                const auto skin = assets->readFile(pipeline::skinPathForM2(path));
+                if (!skin.empty()) pipeline::M2Loader::loadSkin(skin, *model);
+            }
+            return model;
+        }));
+        return 0;
+    }
+    if (reading->second.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return 0;
+    const std::shared_ptr<pipeline::M2Model> parsed = reading->second.get();
+    reading_.erase(reading);
+    if (!parsed) {
         LOG_WARNING("CorpseBones: ", path, " is missing or empty - those bones will not be drawn");
         modelIds_[path] = 0;
         return 0;
     }
-    if (model.name.empty()) model.name = path;
-    if (model.version >= 264) {
-        const auto skin = assets->readFile(pipeline::skinPathForM2(path));
-        if (!skin.empty()) pipeline::M2Loader::loadSkin(skin, model);
-    }
+    const pipeline::M2Model& model = *parsed;
+    if (modelId == 0) modelId = nextModelId_++;
     if (!m2->loadModel(model, modelId)) {
         LOG_WARNING("CorpseBones: could not load ", path);
         modelIds_[path] = 0;

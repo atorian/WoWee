@@ -1632,8 +1632,26 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
 // the instance and not textures on the model.
 void EntitySpawner::applyHumanoidInstanceOverrides(uint32_t instanceId, uint32_t modelId,
                                                    uint32_t displayId) {
+    auto found = assets_.humanoidInstanceTextures_.find(displayId);
+    if (found == assets_.humanoidInstanceTextures_.end()) {
+        // The display's textures are resolved with its others, from what its
+        // worker decoded (applyCreatureDisplayTextures); here they are not, and
+        // are decoded on this thread.
+        static core::LogBudget said(20, "Humanoid textures decoded on the frame thread");
+        if (said.take()) LOG_WARNING("Display ", displayId, "'s hair, skin and head detail were not prepared "
+                                     "with its other textures; decoded on the frame thread");
+        found = resolveHumanoidInstanceTextures(modelId, displayId);
+    }
+    for (const auto& [slot, texture] : found->second)
+        scene().characters().setTextureSlotOverride(instanceId, slot, texture);
+}
+
+std::unordered_map<uint32_t, std::vector<std::pair<uint16_t, rendering::TextureRef>>>::iterator
+EntitySpawner::resolveHumanoidInstanceTextures(uint32_t modelId, uint32_t displayId) {
+    auto& out = assets_.humanoidInstanceTextures_[displayId];
+    const auto resolved = assets_.humanoidInstanceTextures_.find(displayId);
     auto* charRenderer = renderer_->getCharacterRenderer();
-    if (!charRenderer) return;
+    if (!charRenderer) return resolved;
     if (!assets_.charSectionsCacheBuilt_) buildCharSectionsCache();
     auto itDD = assets_.displayDataMap_.find(displayId);
     if (itDD != assets_.displayDataMap_.end() && itDD->second.extraDisplayId != 0) {
@@ -1650,9 +1668,7 @@ void EntitySpawner::applyHumanoidInstanceOverrides(uint32_t instanceId, uint32_t
                         rendering::TextureRef hairTex = charRenderer->loadTexture(hairPath);
                         if (hairTex && hairTex != whiteTex) {
                             for (size_t ti = 0; ti < md->textures.size(); ti++) {
-                                if (md->textures[ti].type == 6) {
-                                    scene().characters().setTextureSlotOverride(instanceId, static_cast<uint16_t>(ti), hairTex);
-                                }
+                                if (md->textures[ti].type == 6) out.emplace_back(static_cast<uint16_t>(ti), hairTex);
                             }
                         }
                     }
@@ -1684,8 +1700,7 @@ void EntitySpawner::applyHumanoidInstanceOverrides(uint32_t instanceId, uint32_t
                         if (extraTex && extraTex != whiteTex) {
                             for (size_t ti = 0; ti < md->textures.size(); ti++) {
                                 if (md->textures[ti].type == 8) {
-                                    scene().characters().setTextureSlotOverride(
-                                        instanceId, static_cast<uint16_t>(ti), extraTex);
+                                    out.emplace_back(static_cast<uint16_t>(ti), extraTex);
                                     ++extraSlots;
                                 }
                             }
@@ -1735,9 +1750,7 @@ void EntitySpawner::applyHumanoidInstanceOverrides(uint32_t instanceId, uint32_t
                             if (skinTex) {
                                 for (size_t ti = 0; ti < md->textures.size(); ti++) {
                                     uint32_t tt = md->textures[ti].type;
-                                    if (tt == 1 || tt == 11) {
-                                        scene().characters().setTextureSlotOverride(instanceId, static_cast<uint16_t>(ti), skinTex);
-                                    }
+                                    if (tt == 1 || tt == 11) out.emplace_back(static_cast<uint16_t>(ti), skinTex);
                                 }
                             }
                         }
@@ -1745,6 +1758,7 @@ void EntitySpawner::applyHumanoidInstanceOverrides(uint32_t instanceId, uint32_t
             }
         }
     }
+    return resolved;
 }
 
 void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t modelId,
@@ -1760,6 +1774,17 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
     if (hasPreDec) {
         charRenderer->setPredecodedBLPCache(&itPreDec->second, true);
     }
+    // Every texture below goes to the GPU in one batch, not a submit and a
+    // wait each.
+    auto* batchCtx = renderer_->getVkContext();
+    if (batchCtx) batchCtx->beginUploadBatch();
+    struct BatchGuard {
+        rendering::VkContext* ctx;
+        ~BatchGuard() { if (ctx) ctx->endUploadBatch(); }
+    } batchGuard{batchCtx};
+    // The hair, head detail and skin its humanoid instances wear, from what
+    // its worker decoded: decoded here per instance, they cost 5-17 ms each.
+    resolveHumanoidInstanceTextures(modelId, displayId);
 
     // Creature skin names are relative to the model's own directory, so the
     // path is asked for here rather than passed in - the caller had it only

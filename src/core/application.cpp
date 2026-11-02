@@ -2894,9 +2894,16 @@ void Application::characterScreenShown() {
     if (uiManager && assetManager) {
         uiManager->getCharacterScreen().setAssetManager(assetManager.get());
     }
+    // Out of the world the frame's reads are the screens' own, expected there.
+    if (assetManager) assetManager->setFrameThread({});
+    if (auto* vk = renderer ? renderer->getVkContext() : nullptr) vk->setFrameThread({});
 }
 
 void Application::enteredWorld() {
+    // In the world a frame that reads a file is a frame the player sees stop
+    // (WOWEE_FRAME_PROFILE says each one).
+    if (assetManager) assetManager->setFrameThread(std::this_thread::get_id());
+    if (auto* vk = renderer ? renderer->getVkContext() : nullptr) vk->setFrameThread(std::this_thread::get_id());
     // The camera's own movement reaches the game through PlayerView (see
     // ClientLoop::setState); this is what the presentation hangs on the game.
     if (gameHandler) {

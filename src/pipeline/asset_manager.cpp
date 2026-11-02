@@ -1,9 +1,11 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/base_fallback.hpp"
 #include "pipeline/dds_loader.hpp"
+#include "core/env_flag.hpp"
 #include "core/logger.hpp"
 #include "core/profiler.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -793,11 +795,17 @@ AssetManager::FileBytes AssetManager::readFileShared(const std::string& path) co
         return nullptr;
     }
     const std::string normalized = normalizePath(path);
+    const bool reported = reportsFrameReads();
+    const auto start = reported ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     uint64_t generation = 0;
-    if (FileBytes hit = cachedFile(normalized, generation)) return hit;
+    if (FileBytes hit = cachedFile(normalized, generation)) {
+        if (reported) reportFrameRead(normalized, hit->size(), true, start);
+        return hit;
+    }
     // A miss of the files read to be kept; a texture's or DBC's read is not.
     fileCacheMisses++;
     std::vector<uint8_t> data = readFromSource(normalized);
+    if (reported) reportFrameRead(normalized, data.size(), false, start);
     if (data.empty()) return nullptr;
     return keepFile(normalized, std::move(data), generation);
 }
@@ -806,9 +814,16 @@ std::vector<uint8_t> AssetManager::readFileNotKept(const std::string& normalized
     if (!initialized) {
         return {};
     }
+    const bool reported = reportsFrameReads();
+    const auto start = reported ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     uint64_t generation = 0;
-    if (FileBytes hit = cachedFile(normalized, generation)) return *hit;
-    return readFromSource(normalized);
+    if (FileBytes hit = cachedFile(normalized, generation)) {
+        if (reported) reportFrameRead(normalized, hit->size(), true, start);
+        return *hit;
+    }
+    std::vector<uint8_t> data = readFromSource(normalized);
+    if (reported) reportFrameRead(normalized, data.size(), false, start);
+    return data;
 }
 
 AssetManager::FileBytes AssetManager::cachedFile(const std::string& normalized,
@@ -853,6 +868,24 @@ AssetManager::FileBytes AssetManager::keepFile(const std::string& normalized,
     fileCache.emplace(normalized, fileCacheLru_.begin());
     fileCacheTotalBytes += fileSize;
     return bytes;
+}
+
+bool AssetManager::reportsFrameReads() const {
+    static const bool frameProfile = core::envFlagEnabled("WOWEE_FRAME_PROFILE", false);
+    return frameProfile && std::this_thread::get_id() == frameThread_.load(std::memory_order_relaxed);
+}
+
+void AssetManager::reportFrameRead(const std::string& normalized, size_t bytes, bool cached,
+                                   std::chrono::steady_clock::time_point start) const {
+    // What reads a whole file goes on to parse or decode it, so the frame
+    // waits for both: which file, from where, and how long the read alone
+    // took. Only this thread takes the budget.
+    const float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
+    static core::LogBudget said(1000, "Files the frame thread read");
+    if (said.take()) {
+        LOG_WARNING("Frame thread read ", normalized, " (", bytes, " bytes) ", cached ? "from the cache" : "off the disk",
+                    " in ", ms, " ms");
+    }
 }
 
 std::vector<uint8_t> AssetManager::readFromSource(const std::string& normalized) const {

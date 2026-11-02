@@ -396,10 +396,14 @@ private:
                                           uint32_t displayId);
 
     /// Per-instance colouring of a humanoid NPC: hair, skin, and the
-    /// head-detail sheet. Per instance rather than per model, so two NPCs
-    /// sharing a model still get their own hair colour.
+    /// head-detail sheet, over its display's skin. The display's, resolved once
+    /// with its other textures (resolveHumanoidInstanceTextures).
     void applyHumanoidInstanceOverrides(uint32_t instanceId, uint32_t modelId,
                                         uint32_t displayId);
+    /// Those textures by slot, for the display: from what its worker decoded
+    /// when called inside applyCreatureDisplayTextures, else decoded here.
+    std::unordered_map<uint32_t, std::vector<std::pair<uint16_t, rendering::TextureRef>>>::iterator
+    resolveHumanoidInstanceTextures(uint32_t modelId, uint32_t displayId);
 
     /// Builds the display's skin (displaySkins_), once a display: the model
     /// it shares with the other displays of its file is left as loaded.
@@ -796,6 +800,9 @@ private:
     /// (CharacterRenderer::setDisplaySkin), replaced whole when it changes.
     std::unordered_map<uint32_t, std::shared_ptr<const std::unordered_map<uint16_t, rendering::TextureRef>>>
         displaySkins_;
+    /// What a humanoid display's instances wear over its skin - hair, the
+    /// head detail, a skin without armour - by texture slot, decoded once.
+    std::unordered_map<uint32_t, std::vector<std::pair<uint16_t, rendering::TextureRef>>> humanoidInstanceTextures_;
     std::unordered_set<uint32_t> displayIdTexturesApplied_;
     mutable std::unordered_set<uint32_t> warnedMissingDisplayDataIds_;
     mutable std::unordered_set<uint32_t> warnedMissingModelPathIds_;
