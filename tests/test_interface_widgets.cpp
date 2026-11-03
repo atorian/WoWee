@@ -7,6 +7,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "client_harness.hpp"
+#include "addons/lua_engine.hpp"
 
 using wowee::test::ClientHarness;
 
@@ -37,6 +38,36 @@ TEST_CASE("an error frame that inserts at the top drops its bottom line", "[widg
     CHECK(h.interfaceAnswers("Errors:GetNumMessages() == 2"));
     CHECK(h.interfaceAnswers("Errors:GetMessageInfo(1) == 'three'"));
     CHECK(h.interfaceAnswers("Errors:GetMessageInfo(2) == 'two'"));
+}
+
+TEST_CASE("a message frame's line fades out once its time is up", "[widget][chat][interface]") {
+    // UIErrorsFrame and the combat text show a line for a while and then fade
+    // it: aged every frame, as each frame's lines are drawn. The ageing walked
+    // every widget for the few message frames, so it is now a list of them -
+    // and a frame left off that list would show its lines for ever.
+    ClientHarness h;
+    h.enterWorld();
+    h.runInInterface(R"lua(
+        Fading = CreateFrame("MessageFrame", "Fading", UIParent)
+        Fading:SetTimeVisible(1)
+        Fading:SetFadeDuration(0.5)
+        Fading:AddMessage("gone soon")
+    )lua");
+    const auto alpha = [&] {
+        float a = -1.0f;
+        h.withInterface([&](wowee::addons::LuaEngine& lua) {
+            if (const auto* w = lua.widgets().findByName("Fading"); w && !w->messages.empty())
+                a = w->messages.front().color[3];
+        });
+        return a;
+    };
+    CHECK(alpha() == 1.0f);
+    h.advance(0.75f);  // into the fade: half a second left of the line's second
+    const float fading = alpha();
+    CHECK(fading > 0.0f);
+    CHECK(fading < 1.0f);
+    h.advance(0.5f);
+    CHECK(alpha() == 0.0f);
 }
 
 TEST_CASE("a widget answers the type it was made as", "[widget][interface]") {

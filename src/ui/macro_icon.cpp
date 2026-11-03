@@ -52,6 +52,20 @@ std::string spellIcon(game::GameHandler& game, const pet::IPet& pet, std::string
     }
     uint32_t best = 0;
     uint32_t bestRank = 0;
+    // The known spells' answer for this name and rank, kept until they change:
+    // every macro's icon is asked for ten times a second, and walking every
+    // known spell for each was 3 ms each time in a full spellbook. Only on the
+    // interface thread, as the rest of this file.
+    static std::unordered_map<std::string, uint32_t> knownByName;
+    static uint64_t knownByNameVersion = 0;
+    static const game::GameHandler* knownByNameGame = nullptr;
+    if (knownByNameVersion != game.spells().knownSpellsVersion() || knownByNameGame != &game) {
+        knownByName.clear();
+        knownByNameVersion = game.spells().knownSpellsVersion();
+        knownByNameGame = &game;
+    }
+    const std::string key = name + '\x1f' + rank;
+    const auto cached = knownByName.find(key);
     const auto consider = [&](uint32_t id) {
         const auto* spell = game.spells().findSpell(id);
         if (!spell) return;
@@ -71,7 +85,13 @@ std::string spellIcon(game::GameHandler& game, const pet::IPet& pet, std::string
             bestRank = level;
         }
     };
-    for (auto id : game.spells().getKnownSpells()) consider(id);
+    if (cached != knownByName.end()) {
+        if (cached->second) consider(cached->second);
+    } else {
+        for (auto id : game.spells().getKnownSpells()) consider(id);
+        knownByName.emplace(key, best);
+    }
+    // The pet's few spells change without the player's, so they are asked each time.
     for (auto id : pet.getPetSpells()) consider(id);
     return best ? game.getSpellIconPath(best) : std::string{};
 }

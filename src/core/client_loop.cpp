@@ -16,6 +16,7 @@
 #include "rendering/camera_controller.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <exception>
 
 namespace wowee::core {
@@ -377,7 +378,16 @@ void ClientLoop::updateInterface(float deltaTime, const FramePlan& plan) {
     // Before the events go out, so the UPDATE_BINDINGS LoadBindings raises
     // reaches the buttons in this frame.
     if (session_) session_->applyChangedKeyBindings();
-    services_.game.dispatchAddonEvents();
+    // The interface's Lua work, said in the frame budget as the drawing is:
+    // with hundreds of units about, the events they raise and the frames'
+    // OnUpdate scripts are most of what the phase spends.
+    const auto timed = [this](const char* stage, auto&& work) {
+        const auto start = std::chrono::steady_clock::now();
+        work();
+        services_.frontEnd.noteStageTime(
+            stage, std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count());
+    };
+    timed("addon events", [this] { services_.game.dispatchAddonEvents(); });
     interfaceInput_.dispatch(session_.get(), services_.playerView.getCameraController(),
                              [this](const SDL_Event& event) { services_.frontEnd.keyForClient(event); },
                              [this](ClientShortcut shortcut) { services_.frontEnd.clientShortcut(shortcut); });
@@ -395,7 +405,7 @@ void ClientLoop::updateInterface(float deltaTime, const FramePlan& plan) {
     // ReloadUI and this client's own /reload ask the session for it.
     if (session_) session_->reloadInterfaceIfRequested();
     if (plan.world || plan.loading) {
-        if (auto* addons = worldInterface()) addons->update(deltaTime);
+        if (auto* addons = worldInterface()) timed("addon OnUpdate", [&] { addons->update(deltaTime); });
     }
     services_.frontEnd.drawInterface(deltaTime, plan);
     services_.game.dispatchAddonEvents();

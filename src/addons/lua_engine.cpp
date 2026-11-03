@@ -1474,7 +1474,12 @@ int lua_MessageFrame_AddMessage(lua_State* L) {
         m.hasExtra = true;
         m.extra = lua_tostring(L, 9);
     }
-    w->isMessageFrame = true;
+    if (!w->isMessageFrame) {
+        w->isMessageFrame = true;
+        lua_getfield(L, LUA_REGISTRYINDEX, "wowee_lua_engine");
+        if (auto* engine = static_cast<LuaEngine*>(lua_touserdata(L, -1))) engine->noteMessageFrame(w->id);
+        lua_pop(L, 1);
+    }
     // UIErrorsFrame asks for insertMode="TOP", which puts a new line above the
     // ones already there rather than below them.
     if (w->messagesInsertTop) w->messages.push_front(std::move(m));
@@ -5802,6 +5807,7 @@ void LuaEngine::shutdown() {
         // - which is what a logout followed by another login did, since that
         // path loads the interface again on a state it thought was empty.
         widgets_.reset();
+        messageFrames_.clear();
         hoverWid_ = 0;
         lastClickWid_ = 0;
         lastClickTime_ = 0.0;
@@ -11424,9 +11430,19 @@ void LuaEngine::runInterfaceProbe() {
 /// history and comes back when the frame is scrolled, which is why nothing is
 /// erased here and why scrolling lights everything again - the player reading
 /// back wants what was said, not what is still fresh.
+void LuaEngine::noteMessageFrame(uint32_t id) {
+    // A widget id given out again to a frame that becomes a message frame in
+    // turn is listed once.
+    if (std::find(messageFrames_.begin(), messageFrames_.end(), id) == messageFrames_.end())
+        messageFrames_.push_back(id);
+}
+
 void LuaEngine::expireMessages(float elapsed) {
-    for (size_t id = 1; id < widgets_.size(); ++id) {
-        auto* w = widgets_.get(static_cast<uint32_t>(id));
+    // The frames that were ever given a message, not every widget: walking all
+    // of them - twenty-eight thousand in a full interface - for the score of
+    // message frames among them was 0.8 ms of every frame.
+    for (const uint32_t id : messageFrames_) {
+        auto* w = widgets_.get(id);
         if (!w || !w->isMessageFrame || w->messageDuration <= 0.0f) continue;
         const bool readingBack = w->messageScroll > 0;
         const float life = w->messageDuration;
@@ -11500,17 +11516,35 @@ void LuaEngine::drainPendingTextChanged() {
 }
 
 void LuaEngine::dispatchOnUpdate(float elapsed) {
+    // WOWEE_FRAME_PROFILE: each step and each handler timed (reportOnUpdateCosts).
+    static const bool profile = core::envFlagEnabled("WOWEE_FRAME_PROFILE", false);
+    using Clock = std::chrono::steady_clock;
+    const auto msSince = [](Clock::time_point start) {
+        return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+    };
+    const Clock::time_point callStart = profile ? Clock::now() : Clock::time_point{};
+    Clock::time_point stepStart = callStart;
+    const auto step = [&](int index) {
+        if (!profile) return;
+        onUpdateStepMs_[index] += msSince(stepStart);
+        stepStart = Clock::now();
+    };
+
     // Asked for by the check, and answered here because only this side can ask
     // the interface anything.
     if (ui::frameXmlTakeProbeRequest()) runInterfaceProbe();
 
     expireMessages(elapsed);
+    step(5);
 
     if (!L_) return;
 
     refreshMacroIcons(L_, elapsed);
+    step(0);
     drainPendingTextChanged();
+    step(1);
     advanceWheelGlide(elapsed);
+    step(2);
 
     // Animations first, so a frame's own OnUpdate sees this frame's values
     // rather than the previous one's.
@@ -11524,9 +11558,27 @@ void LuaEngine::dispatchOnUpdate(float elapsed) {
     } else {
         lua_pop(L_, 1);
     }
+    step(3);
+    double handlersMs = 0.0;
+    const auto finish = [&] {
+        if (!profile) return;
+        step(4);
+        // The walk over the frames, less the handlers it called.
+        onUpdateStepMs_[4] -= handlersMs;
+        const double totalMs = msSince(callStart);
+        onUpdateTotalMs_ += totalMs;
+        onUpdateWorstMs_ = std::max(onUpdateWorstMs_, totalMs);
+        ++onUpdateFrames_;
+        onUpdateWindowMs_ += static_cast<double>(elapsed) * 1000.0;
+        if (onUpdateWindowMs_ >= 10000.0) reportOnUpdateCosts();
+    };
 
     lua_getglobal(L_, "__WoweeOnUpdateFrames");
-    if (!lua_istable(L_, -1)) { lua_pop(L_, 1); return; }
+    if (!lua_istable(L_, -1)) {
+        lua_pop(L_, 1);
+        finish();
+        return;
+    }
 
     int count = static_cast<int>(lua_objlen(L_, -1));
     for (int i = 1; i <= count; i++) {
@@ -11576,9 +11628,33 @@ void LuaEngine::dispatchOnUpdate(float elapsed) {
             const int hIdx = lua_gettop(L_);
             lua_getfield(L_, hIdx - 1, "OnUpdate");
             if (lua_isfunction(L_, -1)) {
+                // The handler itself is the key: a frame's copies share it,
+                // and a frame that swaps its script gets another.
+                OnUpdateCost* cost = nullptr;
+                if (profile) {
+                    auto [at, added] = onUpdateCosts_.try_emplace(lua_topointer(L_, -1));
+                    cost = &at->second;
+                    if (added) {
+                        const auto* fw = widgetOf(L_, hIdx - 2);
+                        lua_Debug ar{};
+                        lua_pushvalue(L_, -1);
+                        lua_getinfo(L_, ">S", &ar);
+                        cost->label = std::string(fw && !fw->name.empty() ? fw->name : "(unnamed)") + " (" +
+                                      ar.short_src + ":" + std::to_string(ar.linedefined) + ")";
+                    }
+                }
+                const Clock::time_point handlerStart = profile ? Clock::now() : Clock::time_point{};
                 lua_pushvalue(L_, hIdx - 2);  // self (frame)
                 lua_pushnumber(L_, static_cast<double>(elapsed));
-                if (pcallScript(L_, "OnUpdate", 2, hIdx) != 0) {
+                const int called = pcallScript(L_, "OnUpdate", 2, hIdx);
+                if (cost) {
+                    const double ms = msSince(handlerStart);
+                    cost->totalMs += ms;
+                    cost->maxMs = std::max(cost->maxMs, ms);
+                    ++cost->calls;
+                    handlersMs += ms;
+                }
+                if (called != 0) {
                     const char* uerr = lua_tostring(L_, -1);
                     std::string uerrStr = uerr ? uerr : "(unknown)";
                     lua_pop(L_, 1);
@@ -11642,6 +11718,37 @@ void LuaEngine::dispatchOnUpdate(float elapsed) {
         lua_pop(L_, 2); // pop __scripts + frame
     }
     lua_pop(L_, 1); // pop __WoweeOnUpdateFrames
+    finish();
+}
+
+void LuaEngine::reportOnUpdateCosts() {
+    const double frames = std::max<uint32_t>(onUpdateFrames_, 1);
+    std::vector<const OnUpdateCost*> dearest;
+    double handlersMs = 0.0;
+    for (const auto& [fn, cost] : onUpdateCosts_) {
+        dearest.push_back(&cost);
+        handlersMs += cost.totalMs;
+    }
+    std::sort(dearest.begin(), dearest.end(),
+              [](const OnUpdateCost* a, const OnUpdateCost* b) { return a->totalMs > b->totalMs; });
+    static constexpr const char* kSteps[6] = {"macro icons", "text changed", "wheel glide", "animations",
+                                              "walking the frames", "message ages"};
+    LOG_WARNING("OnUpdate over ", onUpdateWindowMs_ / 1000.0, "s: ", onUpdateTotalMs_ / frames,
+                "ms/frame avg, worst ", onUpdateWorstMs_, "ms; handlers ", handlersMs / frames, " over ",
+                dearest.size(), " handlers; ", kSteps[3], " ", onUpdateStepMs_[3] / frames, ", ", kSteps[4], " ",
+                onUpdateStepMs_[4] / frames, ", ", kSteps[0], " ", onUpdateStepMs_[0] / frames, ", ", kSteps[5],
+                " ", onUpdateStepMs_[5] / frames, ", ", kSteps[1], " ", onUpdateStepMs_[1] / frames, ", ",
+                kSteps[2], " ", onUpdateStepMs_[2] / frames);
+    for (size_t i = 0; i < dearest.size() && i < 12; ++i) {
+        const OnUpdateCost& c = *dearest[i];
+        LOG_WARNING("  ", c.label, ": ", c.totalMs / frames, "ms/frame avg, worst ", c.maxMs, "ms, ",
+                    c.calls / frames, " calls/frame");
+    }
+    onUpdateCosts_.clear();
+    for (double& ms : onUpdateStepMs_) ms = 0.0;
+    onUpdateTotalMs_ = onUpdateWorstMs_ = 0.0;
+    onUpdateFrames_ = 0;
+    onUpdateWindowMs_ = 0.0;
 }
 
 bool LuaEngine::dispatchSlashCommand(const std::string& command, const std::string& args) {

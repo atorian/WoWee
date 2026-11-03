@@ -430,6 +430,10 @@ public:
 
     // Known spells
     [[nodiscard]] const std::unordered_set<uint32_t>& getKnownSpells() const { return knownSpells_; }
+    /// Moves on whenever the known spells change - learned, unlearned,
+    /// replaced, another character logged in - so a reader can keep what it
+    /// worked out from them until then (macro icons, by spell name).
+    [[nodiscard]] uint64_t knownSpellsVersion() const { return knownSpellsVersion_; }
     [[nodiscard]] const std::unordered_map<uint32_t, float>& getSpellCooldowns() const { return spellCooldowns_; }
     [[nodiscard]] float getSpellCooldown(uint32_t spellId) const;
     [[nodiscard]] float getSpellCooldownTotal(uint32_t spellId) const;
@@ -503,7 +507,10 @@ public:
 
     // Known spells mutation (formerly accessed via friend)
     void addKnownSpell(uint32_t spellId) {
-        if (knownSpells_.insert(spellId).second) spellBookTabsDirty_ = true;
+        if (knownSpells_.insert(spellId).second) {
+            spellBookTabsDirty_ = true;
+            ++knownSpellsVersion_;
+        }
     }
     [[nodiscard]] bool hasKnownSpell(uint32_t spellId) const { return knownSpells_.count(spellId) > 0; }
 
@@ -690,7 +697,10 @@ public:
     void resetCastState();
     /// A character is being logged in: nothing of the last one's spells,
     /// cooldowns, auras, cast, talents or skill headings stands.
-    void beginCharacter() { static_cast<SpellCharacterState&>(*this) = SpellCharacterState{}; }
+    void beginCharacter() {
+        static_cast<SpellCharacterState&>(*this) = SpellCharacterState{};
+        ++knownSpellsVersion_;
+    }
 
     // ---- Skill panel headings ----
     [[nodiscard]] bool isSkillCategoryCollapsed(uint32_t categoryId) const {
@@ -737,6 +747,10 @@ public:
                                            uint32_t spellId) const;
 
 private:
+    /// Outside SpellCharacterState, so a new character moves it on rather
+    /// than setting it back to a number a reader may hold.
+    uint64_t knownSpellsVersion_ = 0;
+
     // --- Packet handlers ---
     void handleInitialSpells(network::Packet& packet);
     void handleCastFailed(network::Packet& packet);

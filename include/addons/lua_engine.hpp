@@ -98,6 +98,8 @@ public:
     void drainPendingAnimFinished();
     /// Age message-frame lines and drop the expired ones.
     void expireMessages(float elapsed);
+    /// A widget given its first message line: expireMessages ages it from now on.
+    void noteMessageFrame(uint32_t id);
 
     /// Feed the mouse to the widget tree: hover changes fire OnEnter/OnLeave,
     /// and a press and release on the same frame is a click. Coordinates are
@@ -194,6 +196,26 @@ public:
 private:
     bool eventListenersReported_ = false;
     int  eventReportFrames_ = 0;
+
+    /// With WOWEE_FRAME_PROFILE, what each OnUpdate handler costs - by the
+    /// handler, which a frame shares with its copies, named by its frame and
+    /// where the function was written - and the steps before them; said every
+    /// ten seconds, the dearest first.
+    struct OnUpdateCost {
+        std::string label;
+        double totalMs = 0.0;
+        double maxMs = 0.0;
+        uint32_t calls = 0;
+    };
+    std::unordered_map<const void*, OnUpdateCost> onUpdateCosts_;
+    /// The widgets ever given a message line (noteMessageFrame).
+    std::vector<uint32_t> messageFrames_;
+    double onUpdateStepMs_[6] = {};
+    double onUpdateTotalMs_ = 0.0;
+    double onUpdateWorstMs_ = 0.0;
+    uint32_t onUpdateFrames_ = 0;
+    double onUpdateWindowMs_ = 0.0;
+    void reportOnUpdateCosts();
 public:
 
     /// Typed text, one UTF-8 chunk as the platform reports it.

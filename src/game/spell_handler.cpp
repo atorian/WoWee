@@ -1484,6 +1484,7 @@ void SpellHandler::handleInitialSpells(network::Packet& packet) {
     if (!queries_.packetParsers().parseInitialSpells(packet, data)) return;
 
     knownSpells_ = {data.spellIds.begin(), data.spellIds.end()};
+    ++knownSpellsVersion_;
     spellBookTabsDirty_ = true;
 
     LOG_DEBUG("Initial spells include: 527=", knownSpells_.count(527u),
@@ -2064,6 +2065,7 @@ void SpellHandler::handleLearnedSpell(network::Packet& packet) {
 
     const bool alreadyKnown = knownSpells_.count(spellId) > 0;
     knownSpells_.insert(spellId);
+    if (!alreadyKnown) ++knownSpellsVersion_;
     if (!alreadyKnown) events_.publish(events::SpellsLearned{{spellId}});
     LOG_INFO("Learned spell: ", spellId, alreadyKnown ? " (already known, skipping chat)" : "");
     if (isPreWotlk()) {
@@ -2121,6 +2123,7 @@ void SpellHandler::handleRemovedSpell(network::Packet& packet) {
     if (packet.getRemainingSize() < minSz) return;
     uint32_t spellId = classicSpellId ? packet.readUInt16() : packet.readUInt32();
     knownSpells_.erase(spellId);
+    ++knownSpellsVersion_;
     spellBookTabsDirty_ = true;
     syncPreWotlkTalentsFromKnownSpells();
     LOG_INFO("Removed spell: ", spellId);
@@ -2178,6 +2181,7 @@ void SpellHandler::handleSupercededSpell(network::Packet& packet) {
     uint32_t newSpellId = classicSpellId ? packet.readUInt16() : packet.readUInt32();
 
     knownSpells_.erase(oldSpellId);
+    ++knownSpellsVersion_;
     spellBookTabsDirty_ = true;
 
     const bool newSpellAlreadyAnnounced = knownSpells_.count(newSpellId) > 0;
@@ -2209,6 +2213,7 @@ void SpellHandler::handleUnlearnSpells(network::Packet& packet) {
     for (uint32_t i = 0; i < spellCount && packet.getRemainingSize() >= 4; ++i) {
         uint32_t spellId = packet.readUInt32();
         knownSpells_.erase(spellId);
+        ++knownSpellsVersion_;
         spellBookTabsDirty_ = true;
         unlearned.push_back(spellId);
         LOG_INFO("  Unlearned spell: ", spellId);
