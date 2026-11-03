@@ -458,6 +458,38 @@ download small.
 - [Sky System](docs/SKY_SYSTEM.md)
 - [Warden Quick Reference](docs/WARDEN_QUICK_REFERENCE.md) and [Implementation](docs/WARDEN_IMPLEMENTATION.md)
 
+### Design pages
+
+Plans and measurements written up as pages on claude.ai. They are private
+to the account that made them: open them signed in to it.
+
+The renderer and threading plans (2-3 November 2026):
+
+- [WoWee: отрисовка на GPU](https://claude.ai/artifact/VwSfpbrxnLLM5fZCVKnW8j) -
+  stage 3, GPU-driven draws: steps 3.0-3.9 and where each stands. Its
+  table predates 3.4d (092fe8e1).
+- [WoWee: постоянная сцена на GPU](https://claude.ai/artifact/XW9zTvR7tcrS2jXqnGXRJz) -
+  stage 2, the scene kept on the GPU (done).
+- [WoWee: сцена на своём потоке](https://claude.ai/artifact/Bpvo7woYosAhytQfEyNazT) -
+  threading option B, the scene on its own thread: steps B.1-B.8.
+- [Потоки кадра WoWee](https://claude.ai/artifact/4zKdzYCn83iAAsfejuit7H) -
+  what each thread does in a frame.
+
+Earlier pages:
+
+- [Бюджет кадра WoWee](https://claude.ai/artifact/AYeq7PuQAUn6yz7PPsE3CU) (1 Nov) -
+  where a Dalaran frame's time goes.
+- [WoWee: бэклог CPU и GPU](https://claude.ai/artifact/48EYV2u16LEBHUmRFQu5EG) (31 Oct)
+- [План по тестам WoWee](https://claude.ai/artifact/AAxsajeEUXJoPpfesk1mUr) (31 Oct)
+- [Кадр Даларана на M3 Pro](https://claude.ai/artifact/6kH1WUReg6dLsUtbj8qbSw) (29 Oct)
+- [Карта кадра Даларана](https://claude.ai/artifact/Mru2gy5MwwFZfi56pok7wu) (28 Oct)
+- [Варианты потоков WoWee](https://claude.ai/artifact/PRbgKwtewAjBxSycq3sVyC) (19 Oct)
+- [Приоритеты кадра WoWee](https://claude.ai/artifact/2Kme1wVNi6h9PtSqrjk1Sm) (19 Oct)
+- [WoWee: вода и ветер](https://claude.ai/artifact/K9CAoWrgzCr7SDERX5Pi5E) (18 Oct)
+- [Бюджет кадра WoWee, 18 Oct](https://claude.ai/artifact/RAEQEYU6EkcQwh9xSVaPk2) and
+  [another of the same day](https://claude.ai/artifact/3QaAKw8pr628dKFxgiskw3)
+- [Области жизни WoWee](https://claude.ai/artifact/46syiii4MYqA99gyRvSJwq) (16 Oct)
+
 ## Development and CI
 
 WoWee uses C++20, CMake 3.15+, SDL3 and Vulkan 1.3. GitHub Actions builds
