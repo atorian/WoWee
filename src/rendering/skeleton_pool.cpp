@@ -277,6 +277,27 @@ PackedSkeleton packSkeleton(const pipeline::M2Model& model, uint32_t boneLimit) 
     return packed;
 }
 
+std::vector<uint32_t> packTextureAnimations(const pipeline::M2Model& model) {
+    const auto count = static_cast<uint32_t>(model.textureTransforms.size());
+    std::vector<uint32_t> out(5 + size_t(3) * count, 0u);
+    out[0] = count;
+    out[2] = 5;
+    for (uint32_t i = 0; i < count; ++i) {
+        const auto& transform = model.textureTransforms[i];
+        const size_t record = 5 + size_t(3) * i;
+        const uint32_t translation = packTrack(transform.translation, TrackKind::Vec3, glm::vec3(0.0f), out);
+        const uint32_t rotation = packTrack(transform.rotation, TrackKind::Quat, glm::vec3(0.0f), out);
+        const uint32_t scale = packTrack(transform.scale, TrackKind::Vec3, glm::vec3(1.0f), out);
+        out[record + 0] = translation;
+        out[record + 1] = rotation;
+        out[record + 2] = scale;
+    }
+    out[3] = static_cast<uint32_t>(model.globalSequenceDurations.size());
+    out[4] = static_cast<uint32_t>(out.size());
+    out.insert(out.end(), model.globalSequenceDurations.begin(), model.globalSequenceDurations.end());
+    return out;
+}
+
 SkeletonPool::~SkeletonPool() { destroy(); }
 
 void SkeletonPool::destroy() {
@@ -403,6 +424,23 @@ std::optional<std::pair<int32_t, uint32_t>> SkeletonPool::copyWords(const std::v
         return std::nullopt;
     }
     return std::make_pair(slot, *first);
+}
+
+SkeletonPool::Skeleton SkeletonPool::placeTextureAnimations(const pipeline::M2Model& model, const char* name) {
+    if (!context_ || model.textureTransforms.empty()) return {};
+    const std::vector<uint32_t> words = packTextureAnimations(model);
+    const auto at = placeWords(words, name, "drawn with its textures standing still");
+    if (!at) return {};
+    return Skeleton{.page = at->first, .first = at->second, .words = static_cast<uint32_t>(words.size()),
+                    .boneCount = static_cast<uint32_t>(model.textureTransforms.size())};
+}
+
+SkeletonPool::Skeleton SkeletonPool::placeBlob(const std::vector<uint32_t>& words, const char* name,
+                                               const char* without) {
+    if (!context_ || words.empty()) return {};
+    const auto at = placeWords(words, name, without);
+    if (!at) return {};
+    return Skeleton{.page = at->first, .first = at->second, .words = static_cast<uint32_t>(words.size())};
 }
 
 void SkeletonPool::release(const Skeleton& skeleton) {

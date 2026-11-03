@@ -1090,6 +1090,7 @@ set(WOWEE_SOURCES
     src/rendering/geometry_pool.cpp
     src/rendering/skeleton_pool.cpp
     src/rendering/skeleton_pass.cpp
+    src/rendering/m2_draw_pass.cpp
     src/rendering/particle_pool.cpp
     src/rendering/m2_particle_pass.cpp
     src/rendering/texture_upload.cpp
@@ -2549,6 +2550,11 @@ if(WOWEE_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_m2_particles.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/m2-particles)
         set_tests_properties(scene_m2_particles PROPERTIES SKIP_RETURN_CODE 77)
+        # A texture animation moves the texture as the CPU's sampling moved it.
+        wowee_add_gpu_test(scene_m2_texture_animation
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_m2_texture_animation.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/m2-texture-animation)
+        set_tests_properties(scene_m2_texture_animation PROPERTIES SKIP_RETURN_CODE 77)
         # A billboard card faces the camera whichever way its model faces.
         wowee_add_gpu_test(scene_m2_billboard
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_m2_billboard.py

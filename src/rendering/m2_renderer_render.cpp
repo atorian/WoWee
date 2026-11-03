@@ -46,6 +46,8 @@
 #include <thread>
 
 #include <set>
+#include <map>
+#include <bit>
 #include <numeric>
 #include <utility>
 
@@ -667,7 +669,9 @@ bool M2Renderer::makeDrawStorage(uint32_t slot, uint32_t capacity) {
     AllocatedBuffer instances, records, commands;
     if (!make(VkDeviceSize(capacity) * sizeof(M2InstanceGPU), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, instances) ||
         !make(draws * sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, records) ||
-        !make(draws * sizeof(VkDrawIndexedIndirectCommand), VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, commands)) {
+        // Written by m2_draws.comp as well as the CPU.
+        !make(draws * sizeof(VkDrawIndexedIndirectCommand),
+              VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, commands)) {
         if (instances.buffer) destroyBuffer(allocator, instances);
         if (records.buffer) destroyBuffer(allocator, records);
         return false;
@@ -710,6 +714,239 @@ void M2Renderer::poseSkeletons(VkCommandBuffer cmd, uint32_t frameIndex, const P
         posed_[frameIndex] &&
         particlePass_.record(cmd, frameIndex, recording_->particles, bones, characters.set ? characters.set : bones,
                              characters.set && characters.posed);
+}
+
+namespace {
+uint16_t m2LodFor(const M2ModelGPU& model, float distSq);
+void sayDrawRoomFull(uint32_t capacity);
+}  // namespace
+
+void M2Renderer::prepareViewDraws(VkCommandBuffer cmd, uint32_t frameIndex) {
+    viewBuckets_.clear();
+    skyDraws_.clear();
+    drawFrame_.clear();
+    viewDrawsReady_ = false;
+    instanceDataCount_ = 0;
+    preparedRecordEnd_ = 0;
+    if (frameIndex >= 2 || !recording_) return;
+    const auto& drawInstances = recording_->drawInstances_;
+    const auto& visible = recording_->sortedVisible_;
+    if (!prepareInstanceStorage(frameIndex, recording_->instanceEntries)) return;
+    // Where they stand is in the instance table; without it (no memory,
+    // logged by ensureSlotTables) nothing is drawn.
+    if (!drawInstances.empty() && !instanceSetReady(frameIndex)) return;
+    auto* records = static_cast<M2InstanceGPU*>(instanceMapped_[frameIndex]);
+
+    // The base records, a model's instances in a row and each level of
+    // detail's in a row of its own: a group.
+    struct Group {
+        const M2ModelGPU* model;
+        uint32_t lod;
+        uint32_t first;
+        uint32_t count;
+        uint32_t ownFirst = 0;
+    };
+    std::vector<Group> groups;
+    struct Pending {
+        uint32_t draw;
+        bool useBones;
+        uint16_t lod;
+    };
+    std::vector<Pending> pending;
+    for (size_t start = 0; start < visible.size();) {
+        const uint32_t modelId = visible[start].modelId;
+        size_t end = start;
+        while (end < visible.size() && visible[end].modelId == modelId) ++end;
+        // The model the cull took from the first entry's instance.
+        const M2ModelGPU* model = drawInstances[visible[start].draw].model.get();
+        const size_t groupStart = start;
+        start = end;
+        if (!model || !model->geometry.placed() || !model->drawList.placed()) continue;
+        if (recording_->skipDetail && model->isGroundDetail) continue;
+        const bool needsAnimation = model->hasAnimation && !model->disableAnimation;
+        pending.clear();
+        for (size_t v = groupStart; v < end; ++v) {
+            const DrawInstance& instance = drawInstances[visible[v].draw];
+            // Skinned when the GPU posed it; an animated model with no
+            // skeleton in the pool is drawn in its bind pose.
+            const bool useBones = needsAnimation && instance.boneCount > 0;
+            if (useBones && !posed_[frameIndex]) continue;
+            pending.push_back({.draw = visible[v].draw, .useBones = useBones,
+                               .lod = m2LodFor(*model, visible[v].distSq)});
+        }
+        std::sort(pending.begin(), pending.end(),
+                         [](const Pending& a, const Pending& b) { return a.lod < b.lod; });
+        for (size_t p = 0; p < pending.size();) {
+            const uint16_t lod = pending[p].lod;
+            const auto first = instanceDataCount_;
+            for (; p < pending.size() && pending[p].lod == lod; ++p) {
+                if (instanceDataCount_ >= instanceCapacity_[frameIndex]) break;
+                const DrawInstance& inst = drawInstances[pending[p].draw];
+                M2InstanceGPU& e = records[instanceDataCount_];
+                e.slot = inst.slot;
+                e.uv = M2UVTransform{};
+                e.uv2 = M2UVTransform{};
+                e.localLights = inst.localLights;
+                e.fadeAlpha = 1.0f;
+                e.useBones = (pending[p].useBones && !kM2NoSkinning) ? 1 : 0;
+                e.boneBase = pending[p].useBones ? static_cast<int32_t>(inst.boneBase) : 0;
+                e.boneCount = static_cast<int32_t>(inst.boneCount);
+                e.highlight = inst.highlight;
+                e.flags = inst.afloat ? 1 : 0;
+                drawFrame_.clocks.emplace_back(inst.animTime, inst.globalSequenceTime,
+                                               std::bit_cast<float>(int32_t(inst.sequenceIndex)), 0.0f);
+                ++instanceDataCount_;
+            }
+            while (p < pending.size() && pending[p].lod == lod) ++p;
+            const uint32_t count = instanceDataCount_ - first;
+            if (count > 0 && !model->levelDraws[lod].entries.empty())
+                groups.push_back({.model = model, .lod = lod, .first = first, .count = count});
+        }
+    }
+    if (groups.empty()) {
+        preparedRecordEnd_ = instanceDataCount_;
+        return;
+    }
+
+    // The records of each group's batches that need their own, after the
+    // base records.
+    for (Group& g : groups) {
+        const uint64_t own = uint64_t(g.model->levelDraws[g.lod].ownCount) * g.count;
+        if (instanceDataCount_ + own > instanceCapacity_[frameIndex]) {
+            static core::LogBudget budget(4, "M2 own records room");
+            if (budget.take())
+                LOG_WARNING("M2Renderer: this frame's records filled the instance room at ",
+                            instanceCapacity_[frameIndex], " - its models are not drawn this frame");
+            preparedRecordEnd_ = instanceDataCount_;
+            return;
+        }
+        g.ownFirst = instanceDataCount_;
+        instanceDataCount_ += static_cast<uint32_t>(own);
+    }
+
+    // Each group's buckets' places among the frame's commands. In the world
+    // the commands of a bucket - a pipeline, its faces and a geometry page -
+    // follow one another, the buckets in the order they are drawn; in the
+    // sky, the model's order.
+    uint32_t& cursor = frameDrawCursor();
+    const uint32_t room = drawRoom(frameIndex);
+    uint32_t total = 0;
+    if (skyMode_) {
+        for (const Group& g : groups) {
+            const auto& level = g.model->levelDraws[g.lod];
+            for (const auto& entry : level.entries) {
+                drawFrame_.offsets.push_back(cursor + total);
+                skyDraws_.push_back({.model = g.model, .entry = entry, .command = cursor + total});
+                ++total;
+            }
+        }
+    } else {
+        // The order the buckets are drawn in: phase by phase, so each model
+        // keeps its own order; within a phase the plain opaque first, then
+        // the alpha tested and the cut out, then the rest.
+        const auto rank = [](uint8_t variant) -> uint32_t {
+            if (variant == static_cast<uint8_t>(M2BlendPipeline::Opaque)) return 0;
+            if (variant == static_cast<uint8_t>(M2BlendPipeline::AlphaTest)) return 1;
+            if (variant == kVariantCutout) return 2;
+            return 3 + variant;
+        };
+        const auto bucketKey = [&](uint16_t levelKey, int32_t page) {
+            const uint64_t phase = levelKey >> kDrawPhaseShift;
+            const auto variant = static_cast<uint8_t>((levelKey >> 1) & 15u);
+            return (phase << 48) | (uint64_t(rank(variant)) << 40) | (uint64_t(levelKey & 1u) << 32) |
+                   uint32_t(page);
+        };
+        std::map<uint64_t, uint32_t> counts;
+        for (const Group& g : groups) {
+            const auto& level = g.model->levelDraws[g.lod];
+            for (size_t b = 0; b < level.buckets.size(); ++b) {
+                uint32_t& count = counts[bucketKey(level.buckets[b], g.model->geometry.page)];
+                drawFrame_.offsets.push_back(count);
+                count += level.bucketCounts[b];
+            }
+        }
+        std::map<uint64_t, uint32_t> firsts;
+        for (const auto& [key, count] : counts) {
+            firsts[key] = cursor + total;
+            total += count;
+        }
+        size_t at = 0;
+        for (const Group& g : groups) {
+            const auto& level = g.model->levelDraws[g.lod];
+            for (size_t b = 0; b < level.buckets.size(); ++b, ++at) {
+                const uint64_t key = bucketKey(level.buckets[b], g.model->geometry.page);
+                drawFrame_.offsets[at] += firsts[key];
+            }
+        }
+        // The buckets as they are drawn; a page bound through any model's
+        // range of it.
+        std::map<uint64_t, ViewBucket> buckets;
+        for (const Group& g : groups) {
+            const auto& level = g.model->levelDraws[g.lod];
+            for (const uint16_t levelKey : level.buckets) {
+                const uint64_t key = bucketKey(levelKey, g.model->geometry.page);
+                auto [it, made] = buckets.try_emplace(key);
+                if (made)
+                    it->second = {.variant = static_cast<uint8_t>((levelKey >> 1) & 15u),
+                                  .twoSided = (levelKey & 1u) != 0,
+                                  .page = g.model->geometry, .first = firsts.at(key), .count = counts.at(key)};
+            }
+        }
+        for (auto& [key, bucket] : buckets) viewBuckets_.push_back(bucket);
+    }
+    if (cursor + total > room) {
+        sayDrawRoomFull(room);
+        viewBuckets_.clear();
+        skyDraws_.clear();
+        preparedRecordEnd_ = instanceDataCount_;
+        return;
+    }
+    cursor += total;
+
+    // The groups as the pass reads them; the sky's opacity of the hour for
+    // each of its own records.
+    for (size_t i = 0, offset = 0; i < groups.size(); ++i) {
+        const Group& g = groups[i];
+        const auto& level = g.model->levelDraws[g.lod];
+        M2DrawGroupGPU row;
+        row.listPage = static_cast<uint32_t>(g.model->drawList.page);
+        row.listBlob = g.model->drawList.first;
+        row.lod = g.lod;
+        row.firstRecord = g.first;
+        row.instanceCount = g.count;
+        row.ownFirst = g.ownFirst;
+        row.offsetsFirst = static_cast<uint32_t>(offset);
+        offset += level.buckets.size();
+        if (g.model->textureAnimations.placed()) {
+            row.uvPage = static_cast<uint32_t>(g.model->textureAnimations.page);
+            row.uvBlob = g.model->textureAnimations.first;
+        }
+        if (skyMode_) {
+            row.opacityFirst = static_cast<uint32_t>(drawFrame_.skyOpacity.size());
+            const M2ModelGPU& model = *g.model;
+            const uint32_t duration = model.sequences.empty() ? 0 : model.sequences[0].duration;
+            const float skyTime = skyAnimationTimeMs(recording_->skyHour, duration);
+            // In the order the pass numbers them: the level's own entries,
+            // each over the group's instances.
+            for (const auto& entry : level.entries) {
+                const auto& batch = model.batches[entry.batch];
+                for (uint32_t k = 0; k < g.count; ++k) {
+                    const float globalTime = drawFrame_.clocks[g.first + k].y;
+                    drawFrame_.skyOpacity.push_back(skyBatchOpacity(
+                        model.colorAlphaTracks, batch.colorTrackIndex, model.textureWeightTracks,
+                        batch.weightTrackIndex, skyTime, globalTime, model.globalSequenceDurations));
+                }
+            }
+        }
+        drawFrame_.groups.push_back(row);
+    }
+    drawFrame_.pages = skeletons_.pageBuffers();
+    drawFrame_.pagesVersion = skeletons_.version();
+    viewDrawsReady_ = drawPass_.record(cmd, frameIndex, drawFrame_,
+                                       {.instances = instanceBuffer_[frameIndex],
+                                        .commands = drawCommands_[frameIndex].buffer,
+                                        .drawMaterials = drawRecords_[frameIndex].buffer});
+    preparedRecordEnd_ = instanceDataCount_;
 }
 
 SkeletonRequestGPU M2Renderer::skeletonRequest(const M2Instance& instance, uint32_t outBase) const {
@@ -1209,6 +1446,131 @@ const char* M2Renderer::opaqueBatchSkip(const M2ModelGPU& model, size_t batchInd
     if (!skyBatchAllowed(skyMode_, batchIndex)) return "sky batch rule";
     if (suppressStars && batch.starLayer) return "baked star layer";
     return nullptr;
+}
+
+uint8_t M2Renderer::drawVariant(const M2ModelGPU::BatchGPU& batch) const {
+    const M2BatchDrawState& state = batch.drawState;
+    if (skyMode_ && state.drawBlendMode <= 1) return kVariantSkyAlpha;
+    if (state.forceCutout) return kVariantCutout;
+    return static_cast<uint8_t>(m2BlendPipeline(state.drawBlendMode));
+}
+
+VkPipeline M2Renderer::variantPipeline(uint8_t variant) const {
+    if (variant == kVariantSkyAlpha) return scenePipes_.alpha;
+    if (variant == kVariantCutout) return cutoutPipeline_;
+    return blendPipeline(static_cast<M2BlendPipeline>(variant));
+}
+
+void M2Renderer::buildDrawList(M2ModelGPU& model) {
+    skeletons_.release(std::exchange(model.drawList, {}));
+    for (auto& level : model.levelDraws) level = {};
+    if (!model.geometry.placed()) return;
+
+    // What each batch of a named model does in the view (WOWEE_M2_BATCH_DIAG).
+    const bool diag = m2BatchDiagNames(model);
+    std::vector<uint32_t> words(kDrawListHeaderWords, 0u);
+    std::array<std::vector<uint32_t>, kDrawListLevels> own;
+    bool any = false;
+    for (uint32_t lod = 0; lod < kDrawListLevels; ++lod) {
+        M2ModelGPU::LevelDraws& level = model.levelDraws[lod];
+        words[lod * 4] = static_cast<uint32_t>(words.size());
+        uint16_t phase = 0;
+        uint16_t lastState = 0;
+        for (size_t bi = 0; bi < model.batches.size(); ++bi) {
+            const auto& batch = model.batches[bi];
+            // The baked stars are in the list; the passes leave them out
+            // where the client draws its own.
+            const char* skipped = opaqueBatchSkip(model, bi, static_cast<uint16_t>(lod), diag, false);
+            const M2GlowCardBatch glowCard = glowCardOf(model, batch);
+            // A glow card's sprites are the cull's (appendGlowSprites); the
+            // card itself is left out where the sprite stands in for it. A
+            // layer the client blends for its alpha is the blended pass's.
+            if (!skipped && m2WantsGlowSprite(glowCard) && m2GlowSpriteReplacesMesh(glowCard))
+                skipped = "replaced by its glow sprite";
+            if (!skipped && (batch.blendMode >= 2 || batch.blendedByOpacity)) skipped = "drawn in the blended pass";
+            if (!skipped && batch.materialRow == kNoMaterialRow) skipped = "no material row";
+            if (diag)
+                LOG_WARNING("M2 DRAW '", model.name, "' batch ", bi, " lod=", lod,
+                            " submeshLevel=", batch.submeshLevel, " idx=", batch.indexCount,
+                            " opacity=", batch.batchOpacity,
+                            (skipped ? "  SKIPPED: " : "  drawn"), (skipped ? skipped : ""));
+            if (skipped) continue;
+
+            const uint8_t variant = drawVariant(batch);
+            const bool twoSided = skyMode_ || m2MaterialTwoSided(batch.materialFlags);
+            const auto entryIndex = static_cast<uint32_t>(level.entries.size());
+            // Its bucket among the level's: in the world by its phase - how
+            // many times the state changed before it in the model's order -
+            // its pipeline and its faces. The buckets are drawn phase by
+            // phase, so a model's batches keep its own order: a cut-out
+            // layer before an opaque one at the same depth stays before it.
+            // In the sky, whose layers blend, a bucket an entry.
+            uint32_t bucket = 0;
+            uint32_t ordinal = 0;
+            const auto state = static_cast<uint16_t>((variant << 1) | (twoSided ? 1 : 0));
+            if (!level.entries.empty() && state != lastState) ++phase;
+            lastState = state;
+            const auto key = static_cast<uint16_t>((phase << kDrawPhaseShift) | state);
+            if (skyMode_) {
+                bucket = static_cast<uint32_t>(level.buckets.size());
+                level.buckets.push_back(key);
+                level.bucketCounts.push_back(1);
+            } else {
+                const auto found = std::find(level.buckets.begin(), level.buckets.end(), key);
+                bucket = static_cast<uint32_t>(found - level.buckets.begin());
+                if (found == level.buckets.end()) {
+                    level.buckets.push_back(key);
+                    level.bucketCounts.push_back(0);
+                }
+                ordinal = level.bucketCounts[bucket]++;
+            }
+
+            // Records of its own where its instances differ per batch: a
+            // texture animation, the batch's own opacity, the sky's of the
+            // hour.
+            // Diagnostic: WOWEE_M2_NO_TEXTURE_ANIMATION=1 holds every view
+            // texture still, which tells an animation fault from anything else.
+            static const bool kNoTextureAnimation = std::getenv("WOWEE_M2_NO_TEXTURE_ANIMATION") != nullptr;
+            const bool animated =
+                !kNoTextureAnimation && batch.textureAnimIndex != 0xFFFF && model.hasTextureAnimation;
+            const bool ownRecords = animated || skyMode_ || batch.batchOpacity != 1.0f;
+            const auto transformAt = [&](size_t lookupIndex) -> uint32_t {
+                if (!animated || !model.textureAnimations.placed()) return ~0u;
+                if (lookupIndex >= model.textureTransformLookup.size()) return ~0u;
+                const uint16_t index = model.textureTransformLookup[lookupIndex];
+                return index < model.textureTransforms.size() ? index : ~0u;
+            };
+            const uint32_t uv0 = transformAt(batch.textureAnimIndex);
+            const uint32_t uv1 = batch.secondTexture ? transformAt(size_t(batch.textureAnimIndex) + 1) : ~0u;
+            const uint32_t ownOrdinal = ownRecords ? static_cast<uint32_t>(own[lod].size()) : 0u;
+            if (ownRecords) own[lod].push_back(entryIndex);
+            words.insert(words.end(),
+                         {batch.indexCount, model.geometry.firstIndex + batch.indexStart,
+                          static_cast<uint32_t>(model.geometry.baseVertex), batch.materialRow, bucket, ordinal, uv0,
+                          uv1, std::bit_cast<uint32_t>(batch.batchOpacity),
+                          ownRecords ? kDrawEntryOwnRecords : 0u, ownOrdinal, 0u});
+            level.entries.push_back({.batch = static_cast<uint16_t>(bi),
+                                     .variant = variant,
+                                     .twoSided = twoSided,
+                                     .starLayer = batch.starLayer,
+                                     .replacesStars = batch.starLayer && batch.blendMode <= 1 &&
+                                                      !batch.blendedByOpacity});
+            any = true;
+        }
+        words[lod * 4 + 1] = static_cast<uint32_t>(level.entries.size());
+        level.ownCount = static_cast<uint32_t>(own[lod].size());
+    }
+    if (!any) return;
+    for (uint32_t lod = 0; lod < kDrawListLevels; ++lod) {
+        words[lod * 4 + 2] = static_cast<uint32_t>(words.size());
+        words[lod * 4 + 3] = static_cast<uint32_t>(own[lod].size());
+        words.insert(words.end(), own[lod].begin(), own[lod].end());
+    }
+    vkCtx_->beginUploadBatch();
+    model.drawList = skeletons_.placeBlob(words, model.name.c_str(), "not drawn in the view");
+    vkCtx_->endUploadBatch();
+    if (!model.drawList.placed())
+        for (auto& level : model.levelDraws) level = {};
 }
 
 void M2Renderer::appendGlowSprites(const M2Instance& inst, const M2ModelGPU& model, uint16_t lod,
@@ -1995,7 +2357,6 @@ void M2Renderer::bindTextureTable(VkCommandBuffer cmd) const {
 void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                             const StarReplacement& drawStars, bool drawBakedStars) {
     const auto& drawInstances_ = recording_->drawInstances_;
-    const auto& sortedVisible_ = recording_->sortedVisible_;
 
     lastDrawCallCount = 0;
     lastBlendedDrawCallCount = 0;
@@ -2039,296 +2400,89 @@ void M2Renderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet,
                                 pipelineLayout_, 3, 1, &instanceSet_[frameIndex], 0, nullptr);
     }
 
-    // Reset instance SSBO write cursor for this frame
-    instanceDataCount_ = 0;
-    auto* instSSBO = static_cast<M2InstanceGPU*>(instanceMapped_[frameIndex]);
-    // The draws, a call per run of the same state; the geometry page bound
-    // and the faces shown are part of that state.
-    auto runs = viewRuns(cmd, pipelineLayout_, drawCommands_[frameIndex], drawRecords_[frameIndex], frameDrawCursor(),
-                         drawRoom(frameIndex), maxDrawsPerCall_);
-    ::VkBuffer currentPage = VK_NULL_HANDLE;
-    std::optional<bool> currentTwoSided;
-    bool roomFull = false;
+    // The records the passes write themselves start after the ones
+    // prepareViewDraws placed; every pass of a frame writes the same ones.
+    instanceDataCount_ = preparedRecordEnd_;
 
-    // =====================================================================
-    // Opaque pass - instanced draws grouped by (modelId, LOD)
-    // =====================================================================
-    // sortedVisible_ is already sorted by modelId so consecutive entries share
-    // the same vertex/index buffer.  Within each model group we sub-group by
-    // targetLOD to guarantee all instances in one vkCmdDrawIndexed use the
-    // same batch set.  Per-instance data (model matrix, fade, bones) is
-    // written to the instance SSBO; the shader reads it via gl_InstanceIndex.
-    {
-        struct PendingInstance {
-            /// Into drawInstances_.
-            uint32_t draw;
-            bool useBones;
-            uint16_t targetLOD;
-        };
-        std::vector<PendingInstance> pending;
-        pending.reserve(128);
-
-        size_t visStart = 0;
-        while (visStart < sortedVisible_.size()) {
-            // Find group of consecutive entries with same modelId
-            uint32_t groupModelId = sortedVisible_[visStart].modelId;
-            size_t groupEnd = visStart;
-            while (groupEnd < sortedVisible_.size() && sortedVisible_[groupEnd].modelId == groupModelId)
-                groupEnd++;
-
-            // The model the cull took from the first entry's instance, rather
-            // than a models.find(groupModelId) per group.
-            const M2ModelGPU* groupModel = drawInstances_[sortedVisible_[visStart].draw].model.get();
-            if (!groupModel) {
-                visStart = groupEnd;
-                continue;
-            }
-            const M2ModelGPU& model = *groupModel;
-            if (recording_->skipDetail && model.isGroundDetail) {
-                visStart = groupEnd;
-                continue;
-            }
-            if (!model.geometry.placed()) {
-                visStart = groupEnd;
-                continue;
-            }
-
-            bool modelNeedsAnimation = model.hasAnimation && !model.disableAnimation;
-
-            // Collect per-instance data for this model group
-            pending.clear();
-            for (size_t vi = visStart; vi < groupEnd; vi++) {
-                const auto& entry = sortedVisible_[vi];
-                const DrawInstance& instance = drawInstances_[entry.draw];
-
-                // Skinned when the GPU posed it; an animated model with no
-                // skeleton in the pool is drawn in its bind pose.
-                const bool needsBones = modelNeedsAnimation && instance.boneCount > 0;
-                if (needsBones && !posed_[frameIndex]) continue;
-
-                pending.push_back({.draw = entry.draw, .useBones = needsBones,
-                                   .targetLOD = m2LodFor(model, entry.distSq)});
-            }
-
-            if (pending.empty()) { visStart = groupEnd; continue; }
-
-            // Sort by targetLOD so each sub-group occupies a contiguous SSBO range
-            std::sort(pending.begin(), pending.end(),
-                      [](const PendingInstance& a, const PendingInstance& b) { return a.targetLOD < b.targetLOD; });
-
-            // Write base instance data to SSBO (no texture animation - overridden for tex-anim batches)
-            uint32_t baseSSBOOffset = instanceDataCount_;
-            size_t writtenInstances = 0;
-            for (const auto& p : pending) {
-                if (instanceDataCount_ >= instanceCapacity_[frameIndex]) break;
-                const DrawInstance& inst = drawInstances_[p.draw];
-                auto& e = instSSBO[instanceDataCount_];
-                e.slot = inst.slot;
-                e.uv = M2UVTransform{};
-                e.uv2 = M2UVTransform{};
-                e.localLights = inst.localLights;
-                e.fadeAlpha = 1.0f;
-                e.useBones = (p.useBones && !kM2NoSkinning) ? 1 : 0;
-                e.boneBase = p.useBones ? static_cast<int32_t>(inst.boneBase) : 0;
-                e.boneCount = static_cast<int32_t>(inst.boneCount);
-                e.highlight = inst.highlight;
-                e.flags = inst.afloat ? 1 : 0;
-                instanceDataCount_++;
-                ++writtenInstances;
-            }
-
-            // Drop what did not fit. The loop above stops writing at the cap,
-            // but the LOD sub-groups below are ranges over `pending` and were
-            // still being drawn in full - groupSSBOOffset then runs past the
-            // end of the buffer and the vertex shader reads instance data that
-            // is not there. That is a real out-of-bounds read on the GPU, not a
-            // missing model: it fires once per instance past the cap, hundreds
-            // of times a frame, and the device is lost seconds later.
-            //
-            // Truncating is safe here precisely because `pending` was sorted by
-            // LOD before the write: the sub-groups are contiguous and in the
-            // same order, so cutting the tail cuts whole instances rather than
-            // splitting a range.
-            if (writtenInstances < pending.size()) {
-                static bool warnedInstanceCap = false;
-                if (!warnedInstanceCap) {
-                    warnedInstanceCap = true;
-                    LOG_WARNING("M2Renderer: instance buffer full at ", instanceCapacity_[frameIndex],
-                                "; dropping ", pending.size() - writtenInstances,
-                                " instances of '", model.name, "' this frame");
-                }
-                pending.resize(writtenInstances);
-            }
-
-            // Process LOD sub-groups within this model group
-            size_t lodIdx = 0;
-            while (lodIdx < pending.size()) {
-                uint16_t lod = pending[lodIdx].targetLOD;
-                size_t lodEnd = lodIdx + 1;
-                while (lodEnd < pending.size() && pending[lodEnd].targetLOD == lod) lodEnd++;
-                uint32_t groupSize = static_cast<uint32_t>(lodEnd - lodIdx);
-                uint32_t groupSSBOOffset = baseSSBOOffset + static_cast<uint32_t>(lodIdx);
-
-                // What each batch of a named model does at draw time, once.
-                //
-                // WOWEE_M2_BATCH_DIAG says what a batch IS, at load. It could
-                // not say whether the batch was drawn, and a tree reported as
-                // missing a section of trunk is exactly that question: four
-                // readings of the model data in a row said every batch was
-                // present and correct, which it is, so the answer has to come
-                // from the frame rather than from the file.
-                const bool diagThisModel = m2BatchDiagNames(model);
-                for (size_t bi = 0; bi < model.batches.size(); bi++) {
-                    const auto& batch = model.batches[bi];
-                    const char* skipped = opaqueBatchSkip(model, bi, lod, diagThisModel, recording_->suppressStars);
-                    if (drawStars && recording_->suppressStars && batch.starLayer &&
-                        batch.blendMode <= 1 && !batch.blendedByOpacity &&
-                        !opaqueBatchSkip(model, bi, lod, diagThisModel, false)) {
-                        runs.flush();
-                        recordStarReplacement(cmd, perFrameSet, model, drawStars);
-                        currentPipeline = VK_NULL_HANDLE;
-                        currentTwoSided.reset();
-                        currentPage = model.geometry.vertices;
-                    }
-                    if (diagThisModel) {
-                        static std::set<std::pair<const void*, size_t>> saidDraw;
-                        if (saidDraw.size() < 64 && saidDraw.insert({&model, bi}).second) {
-                            LOG_WARNING("M2 DRAW '", model.name, "' batch ", bi,
-                                        " lod=", lod, " submeshLevel=", batch.submeshLevel,
-                                        " idx=", batch.indexCount,
-                                        " opacity=", batch.batchOpacity,
-                                        (skipped ? "  SKIPPED: " : "  drawn"),
-                                        (skipped ? skipped : ""));
-                        }
-                    }
-                    if (skipped) continue;
-                    // A glow card's sprites were made by the cull
-                    // (appendGlowSprites); the card itself is left out where
-                    // the sprite stands in for it.
-                    const M2GlowCardBatch glowCard = glowCardOf(model, batch);
-                    if (m2WantsGlowSprite(glowCard) && m2GlowSpriteReplacesMesh(glowCard)) continue;
-
-                    // Opaque gate - transparent glow cards were handled above so their
-                    // sprites are generated before the mesh moves to pass 2, and
-                    // so is a layer the client blends for its alpha, to be
-                    // faded or left out per instance there.
-                    const bool rawTransparent = (batch.blendMode >= 2) ||
-                                                batch.blendedByOpacity;
-                    if (rawTransparent) continue;
-
-                    // Handle texture animation: if this batch has a per-instance UV
-                    // transform, write a separate SSBO range with the right ones.
-                    bool hasBatchTexAnim = (batch.textureAnimIndex != 0xFFFF && model.hasTextureAnimation)
-                                           || skyMode_ || batch.batchOpacity != 1.0f;
-                    uint32_t drawOffset = groupSSBOOffset;
-                    if (hasBatchTexAnim && instanceDataCount_ + groupSize <= instanceCapacity_[frameIndex]) {
-                        drawOffset = instanceDataCount_;
-                        // Hoist per-batch lookups: the transform pointer is fixed for
-                        // every instance in this group; only the sampled transform
-                        // varies (per-instance animTime). The second stage animates
-                        // by the combo entry after the first.
-                        const pipeline::M2TextureTransform* tt = nullptr;
-                        const pipeline::M2TextureTransform* tt2 = nullptr;
-                        if (batch.textureAnimIndex != 0xFFFF && model.hasTextureAnimation) {
-                            tt = m2TextureTransformAt(model.textureTransformLookup,
-                                                      model.textureTransforms, batch.textureAnimIndex);
-                            if (batch.secondTexture) {
-                                tt2 = m2TextureTransformAt(model.textureTransformLookup, model.textureTransforms,
-                                                           static_cast<size_t>(batch.textureAnimIndex) + 1);
-                            }
-                        }
-                        for (size_t j = lodIdx; j < lodEnd; j++) {
-                            const auto& p = pending[j];
-                            const DrawInstance& inst = drawInstances_[p.draw];
-                            M2UVTransform uv, uv2;
-                            if (tt) {
-                                uv = m2SampleUVTransform(*tt, inst.sequenceIndex,
-                                                         inst.animTime, inst.globalSequenceTime,
-                                                         model.globalSequenceDurations);
-                            }
-                            if (tt2) {
-                                uv2 = m2SampleUVTransform(*tt2, inst.sequenceIndex,
-                                                          inst.animTime, inst.globalSequenceTime,
-                                                          model.globalSequenceDurations);
-                            }
-                            // Rebuild the entry from CPU-side data rather than copying it
-                            // out of the base entry. instSSBO lives in write-combined
-                            // upload memory: writing it is cheap, but reading it back is
-                            // uncached and costs microseconds per instance.
-                            auto& e = instSSBO[instanceDataCount_];
-                            e.slot = inst.slot;
-                            e.uv = uv;
-                            e.uv2 = uv2;
-                            e.localLights = inst.localLights;
-                            e.fadeAlpha = batch.batchOpacity;
-                            if (skyMode_) {
-                                const uint32_t duration = model.sequences.empty() ? 0 : model.sequences[0].duration;
-                                e.fadeAlpha *= skyBatchOpacity(model.colorAlphaTracks, batch.colorTrackIndex,
-                                    model.textureWeightTracks, batch.weightTrackIndex,
-                                    skyAnimationTimeMs(recording_->skyHour, duration), inst.globalSequenceTime,
-                                    model.globalSequenceDurations);
-                            }
-                            e.useBones = (p.useBones && !kM2NoSkinning) ? 1 : 0;
-                            e.boneBase = p.useBones ? static_cast<int32_t>(inst.boneBase) : 0;
-                            e.boneCount = static_cast<int32_t>(inst.boneCount);
-                            e.highlight = inst.highlight;
-                            e.flags = inst.afloat ? 1 : 0;
-                            instanceDataCount_++;
-                        }
-                    }
-
-                    // Keep SSBO addresses identical across the atmosphere,
-                    // reflection and main sky passes; filter only the draw.
-                    if (!drawBakedStars && batch.starLayer) continue;
-
-                    // Pipeline selection (per-model/batch, not per-instance).
-                    // What the batch is drawn as was decided when the model
-                    // loaded - see m2BatchDrawState.
-                    const M2BatchDrawState& drawState = batch.drawState;
-                    VkPipeline desiredPipeline = drawState.forceCutout
-                        ? cutoutPipeline_
-                        : blendPipeline(m2BlendPipeline(drawState.drawBlendMode));
-                    if (skyMode_ && drawState.drawBlendMode <= 1) desiredPipeline = scenePipes_.alpha;
-                    const bool twoSided = skyMode_ || m2MaterialTwoSided(batch.materialFlags);
-
-                    // A batch with no material row is not drawn (said when it got none).
-                    if (batch.materialRow == kNoMaterialRow || roomFull) continue;
-
-                    // A new run where the state changes.
-                    if (desiredPipeline != currentPipeline || currentTwoSided != twoSided ||
-                        model.geometry.vertices != currentPage) {
-                        runs.flush();
-                        if (desiredPipeline != currentPipeline) {
-                            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
-                            faces.pipelineBound();
-                            currentPipeline = desiredPipeline;
-                        }
-                        faces.show(twoSided);
-                        currentTwoSided = twoSided;
-                        if (model.geometry.vertices != currentPage) {
-                            geometry_.bind(cmd, model.geometry);
-                            currentPage = model.geometry.vertices;
-                        }
-                    }
-                    // Its instances are the entries from its first instance on.
-                    if (!runs.add({.indexCount = batch.indexCount, .instanceCount = groupSize,
-                                   .firstIndex = model.geometry.firstIndex + batch.indexStart,
-                                   .vertexOffset = model.geometry.baseVertex, .firstInstance = drawOffset},
-                                  batch.materialRow)) {
-                        sayDrawRoomFull(drawRoom(frameIndex));
-                        roomFull = true;
-                        continue;
-                    }
-                    if (skyMode_) ++skyDiagDrawsOpaque_;
-                    lastDrawCallCount++;
-                }
-
-                lodIdx = lodEnd;
-            }
-
-            visStart = groupEnd;
+    // The opaque draws, written on the GPU (prepareViewDraws): a run of
+    // commands from `first` on, its material rows read by gl_DrawID from
+    // there.
+    const auto drawCommands = [&](uint32_t first, uint32_t count) {
+        while (count > 0) {
+            const uint32_t n = std::min(count, maxDrawsPerCall_);
+            const M2PushConstants push{.drawBase = first};
+            vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
+            vkCmdDrawIndexedIndirect(cmd, drawCommands_[frameIndex].buffer,
+                                     VkDeviceSize(first) * sizeof(VkDrawIndexedIndirectCommand), n,
+                                     sizeof(VkDrawIndexedIndirectCommand));
+            first += n;
+            count -= n;
         }
-        runs.flush();
+    };
+    const auto bindState = [&](uint8_t variant, bool twoSided) {
+        const VkPipeline pipeline = variantPipeline(variant);
+        if (pipeline != currentPipeline) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            faces.pipelineBound();
+            currentPipeline = pipeline;
+        }
+        faces.show(twoSided);
+    };
+    if (viewDrawsReady_ && !skyMode_) {
+        // A call a bucket: one pipeline, its faces, one geometry page.
+        ::VkBuffer currentPage = VK_NULL_HANDLE;
+        for (const ViewBucket& bucket : viewBuckets_) {
+            bindState(bucket.variant, bucket.twoSided);
+            if (bucket.page.vertices != currentPage) {
+                geometry_.bind(cmd, bucket.page);
+                currentPage = bucket.page.vertices;
+            }
+            drawCommands(bucket.first, bucket.count);
+            lastDrawCallCount += bucket.count;
+        }
+    } else if (viewDrawsReady_) {
+        // The sky, in its model's order: its layers blend over one another.
+        // Its baked stars are left out where the client draws its own, which
+        // then go where they were.
+        std::optional<uint32_t> runFirst;
+        uint32_t runCount = 0;
+        std::optional<std::pair<uint8_t, bool>> runState;
+        const M2ModelGPU* boundModel = nullptr;
+        const auto flush = [&] {
+            if (runFirst && runCount > 0) drawCommands(*runFirst, runCount);
+            runFirst.reset();
+            runCount = 0;
+        };
+        for (const SkyDraw& draw : skyDraws_) {
+            const M2ModelGPU::DrawEntry& entry = draw.entry;
+            if (entry.starLayer && recording_->suppressStars) {
+                if (drawStars && entry.replacesStars) {
+                    flush();
+                    recordStarReplacement(cmd, perFrameSet, *draw.model, drawStars);
+                    currentPipeline = VK_NULL_HANDLE;
+                    runState.reset();
+                    boundModel = draw.model;
+                }
+                continue;
+            }
+            if (entry.starLayer && !drawBakedStars) continue;
+            const std::pair<uint8_t, bool> state{entry.variant, entry.twoSided};
+            if (runState != state || draw.model != boundModel || !runFirst ||
+                *runFirst + runCount != draw.command) {
+                flush();
+                bindState(entry.variant, entry.twoSided);
+                runState = state;
+                if (draw.model != boundModel) {
+                    geometry_.bind(cmd, draw.model->geometry);
+                    boundModel = draw.model;
+                }
+                runFirst = draw.command;
+            }
+            ++runCount;
+            ++skyDiagDrawsOpaque_;
+            ++lastDrawCallCount;
+        }
+        flush();
     }
 
     // With the water out of the scene pass, the blended half waits for it:

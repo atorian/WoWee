@@ -67,13 +67,6 @@ const uint kHeaderBones = 2u;
 const uint kBoneWords = 16u;
 const int kKeyBoneSpineLow = 4;
 
-mat3 quatToMat3(vec4 q) {
-    const float x = q.x, y = q.y, z = q.z, w = q.w;
-    return mat3(1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y + w * z), 2.0 * (x * z - w * y),
-                2.0 * (x * y - w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z + w * x),
-                2.0 * (x * z + w * y), 2.0 * (y * z - w * x), 1.0 - 2.0 * (x * x + y * y));
-}
-
 // A billboard bone, as the client turns it (CM2Model::Animate, WoW.exe 3.3.5a
 // 0x82f0f0, dispatch 0x82ff3a; render spec section 3.5): in VIEW space, after
 // the bone's whole parent chain and the model's placement, against the view's

@@ -4839,9 +4839,16 @@ void Renderer::recordModelCompute(CpuStageTimes& stages) {
         m2Renderer->poseSkeletons(currentCmd, frame,
                                   characterRenderer ? characterRenderer->posedBones(frame) : PosedBones{});
     }
+    // Their view draws, written on the GPU from the frame's groups.
+    if (m2Renderer) {
+        CpuStage stage(stages, "beginFrame", "M2 view draws");
+        GpuPass pass(*vkCtx, currentCmd, "M2 view draws");
+        m2Renderer->prepareViewDraws(currentCmd, frame);
+    }
     if (skyboxModelRenderer_) {
         skyboxModelRenderer_->uploadSlotTables(currentCmd, frame);
         skyboxModelRenderer_->poseSkeletons(currentCmd, frame);
+        skyboxModelRenderer_->prepareViewDraws(currentCmd, frame);
     }
 }
 

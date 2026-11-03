@@ -89,6 +89,15 @@ struct PackedSkeleton {
 /// `boneLimit` bones at most, as the renderer draws them.
 [[nodiscard]] PackedSkeleton packSkeleton(const pipeline::M2Model& model, uint32_t boneLimit);
 
+/// A model's texture animations (M2TextureTransform), as m2_draws.comp
+/// samples them into a draw's UV transform:
+///   header   transform count, 0, transforms, globalCount, globals - the
+///            skeleton's header words, so m2_track.glsli reads it
+///   transforms  3 words each: the word of its translation, rotation and
+///            scale track (~0 for none)
+///   tracks, globals  as a skeleton's
+[[nodiscard]] std::vector<uint32_t> packTextureAnimations(const pipeline::M2Model& model);
+
 /// The emitter blob's shape (above), as m2_particles.comp reads it.
 inline constexpr uint32_t kEmitterHeaderWords = 8;
 inline constexpr uint32_t kEmitterWords = 48;
@@ -150,6 +159,14 @@ public:
     /// way. None placed, said, when there is nowhere for them: it is drawn
     /// without its particles and ribbons.
     [[nodiscard]] Emitters placeEmitters(const pipeline::M2Model& model, const char* name);
+    /// The model's texture animations packed and copied, the same way; a
+    /// Skeleton whose boneCount is the transform count. None placed, said,
+    /// when there is nowhere for them: its textures then stand still.
+    [[nodiscard]] Skeleton placeTextureAnimations(const pipeline::M2Model& model, const char* name);
+    /// A blob packed elsewhere (a model's draw list, m2_draw_pass.hpp),
+    /// copied the same way; none placed, said with what `name` is `without`
+    /// then, when there is nowhere for it.
+    [[nodiscard]] Skeleton placeBlob(const std::vector<uint32_t>& words, const char* name, const char* without);
     /// Let go by one model; its words come back once the last model holding
     /// them has let go and no frame in flight can read them.
     void release(const Skeleton& skeleton);

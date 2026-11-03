@@ -16,6 +16,7 @@
 #include "rendering/instance_random.hpp"
 #include "rendering/m2_cull_grid.hpp"
 #include "rendering/shadow_params.hpp"
+#include "rendering/m2_draw_pass.hpp"
 #include "rendering/m2_particle_pass.hpp"
 #include "rendering/particle_pool.hpp"
 #include "rendering/skeleton_pass.hpp"
@@ -198,6 +199,33 @@ struct M2ModelGPU {
     /// Its particle emitters in the same pool, which they are run from on
     /// the GPU (m2_particles.comp).
     SkeletonPool::Emitters emitters;
+    /// Its texture animations in the same pool, sampled on the GPU for the
+    /// view's draws (m2_draws.comp); none for a model without.
+    SkeletonPool::Skeleton textureAnimations;
+    /// What the opaque view draws of it at each level of detail: the draw
+    /// list in the same pool (m2_draw_pass.hpp), written whenever a batch's
+    /// material changes (M2Renderer::buildDrawList), and here what the CPU
+    /// needs of it to place and record those draws.
+    SkeletonPool::Skeleton drawList;
+    struct DrawEntry {
+        uint16_t batch = 0;
+        uint8_t variant = 0;   ///< its pipeline (M2Renderer::drawVariant)
+        bool twoSided = false;
+        bool starLayer = false;
+        bool replacesStars = false;  ///< drawn over by the client's stars (sky)
+    };
+    struct LevelDraws {
+        /// In the draw list's order.
+        std::vector<DrawEntry> entries;
+        /// The level's buckets - phase, variant and two-sided (M2Renderer::
+        /// kDrawPhaseShift) - as its entries number them, and how many of its
+        /// entries are in each; in the sky, a bucket an entry, in order.
+        std::vector<uint16_t> buckets;
+        std::vector<uint32_t> bucketCounts;
+        /// Its entries with records of their own.
+        uint32_t ownCount = 0;
+    };
+    std::array<LevelDraws, 4> levelDraws;
 
     // Skeletal animation data (kept from M2Model for bone computation)
     std::vector<pipeline::M2Bone> bones;
@@ -559,6 +587,11 @@ public:
     /// `characters` (their slot's posed bones, after they were posed); what
     /// the slot's last frame copied back is kept for update() to take.
     void poseSkeletons(VkCommandBuffer cmd, uint32_t frameIndex, const PosedBones& characters = {});
+    /// Record into `cmd`, outside a render pass and after poseSkeletons, the
+    /// extracted frame's opaque view draws: its instances' base records, and
+    /// on the GPU each model's commands and the records its batches need of
+    /// their own (M2DrawPass). The view passes then draw them by bucket.
+    void prepareViewDraws(VkCommandBuffer cmd, uint32_t frameIndex);
     /// Record into `cmd`, outside a render pass, the GPU cull of the
     /// extracted frame's guard (cull_guard.hpp) over the whole cull table.
     void dispatchCullCompute(VkCommandBuffer cmd, uint32_t frameIndex);
@@ -763,6 +796,20 @@ public:
     /// draw loops write nothing into it. A batch whose texture has no place
     /// in the texture table gets no row, said, and is not drawn.
     void writeBatchMaterial(const M2ModelGPU& model, M2ModelGPU::BatchGPU& batch);
+    /// The model's draw list (M2ModelGPU::drawList, levelDraws) written anew
+    /// from its batches as they are: after load, and after anything changes
+    /// a batch's material, pipeline or opacity.
+    void buildDrawList(M2ModelGPU& model);
+    /// Which pipeline the opaque view draws a batch with: a M2BlendPipeline,
+    /// kVariantCutout or kVariantSkyAlpha.
+    [[nodiscard]] uint8_t drawVariant(const M2ModelGPU::BatchGPU& batch) const;
+    [[nodiscard]] VkPipeline variantPipeline(uint8_t variant) const;
+    static constexpr uint8_t kVariantCutout = static_cast<uint8_t>(kM2BlendPipelineCount);
+    static constexpr uint8_t kVariantSkyAlpha = kVariantCutout + 1;
+    static constexpr uint8_t kVariantCount = kVariantSkyAlpha + 1;
+    /// A level's bucket key: phase << kDrawPhaseShift | variant << 1 | two-sided.
+    static constexpr uint16_t kDrawPhaseShift = 5;
+    static_assert(kVariantCount <= 16, "a variant in four bits of the bucket key");
     /// The sampler one batch or emitter samples a texture through, built
     /// from its own wrap flags and the sky's mip bias; null when none could
     /// be made.
@@ -1050,6 +1097,32 @@ private:
     /// none of its particles is drawn otherwise.
     ParticlePool particles_;
     M2ParticlePass particlePass_;
+    /// The view's draws, written on the GPU from the frame's groups.
+    M2DrawPass drawPass_;
+    M2DrawFrame drawFrame_;
+    /// The opaque view's buckets this frame (world): drawn in this order,
+    /// one indirect run each.
+    struct ViewBucket {
+        uint8_t variant = 0;
+        bool twoSided = false;
+        GeometryPool::Range page;   ///< a range of the page, to bind it by
+        uint32_t first = 0;         ///< its first command in the frame slot's room
+        uint32_t count = 0;
+    };
+    std::vector<ViewBucket> viewBuckets_;
+    /// The sky's draws this frame, in its model's order: each command's
+    /// place, and what decides its state and its stars.
+    struct SkyDraw {
+        const M2ModelGPU* model = nullptr;
+        M2ModelGPU::DrawEntry entry;
+        uint32_t command = 0;
+    };
+    std::vector<SkyDraw> skyDraws_;
+    /// Whether prepareViewDraws wrote this frame's view draws.
+    bool viewDrawsReady_ = false;
+    /// Where the records the view passes write themselves start: after the
+    /// base and own records prepareViewDraws placed.
+    uint32_t preparedRecordEnd_ = 0;
     bool particlesRun_[2] = {};
     /// Bumped by each update(), which ran the emitters it marked with it,
     /// over `particleDt_` seconds; and by each read of the counts.

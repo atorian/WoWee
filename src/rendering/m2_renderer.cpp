@@ -533,7 +533,8 @@ bool M2Renderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayout
     particles_.initialize(*vkCtx_);
     const char* passOwner = skyMode_ ? "M2Renderer (sky)" : "M2Renderer";
     if (!skeletonPass_.initialize(*vkCtx_, passOwner) ||
-        !particlePass_.initialize(*vkCtx_, skeletonPass_.drawSetLayout(), passOwner))
+        !particlePass_.initialize(*vkCtx_, skeletonPass_.drawSetLayout(), passOwner) ||
+        !drawPass_.initialize(*vkCtx_, passOwner))
         return false;
 
     // Instance data set layout (set 3): binding 0 = this frame's per-draw
@@ -868,8 +869,9 @@ void M2Renderer::shutdown() {
 
     // Destroy descriptor pools and layouts
     destroy(device, materialDescPool_);
-    // The skeleton and particle passes, the particles, and the skeletons
-    // (every model's came back above).
+    // The draw, skeleton and particle passes, the particles, and the
+    // skeletons (every model's came back above).
+    drawPass_.destroy();
     particlePass_.destroy();
     skeletonPass_.destroy();
     for (auto& inst : scene_->instances) releaseParticles(inst);
@@ -945,6 +947,8 @@ void M2Renderer::destroyModelGPU(uint32_t modelId, std::shared_ptr<M2ModelGPU> r
     geometry_.release(retired->geometry);
     skeletons_.release(retired->skeleton);
     skeletons_.release(retired->emitters);
+    skeletons_.release(retired->textureAnimations);
+    skeletons_.release(retired->drawList);
     for (const auto& batch : retired->batches) releaseMaterialRow(batch.materialRow);
     vkCtx_->deferAfterAllFrameFences([retired] {});
 }
@@ -1065,6 +1069,7 @@ void M2Renderer::retryPendingBatchTextures() {
         model.textureRefs.push_back(std::move(tex));
         writeBatchMaterial(model, *batch);
         batch->batchOpacity = batch->loadedOpacity;
+        buildDrawList(model);
         LOG_INFO("M2 batch shown after retry: '", model.name, "' batch ", pending.batchIndex,
                  " got '", batch->pendingTextureKey, "'");
         batch->pendingTextureKey.clear();
@@ -1155,6 +1160,7 @@ void M2Renderer::markModelAsSpellEffect(uint32_t modelId) {
         }
         it->second->collision.reset();
         for (auto& batch : it->second->batches) writeBatchMaterial((*it->second), batch);
+        buildDrawList(*it->second);
         // Spell effects MUST have bone animation for ribbons/particles to work.
         // The classifier may have set disableAnimation=true based on name tokens
         // (e.g. "chest" in HolySmite_Low_Chest.m2) - override that for spell effects.
@@ -2062,6 +2068,9 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
         gpuModel.skeleton = skeletons_.place(model, kMaxBonesPerInstance, model.name.c_str());
     // And its particle emitters, which are run on the GPU from there.
     if (!model.particleEmitters.empty()) gpuModel.emitters = skeletons_.placeEmitters(model, model.name.c_str());
+    // And its texture animations, which the view's draws sample on the GPU.
+    if (gpuModel.hasTextureAnimation)
+        gpuModel.textureAnimations = skeletons_.placeTextureAnimations(model, model.name.c_str());
 
     vkCtx_->endUploadBatch();
 
@@ -2104,6 +2113,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
     for (const auto& b : gpuModel.batches) {
         if (b.submeshLevel < 8) gpuModel.availableLODs |= (1u << b.submeshLevel);
     }
+    buildDrawList(gpuModel);
 
     for (size_t bi = 0; bi < gpuModel.batches.size(); ++bi) {
         if (!gpuModel.batches[bi].pendingTextureKey.empty())
