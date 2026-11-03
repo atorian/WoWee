@@ -253,6 +253,7 @@ void EditorApp::run() {
         rpInfo.clearValueCount = 2;
         rpInfo.pClearValues = clearValues;
 
+        viewport_.prepare(cmd);
         vkCmdBeginRenderPass(cmd, &rpInfo, VK_SUBPASS_CONTENTS_INLINE);
 
         auto ext = vkCtx->getSwapchainExtent();
@@ -272,6 +273,7 @@ void EditorApp::run() {
 
         vkCmdEndRenderPass(cmd);
         vkCtx->endFrame(cmd, imageIndex);
+        viewport_.frameSubmitted();
     }
 }
 

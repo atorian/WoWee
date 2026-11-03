@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_nonuniform_qualifier : require
 
 layout(set = 0, binding = 0) uniform PerFrame {
     mat4 view;
@@ -51,38 +52,39 @@ layout(set = 0, binding = 0) uniform PerFrame {
 /// on every layer.
 layout(constant_id = 0) const bool kAlphaTestPipeline = false;
 
-layout(set = 1, binding = 0) uniform sampler2D uTexture;
+#define TEXTURE_TABLE_SET 1
+#include "texture_table.glsli"
+#include "wmo_material.glsli"
 
-layout(set = 1, binding = 1) uniform WMOMaterial {
-    int hasTexture;
-    int alphaTest;
-    // The client's light the batch is drawn with (rendering/wmo_lighting.hpp):
-    // one of the LIGHT_ values below.
-    int light;
-    // A transition batch's second light, drawn under `light` where the vertex
-    // colour's alpha falls to 0; -1 for every other batch.
-    int transitionLight;
-    float specularIntensity;
-    int enableNormalMap;
-    int enablePOM;
-    float pomScale;
-    int pomMaxSamples;
-    float heightMapVariance;
-    float normalMapStrength;
-    int isLava;
-    float wmoAmbientR;
-    float wmoAmbientG;
-    float wmoAmbientB;
-    int emissive;
-    int hasVertexColors;
-    int receivesExteriorShadows;
-    // F_SIDN: the colour the material glows in, black without the flag.
-    float sidnR;
-    float sidnG;
-    float sidnB;
-};
+// The batch's material (wmoMaterials[vMaterial]), as the shading below
+// reads it; set first thing in main().
+uint materialTexture;
+uint materialNormalHeight;
+int hasTexture;
+int alphaTest;
+// The client's light the batch is drawn with (rendering/wmo_lighting.hpp):
+// one of the LIGHT_ values below.
+int light;
+// A transition batch's second light, drawn under `light` where the vertex
+// colour's alpha falls to 0; -1 for every other batch.
+int transitionLight;
+float specularIntensity;
+int enableNormalMap;
+int enablePOM;
+float pomScale;
+int pomMaxSamples;
+float heightMapVariance;
+float normalMapStrength;
+int isLava;
+vec3 wmoAmbient;
+int emissive;
+int hasVertexColors;
+int receivesExteriorShadows;
+// F_SIDN: the colour the material glows in, black without the flag.
+vec3 sidn;
 
-layout(set = 1, binding = 2) uniform sampler2D uNormalHeightMap;
+#define uTexture tablePlain2D(materialTexture)
+#define uNormalHeightMap tablePlain2D(materialNormalHeight)
 
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
 
@@ -93,6 +95,7 @@ layout(location = 3) in vec4 VertColor;
 layout(location = 4) in vec3 Tangent;
 layout(location = 5) in vec3 Bitangent;
 layout(location = 6) flat in uvec4 vLocalLights;
+layout(location = 7) flat in uint vMaterial;
 
 layout(location = 0) out vec4 outColor;
 
@@ -215,7 +218,7 @@ vec3 shadeBy(int mode, vec3 tex, vec3 norm, RtLight rt, float shadow) {
     // the texture multiplies it, as WoW.exe's c29 emissive does, and the sum
     // stops at twice the texture (wmo_night_glow.hpp). Every light but the
     // vertex colours alone is drawn with the shader that adds it.
-    vec3 glow = mode == LIGHT_VERTEX_COLOUR ? vec3(0.0) : vec3(sidnR, sidnG, sidnB) * lightDir.w;
+    vec3 glow = mode == LIGHT_VERTEX_COLOUR ? vec3(0.0) : sidn * lightDir.w;
     const bool glows = max(glow.r, max(glow.g, glow.b)) > 0.0;
 
     if (mode == LIGHT_VERTEX_COLOUR || mode == LIGHT_BUILDING_AMBIENT) {
@@ -223,7 +226,6 @@ vec3 shadeBy(int mode, vec3 tex, vec3 norm, RtLight rt, float shadow) {
         // MOHD is the building's base ambient; MOCV adds authored warm/cool
         // pools to it. Using max() flattened those colors into the ambient,
         // notably erasing Dalaran's blue portal and warm torch lighting.
-        vec3 wmoAmbient = vec3(wmoAmbientR, wmoAmbientG, wmoAmbientB);
         vec3 baked = hasVertexColors != 0
             ? max(wmoAmbient + 2.0 * VertColor.rgb, vec3(0.15))
             : vec3(1.0);  // Neutral modulation when no baked colors exist.
@@ -273,6 +275,28 @@ vec3 shadeBy(int mode, vec3 tex, vec3 norm, RtLight rt, float shadow) {
 }
 
 void main() {
+    {
+        const WmoMaterial m = wmoMaterials[vMaterial];
+        materialTexture = m.texture;
+        materialNormalHeight = m.normalHeight;
+        hasTexture = m.hasTexture;
+        alphaTest = m.alphaTest;
+        light = m.light;
+        transitionLight = m.transitionLight;
+        specularIntensity = m.specularIntensity;
+        enableNormalMap = m.enableNormalMap;
+        enablePOM = m.enablePOM;
+        pomScale = m.pomScale;
+        pomMaxSamples = m.pomMaxSamples;
+        heightMapVariance = m.heightMapVariance;
+        normalMapStrength = m.normalMapStrength;
+        isLava = m.isLava;
+        wmoAmbient = m.ambient.rgb;
+        emissive = m.emissive;
+        hasVertexColors = m.hasVertexColors;
+        receivesExteriorShadows = m.receivesExteriorShadows;
+        sidn = m.sidn.rgb;
+    }
     const vec3 receiverFace = receiverFaceNormal(FragPos);
     if (fogSkyBand1.w > 0.0 && length(FragPos.xy - viewPos.xy) >= fogSkyBand1.w) discard;
 

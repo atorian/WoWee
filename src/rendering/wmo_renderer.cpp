@@ -241,52 +241,34 @@ bool WMORenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayou
 
     VkDevice device = vkCtx_->getDevice();
 
-    // --- Create material descriptor set layout (set 1) ---
-    // binding 0: sampler2D (diffuse texture)
-    // binding 1: uniform buffer (WMOMaterial)
-    // binding 2: sampler2D (normal+height map)
-    std::vector<VkDescriptorSetLayoutBinding> materialBindings(3);
-    materialBindings[0] = {};
-    materialBindings[0].binding = 0;
-    materialBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    materialBindings[0].descriptorCount = 1;
-    materialBindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    materialBindings[1] = {};
-    materialBindings[1].binding = 1;
-    materialBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    materialBindings[1].descriptorCount = 1;
-    materialBindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    materialBindings[2] = {};
-    materialBindings[2].binding = 2;
-    materialBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    materialBindings[2].descriptorCount = 1;
-    materialBindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-
-    materialSetLayout_ = createDescriptorSetLayout(device, materialBindings);
-    if (!materialSetLayout_) {
-        core::Logger::getInstance().error("WMORenderer: failed to create material set layout");
-        return false;
+    // Set 1 is the device's texture table (TextureTable); a batch's textures
+    // are handles in its material row. Set 2 is the material table, read by
+    // the vertex shader (cloth) and the fragment shader.
+    materialTable_.initialize(*vkCtx_);
+    {
+        const std::vector<VkDescriptorSetLayoutBinding> bindings = {
+            {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
+             .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT}};
+        materialSetLayout_ = createDescriptorSetLayout(device, bindings);
+        const VkDescriptorPoolSize size{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 2};
+        VkDescriptorPoolCreateInfo poolInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        poolInfo.maxSets = 2;
+        poolInfo.poolSizeCount = 1;
+        poolInfo.pPoolSizes = &size;
+        if (!materialSetLayout_ || vkCreateDescriptorPool(device, &poolInfo, nullptr, &materialDescPool_) != VK_SUCCESS) {
+            LOG_ERROR("WMORenderer: could not make the material table's set layout or pool; no buildings are drawn");
+            return false;
+        }
+        const VkDescriptorSetLayout layouts[2] = {materialSetLayout_, materialSetLayout_};
+        VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        ai.descriptorPool = materialDescPool_;
+        ai.descriptorSetCount = 2;
+        ai.pSetLayouts = layouts;
+        if (vkCtx_->allocateDescriptorSets(ai, materialSet_) != VK_SUCCESS) {
+            LOG_ERROR("WMORenderer: could not allocate the material table's sets; no buildings are drawn");
+            return false;
+        }
     }
-
-    // --- Create descriptor pool ---
-    VkDescriptorPoolSize poolSizes[] = {
-        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_MATERIAL_SETS * 2 },  // diffuse + normal/height
-        { .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = MAX_MATERIAL_SETS },
-    };
-
-    VkDescriptorPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    poolInfo.maxSets = MAX_MATERIAL_SETS;
-    poolInfo.poolSizeCount = 2;
-    poolInfo.pPoolSizes = poolSizes;
-
-    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &materialDescPool_) != VK_SUCCESS) {
-        core::Logger::getInstance().error("WMORenderer: failed to create descriptor pool");
-        return false;
-    }
-    materialSlots_ = UniformSlotPool::forDevice(vkCtx_->getAllocator(), vkCtx_->getPhysicalDevice(),
-                                                sizeof(WMOMaterialUBO), 1024, "WMO materials");
 
     // --- Create pipeline layout ---
     VkPushConstantRange pushRange{};
@@ -294,7 +276,8 @@ bool WMORenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayou
     pushRange.offset = 0;
     pushRange.size = sizeof(WMOPushConstants);
 
-    std::vector<VkDescriptorSetLayout> setLayouts = { perFrameLayout, materialSetLayout_ };
+    std::vector<VkDescriptorSetLayout> setLayouts = {perFrameLayout, vkCtx_->textureTable().layout(),
+                                                     materialSetLayout_};
     pipelineLayout_ = createPipelineLayout(device, setLayouts, { pushRange });
     if (!pipelineLayout_) {
         core::Logger::getInstance().error("WMORenderer: failed to create pipeline layout");
@@ -391,13 +374,12 @@ void WMORenderer::shutdown() {
     if (collision_) collision_->clearWmo();
     scene_->instanceIndexById.clear();
 
-    // destroyGroupGPU defers its frees, and those lambdas release descriptor
-    // sets from the pool destroyed just below. Drain them here, while the pool
-    // is still valid and before the pipelines and pools go: no further frames
-    // will run to drain the queue, so anything left in it either leaks or is
-    // run later against a dead pool.
+    // destroyGroupGPU defers its frees. Drain them here, before the tables
+    // they give rows back to go: no further frames will run to drain the
+    // queue.
     vkCtx_->flushDeferredCleanup();
-    if (materialSlots_) materialSlots_->release();
+    materialTable_.destroy();
+    materialRows_.reset();
     geometry_.destroy();
 
     // Destroy pipelines
@@ -629,6 +611,8 @@ WMORenderer::ModelLoadResult WMORenderer::loadPreparedIncremental(WmoModelPrep& 
             }
             GroupResources::MergedBatch mb;
             mb.texture = tex;
+            mb.textureHandle = tex == whiteTexture_.get() ? whiteTexture_.tableHandle()
+                                                          : modelData.textures[texIndex].tableHandle();
             mb.pendingTextureIndex = pendingTexture;
             mb.hasTexture = tex != whiteTexture_.get();
             mb.alphaTest = state.blendMode == 1;
@@ -721,7 +705,7 @@ void WMORenderer::unloadModel(uint32_t id) {
     // Free GPU resources - defer because in-flight command buffers may
     // still reference this model's vertex/index buffers and descriptors.
     for (auto& group : it->second.groups) {
-        destroyGroupGPU(group, /*defer=*/true);
+        destroyGroupGPU(group);
     }
     // Its groups, GPU handles handed to the deferred deletion above, are
     // collision geometry and grids now - the bulk of a city model, let go on
@@ -1057,7 +1041,7 @@ void WMORenderer::clearInstances() {
     // already uploaded groups retire behind the same fences as full models.
     for (auto& [id, model] : scene_->loadingModels_) {
         releaseRtModel(id);
-        for (auto& group : model.groups) destroyGroupGPU(group, true);
+        for (auto& group : model.groups) destroyGroupGPU(group);
     }
     *scene_ = InstanceState{};
     if (collision_) collision_->clearWmo();
@@ -1077,7 +1061,7 @@ void WMORenderer::clearAll() {
         for (auto& [id, model] : loadedModels) {
             releaseRtModel(id);
             for (auto& group : model.groups) {
-                destroyGroupGPU(group, /*defer=*/true);
+                destroyGroupGPU(group);
             }
         }
 
@@ -1104,23 +1088,32 @@ void WMORenderer::rebuildIndexById() {
     }
 }
 
-void WMORenderer::prepareRender() {
-    if (recording_->materialVersion == appliedMaterialVersion_) return;
-    appliedMaterialVersion_ = recording_->materialVersion;
-    // These material slots are shared by frame slots. A settings change is
-    // infrequent and must wait for every earlier draw before overwriting them.
-    vkCtx_->waitIdle();
-    for (const auto& entry : recording_->depth.drawn()) for (const auto& kept : entry.groups)
-        for (const auto& mb : kept.gpu->mergedBatches) {
-            if (!mb.materialSlot) continue;
-            auto* ubo = static_cast<WMOMaterialUBO*>(mb.materialSlot.mapped);
-            ubo->enableNormalMap = recording_->normalMap;
-            ubo->enablePOM = recording_->pom;
-            ubo->pomScale = 0.012f;
-            ubo->pomMaxSamples = recording_->samples;
-            ubo->heightMapVariance = mb.heightMapVariance;
-            ubo->normalMapStrength = recording_->normalStrength;
-        }
+void WMORenderer::uploadMaterials(VkCommandBuffer cmd, uint32_t frameIndex) {
+    if (!recording_ || frameIndex >= 2) return;
+    const Frame& frame = *recording_;
+    if (frame.materialRowCount == 0) return;
+    if (!materialTable_.reserve(cmd, frame.materialRowCount)) return;
+    if (materialSetVersion_[frameIndex] != materialTable_.version()) {
+        const VkDescriptorBufferInfo info{.buffer = materialTable_.buffer(), .offset = 0,
+                                          .range = materialTable_.bytes()};
+        VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = materialSet_[frameIndex];
+        write.dstBinding = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        write.pBufferInfo = &info;
+        vkUpdateDescriptorSets(vkCtx_->getDevice(), 1, &write, 0, nullptr);
+        materialSetVersion_[frameIndex] = materialTable_.version();
+    }
+    // Not acknowledged when it fails, so the same rows come with the next frame.
+    if (materialTable_.write(cmd, frameIndex, frame.materialUpdateSlots, frame.materialUpdateRows.data()))
+        pendingMaterialSerial_ = frame.materialSerial;
+}
+
+void WMORenderer::frameSubmitted() {
+    if (pendingMaterialSerial_ == 0) return;
+    materialApplied_.store(pendingMaterialSerial_, std::memory_order_release);
+    pendingMaterialSerial_ = 0;
 }
 
 WMORenderer::GroupDraw WMORenderer::extractGroup(const GroupResources& group,
@@ -1170,12 +1163,14 @@ std::shared_ptr<const WMORenderer::Frame> WMORenderer::extract(const Camera& cam
     extractDepth(frame->depth);
     frameLights_ = nullptr;
     frame->wireframe = wireframeMode;
-    if (std::exchange(materialSettingsDirty_, false)) ++extractedMaterialVersion_;
-    frame->materialVersion = extractedMaterialVersion_;
-    frame->normalMap = normalMappingEnabled_ ? 1 : 0;
-    frame->pom = pomEnabled_ ? 1 : 0;
-    frame->samples = pomSamplesFor(pomQuality_);
-    frame->normalStrength = normalMapStrength_;
+    // The settings are in every row; changed, every row is written again.
+    if (std::exchange(materialSettingsDirty_, false)) rewriteMaterialRows();
+    // The rows ride from the first frame extracted after they were written
+    // until one that carried them is on the GPU.
+    frame->materialSerial = ++materialSerial_;
+    materialRows_.carry(frame->materialSerial, materialApplied_.load(std::memory_order_acquire),
+                        frame->materialUpdateSlots, frame->materialUpdateRows);
+    frame->materialRowCount = materialRows_.count();
     return frame;
 }
 
@@ -1360,9 +1355,12 @@ uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
     VkPipeline activePipeline = (recording_->wireframe && wireframePipeline_) ? wireframePipeline_ : opaquePipeline_;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activePipeline);
 
-    // Bind per-frame descriptor set (set 0)
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_,
-                             0, 1, &perFrameSet, 0, nullptr);
+    // The per-frame set (0), the device's texture table (1) and the material
+    // table (2), which a batch names its row of.
+    const uint32_t frameIndex = vkCtx_->getCurrentFrame();
+    if (materialSetVersion_[frameIndex] != materialTable_.version() || !materialTable_.buffer()) return 0;
+    const VkDescriptorSet sets[3] = {perFrameSet, vkCtx_->textureTable().set(), materialSet_[frameIndex]};
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 3, sets, 0, nullptr);
 
     // Track which pipeline is currently bound: 0=opaque, 1=transparent,
     // 3=alpha-tested
@@ -1370,15 +1368,11 @@ uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
 
     for (const DrawEntry& entry : list.drawn()) {
 
-        // Push model matrix. The cloth half is written per batch below; this
-        // sets the instance's matrix and clears the cloth for everything that
-        // is not one.
+        // The instance's matrix; the batch's row is pushed per batch below.
         WMOPushConstants push{};
         push.model = entry.modelMatrix;
-        push.cloth = glm::vec4(0.0f);
         vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
                             0, sizeof(WMOPushConstants), &push);
-        glm::vec4 pushedCloth(0.0f);
 
         // LOD shell groups render only beyond this distance squared (190 units)
         static constexpr float LOD_SHELL_DIST_SQ = 196.0f * 196.0f;
@@ -1415,7 +1409,7 @@ uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
 
             // Render each merged batch
             for (const auto& mb : group.mergedBatches) {
-                if (!mb.materialSet || !inLayer(mb)) continue;
+                if (mb.materialRow == GpuRowStore<WmoMaterialGPU>::kNoRow || !inLayer(mb)) continue;
 
                 // Determine which pipeline this batch needs
                 int neededPipeline = 0; // opaque
@@ -1439,21 +1433,10 @@ uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
                 }
                 faces.show(mb.twoSided);
 
-                // Bind material descriptor set (set 1)
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_,
-                                         1, 1, &mb.materialSet, 0, nullptr);
-
-                // Where this batch's cloth hangs, when it is cloth. Written
-                // only when it changes: most batches are walls and share the
-                // zero that says "not cloth".
-                const glm::vec4 wantCloth(mb.clothTop, mb.clothDrop,
-                                          mb.clothCentreX, mb.clothCentreY);
-                if (wantCloth != pushedCloth) {
-                    pushedCloth = wantCloth;
-                    vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
-                                       offsetof(WMOPushConstants, cloth),
-                                       sizeof(glm::vec4), &pushedCloth);
-                }
+                // Its material row (wmo_material.glsli), which says where its
+                // cloth hangs too.
+                vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
+                                   offsetof(WMOPushConstants, material), sizeof(uint32_t), &mb.materialRow);
 
                 // Issue draw calls for each range in this merged batch
                 for (const auto& dr : mb.draws) {
@@ -1705,47 +1688,15 @@ uint32_t WMORenderer::getTotalTriangleCount() const {
 
 // renderGroup removed - draw calls are inlined in render()
 
-void WMORenderer::destroyGroupGPU(GroupResources& group, bool defer) {
+void WMORenderer::destroyGroupGPU(GroupResources& group) {
     if (!vkCtx_) return;
     // Its ranges come back after the frames in flight; a frame still being
     // recorded holds the group's draw data, range and all.
     geometry_.release(group.geometry);
     group.geometry = {};
-
-    if (!defer) {
-        // Immediate destruction (safe after vkDeviceWaitIdle)
-        for (auto& mb : group.mergedBatches) {
-            if (mb.materialSet) {
-                vkCtx_->freeDescriptorSets(materialDescPool_, 1, &mb.materialSet);
-                mb.materialSet = VK_NULL_HANDLE;
-            }
-            if (materialSlots_) materialSlots_->free(mb.materialSlot);
-            mb.materialSlot = {};
-        }
-    } else {
-        // Deferred destruction - previous frame's command buffer may still
-        // reference these descriptor sets.
-        // Snapshot material handles (::VkBuffer = raw Vulkan handle, not RAII wrapper)
-        struct MatSnapshot { VkDescriptorSet set; UniformSlotPool::Slot slot; };
-        std::vector<MatSnapshot> mats;
-        mats.reserve(group.mergedBatches.size());
-        for (auto& mb : group.mergedBatches) {
-            mats.push_back({.set = mb.materialSet, .slot = mb.materialSlot});
-            mb.materialSet = VK_NULL_HANDLE;
-            mb.materialSlot = {};
-        }
-
-        VkDescriptorPool pool = materialDescPool_;
-        vkCtx_->deferAfterAllFrameFences([ctx = vkCtx_, pool, slots = materialSlots_, mats = std::move(mats)]() {
-            for (auto& m : mats) {
-                if (m.set) {
-                    VkDescriptorSet s = m.set;
-                    ctx->freeDescriptorSets(pool, 1, &s);
-                }
-                if (slots) slots->free(m.slot);
-            }
-        });
-    }
+    // And its material rows, after the frames that may draw with them.
+    for (auto& mb : group.mergedBatches)
+        materialRows_.release(*vkCtx_, std::exchange(mb.materialRow, GpuRowStore<WmoMaterialGPU>::kNoRow));
 }
 
 void WMORenderer::attachNormalHeightMap(const ModelData& model, uint32_t texIndex,
@@ -1754,6 +1705,7 @@ void WMORenderer::attachNormalHeightMap(const ModelData& model, uint32_t texInde
     if (texIndex >= model.normalMaps.size() || !model.normalMaps[texIndex]) return;
     const TextureRef& normals = model.normalMaps[texIndex];
     mb.normalHeightMap = normals.get();
+    mb.normalHandle = normals.tableHandle();
     mb.heightMapVariance = normals.info().heightVariance;
 }
 
@@ -1769,16 +1721,27 @@ void WMORenderer::createMergedBatchMaterial(const ModelData& model, const GroupR
         ? WmoBatchLighting{ .light = WmoLight::VertexColour }
         : mb.lighting;
 
-    // Its parameters, in a slot rather than a buffer of its own.
-    mb.materialSlot = materialSlots_ ? materialSlots_->allocate() : UniformSlotPool::Slot{};
-    if (!mb.materialSlot) {
-        // The pool has said why; a batch with no parameters is not drawn.
-        mb.materialSet = VK_NULL_HANDLE;
+    // Its textures' places, its own where they are valid and the fallbacks
+    // where not - not merely non-null: a texture whose upload or view failed
+    // sampled through a live descriptor is undefined behaviour that reaches
+    // an NVIDIA driver as a lost device (#123). A batch even whose fallback
+    // has no place is not drawn: an unlit wall costs a wall, a null view the
+    // device.
+    const auto handle = [](const VkTexture* wanted, TextureHandle wantedHandle, const TextureRef& fallback) {
+        return wanted && wanted->isValid() && wantedHandle != kNoTextureHandle ? wantedHandle
+                                                                               : fallback.tableHandle();
+    };
+    WmoMaterialGPU matData{};
+    matData.texture = handle(mb.texture, mb.textureHandle, whiteTexture_);
+    matData.normalHeight = handle(mb.normalHeightMap, mb.normalHandle, flatNormalTexture_);
+    if (matData.texture == kNoTextureHandle || matData.normalHeight == kNoTextureHandle) {
+        static core::LogBudget budget(8, "WMO batches with no texture place");
+        if (budget.take())
+            LOG_WARNING("WMO ", model.id, ": a batch's texture has no place in the texture table - the batch is "
+                        "not drawn");
+        materialRows_.release(*vkCtx_, std::exchange(mb.materialRow, GpuRowStore<WmoMaterialGPU>::kNoRow));
         return;
     }
-
-    // Write material params
-    WMOMaterialUBO matData{};
     matData.hasTexture = mb.hasTexture ? 1 : 0;
     matData.alphaTest = mb.alphaTest ? 1 : 0;
     matData.light = static_cast<int32_t>(lighting.light);
@@ -1788,9 +1751,9 @@ void WMORenderer::createMergedBatchMaterial(const ModelData& model, const GroupR
     matData.hasVertexColors = (group.groupFlags & pipeline::kWMOGroupHasVertexColors) != 0 ? 1 : 0;
     matData.specularIntensity = 0.5f;
     // MOMT colours are BGRA bytes.
-    matData.sidnR = static_cast<float>((mb.sidnColor >> 16) & 0xffu) / 255.0f;
-    matData.sidnG = static_cast<float>((mb.sidnColor >> 8) & 0xffu) / 255.0f;
-    matData.sidnB = static_cast<float>(mb.sidnColor & 0xffu) / 255.0f;
+    matData.sidn = glm::vec4(static_cast<float>((mb.sidnColor >> 16) & 0xffu) / 255.0f,
+                             static_cast<float>((mb.sidnColor >> 8) & 0xffu) / 255.0f,
+                             static_cast<float>(mb.sidnColor & 0xffu) / 255.0f, 0.0f);
     matData.enableNormalMap = normalMappingEnabled_ ? 1 : 0;
     matData.enablePOM = pomEnabled_ ? 1 : 0;
     matData.pomScale = 0.012f;
@@ -1798,67 +1761,20 @@ void WMORenderer::createMergedBatchMaterial(const ModelData& model, const GroupR
     matData.heightMapVariance = mb.heightMapVariance;
     matData.normalMapStrength = normalMapStrength_;
     matData.isLava = mb.isLava ? 1 : 0;
-    matData.wmoAmbientR = model.wmoAmbientColor.r;
-    matData.wmoAmbientG = model.wmoAmbientColor.g;
-    matData.wmoAmbientB = model.wmoAmbientColor.b;
+    matData.ambient = glm::vec4(model.wmoAmbientColor, 0.0f);
     matData.emissive = static_cast<int32_t>(mb.emissiveLevel);
-    memcpy(mb.materialSlot.mapped, &matData, sizeof(matData));
+    matData.cloth = glm::vec4(mb.clothTop, mb.clothDrop, mb.clothCentreX, mb.clothCentreY);
+    if (mb.materialRow == GpuRowStore<WmoMaterialGPU>::kNoRow) mb.materialRow = materialRows_.place();
+    materialRows_.write(mb.materialRow, matData);
+}
 
-    // Allocate and write descriptor set
-    mb.materialSet = allocateMaterialSet();
-    // Valid, not merely non-null. descriptorInfo() returns the
-    // texture's handles as they are, so one whose upload or view
-    // creation failed writes VK_NULL_HANDLE into a live descriptor and
-    // declares SHADER_READ_ONLY_OPTIMAL over it - undefined behaviour
-    // that reaches an NVIDIA driver as a lost device. See #123.
-    //
-    // The set is dropped rather than written when even the fallback is
-    // unsampleable, and the render pass already skips a batch with no
-    // set: an unlit wall costs a wall, a null view costs the device.
-    const auto pick = [](VkTexture* wanted, VkTexture* fallback) -> VkTexture* {
-        if (wanted && wanted->isValid()) return wanted;
-        return (fallback && fallback->isValid()) ? fallback : nullptr;
-    };
-    VkTexture* texToUse = pick(mb.texture, whiteTexture_.get());
-    VkTexture* nhMap = pick(mb.normalHeightMap, flatNormalTexture_.get());
-    if ((!texToUse || !nhMap) && mb.materialSet) {
-        vkCtx_->freeDescriptorSets(materialDescPool_, 1, &mb.materialSet);
-        mb.materialSet = VK_NULL_HANDLE;
+void WMORenderer::rewriteMaterialRows() {
+    for (auto* models : {&loadedModels, &scene_->loadingModels_}) {
+        for (auto& [id, model] : *models) {
+            for (auto& group : model.groups)
+                for (auto& mb : group.mergedBatches) createMergedBatchMaterial(model, group, mb);
+        }
     }
-    if (!mb.materialSet) return;
-
-    VkDescriptorImageInfo imgInfo = texToUse->descriptorInfo();
-
-    VkDescriptorBufferInfo bufInfo{};
-    bufInfo.buffer = mb.materialSlot.buffer;
-    bufInfo.offset = mb.materialSlot.offset;
-    bufInfo.range = sizeof(WMOMaterialUBO);
-
-    VkDescriptorImageInfo nhImgInfo = nhMap->descriptorInfo();
-
-    VkWriteDescriptorSet writes[3] = {};
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = mb.materialSet;
-    writes[0].dstBinding = 0;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[0].descriptorCount = 1;
-    writes[0].pImageInfo = &imgInfo;
-
-    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = mb.materialSet;
-    writes[1].dstBinding = 1;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    writes[1].descriptorCount = 1;
-    writes[1].pBufferInfo = &bufInfo;
-
-    writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[2].dstSet = mb.materialSet;
-    writes[2].dstBinding = 2;
-    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[2].descriptorCount = 1;
-    writes[2].pImageInfo = &nhImgInfo;
-
-    vkUpdateDescriptorSets(vkCtx_->getDevice(), 3, writes, 0, nullptr);
 }
 
 void WMORenderer::retryPendingTextures() {
@@ -1895,11 +1811,10 @@ void WMORenderer::retryPendingTextures() {
                 continue;
             }
 
-            // The old set and buffer may still be read by a frame in flight, so
-            // the batch gets new ones and the old go once every slot has fenced.
-            const VkDescriptorSet oldSet = mb.materialSet;
-            const UniformSlotPool::Slot oldSlot = mb.materialSlot;
+            // Its row is rewritten: the frames in flight draw with the row as
+            // they carried it.
             mb.texture = loaded.diffuse.get();
+            mb.textureHandle = loaded.diffuse.tableHandle();
             model.textures[texIndex] = std::move(loaded.diffuse);
             if (texIndex < model.normalMaps.size()) model.normalMaps[texIndex] = std::move(loaded.normalHeight);
             mb.hasTexture = true;
@@ -1907,14 +1822,6 @@ void WMORenderer::retryPendingTextures() {
             attachNormalHeightMap(model, texIndex, mb);
             createMergedBatchMaterial(model, group, mb);
             group.allUntextured = false;
-            VkDescriptorPool pool = materialDescPool_;
-            vkCtx_->deferAfterAllFrameFences([ctx = vkCtx_, pool, oldSet, oldSlot, slots = materialSlots_]() {
-                if (oldSet) {
-                    VkDescriptorSet set = oldSet;
-                    ctx->freeDescriptorSets(pool, 1, &set);
-                }
-                if (slots) slots->free(oldSlot);
-            });
             core::Logger::getInstance().info("WMO ", model.id, " got texture '",
                                              model.textureNames[texIndex], "' on a retry");
             pending[p] = pending.back();
@@ -1929,22 +1836,6 @@ void WMORenderer::retryPendingTextures() {
     }
 }
 
-VkDescriptorSet WMORenderer::allocateMaterialSet() {
-    if (!materialDescPool_ || !materialSetLayout_) return VK_NULL_HANDLE;
-
-    VkDescriptorSetAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocInfo.descriptorPool = materialDescPool_;
-    allocInfo.descriptorSetCount = 1;
-    allocInfo.pSetLayouts = &materialSetLayout_;
-
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    if (vkCtx_->allocateDescriptorSets(allocInfo, &set) != VK_SUCCESS) {
-        core::Logger::getInstance().warning("WMORenderer: failed to allocate material descriptor set");
-        return VK_NULL_HANDLE;
-    }
-    return set;
-}
 
 bool WMORenderer::isGroupVisible(const GroupResources& group, const glm::mat4& modelMatrix,
                                  const Camera& camera) const {

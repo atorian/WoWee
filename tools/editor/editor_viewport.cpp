@@ -720,6 +720,25 @@ void EditorViewport::clearGhostPreview() {
     }
 }
 
+void EditorViewport::prepare(VkCommandBuffer cmd) {
+    const uint32_t frame = vkCtx_->getCurrentFrame();
+    if (m2Renderer_) {
+        m2Renderer_->useFrame(m2Renderer_->extract(*camera_, "editor", {}, 0.0f, glm::mat4(0.0f), 0.0f));
+        m2Renderer_->uploadSlotTables(cmd, frame);
+        m2Renderer_->poseSkeletons(cmd, frame);
+        m2Renderer_->prepareViewDraws(cmd, frame);
+    }
+    if (wmoRenderer_) {
+        wmoRenderer_->useFrame(wmoRenderer_->extract(*camera_, camera_->getPosition(), {}));
+        wmoRenderer_->uploadMaterials(cmd, frame);
+    }
+}
+
+void EditorViewport::frameSubmitted() {
+    if (m2Renderer_) m2Renderer_->frameSubmitted();
+    if (wmoRenderer_) wmoRenderer_->frameSubmitted();
+}
+
 void EditorViewport::render(VkCommandBuffer cmd) {
     updatePerFrameUBO();
 
@@ -729,16 +748,8 @@ void EditorViewport::render(VkCommandBuffer cmd) {
     const auto terrain = terrainRenderer_->extract(*camera_, {});
     terrainRenderer_->recordView(cmd, perFrameSet, terrain);
 
-    if (m2Renderer_) {
-        m2Renderer_->useFrame(m2Renderer_->extract(*camera_, {}, 0.0f, glm::mat4(0.0f), 0.0f));
-        m2Renderer_->prepareRender(frame, *camera_);
-        m2Renderer_->render(cmd, perFrameSet, *camera_);
-    }
-    if (wmoRenderer_) {
-        wmoRenderer_->useFrame(wmoRenderer_->extract(*camera_, camera_->getPosition(), {}));
-        wmoRenderer_->prepareRender();
-        wmoRenderer_->render(cmd, perFrameSet, *camera_);
-    }
+    if (m2Renderer_) m2Renderer_->render(cmd, perFrameSet, *camera_);
+    if (wmoRenderer_) wmoRenderer_->render(cmd, perFrameSet, *camera_);
 
     waterRenderer_.render(cmd, perFrameSet);
 

@@ -81,9 +81,11 @@ struct GPUPushConstants {
 /// matrix: (top z, drop, centre x, centre y) in the model's local space.
 struct WMOPushConstants {
     glm::mat4 model;
-    glm::vec4 cloth{0.0f};
     /// The point lights that reach the group being drawn (local_lights.glsli).
     LocalLightSet localLights = kNoLocalLights;
+    /// The batch's row of the material table (wmo_material.glsli).
+    uint32_t material = 0;
+    uint32_t pad[3] = {};
 };
 
 // Push constants for the terrain's, the buildings' and the characters'
