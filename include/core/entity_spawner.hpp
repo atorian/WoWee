@@ -475,7 +475,8 @@ private:
         bool parsesModel = false;
         float x, y, z, orientation;
         float scale = 1.0f;
-        std::shared_ptr<pipeline::M2Model> model;
+        /// The unit model cache's parse, shared with whoever else draws it.
+        std::shared_ptr<const pipeline::M2Model> model;
         std::unordered_map<std::string, pipeline::BLPImage> predecodedTextures;
         bool valid = false;
         bool permanent_failure = false;

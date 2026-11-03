@@ -106,6 +106,10 @@ public:
     bool loadModel(pipeline::M2Model&& model, uint32_t id);
     /// For a caller that keeps using its model: loads a copy of it.
     bool loadModel(const pipeline::M2Model& model, uint32_t id);
+    /// Shares a parse others hold too - pipeline::M2ModelCache's - and copies
+    /// nothing of it. The portrait copied the race model out of the cache on
+    /// every target it was shown, 50-110 ms a click.
+    bool loadModel(std::shared_ptr<const pipeline::M2Model> model, uint32_t id);
 
     /// `reservedId`, when not 0, is the id SceneCommands handed out for this
     /// instance (reserveInstanceId); otherwise a new one is taken.
@@ -610,6 +614,9 @@ private:
     void recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
                              const std::vector<DrawCharacter>& list);
 
+    /// Every loadModel's work. `ownMesh` is the parse itself when nobody else
+    /// holds it: its vertices and indices are let go once they are on the GPU.
+    bool uploadModel(std::shared_ptr<const pipeline::M2Model> data, pipeline::M2Model* ownMesh, uint32_t id);
     void setupModelBuffers(M2ModelGPU& gpuModel);
     void calculateBindPose(M2ModelGPU& gpuModel);
     /// One instance's clock: its sequence and its global sequences.

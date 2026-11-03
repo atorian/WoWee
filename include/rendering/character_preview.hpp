@@ -15,7 +15,7 @@
 #include <vector>
 
 namespace wowee {
-namespace pipeline { class AssetManager; class GameTables; struct M2Model; }
+namespace pipeline { class AssetManager; class GameTables; class M2ModelCache; struct M2Model; }
 namespace rendering {
 
 class CharacterRenderer;
@@ -37,7 +37,16 @@ public:
     /// drawn into a circle fifty pixels across. Defaults to the paperdoll's,
     /// which is what every caller wanted before there was a choice.
     bool initialize(pipeline::AssetManager* am, const pipeline::GameTables& tables,
-                    int width = 640, int height = 800);
+                    pipeline::M2ModelCache& models, int width = 640, int height = 800);
+    /// For a view drawn in the world - a portrait: models are asked of the
+    /// cache and parsed on its workers, and a load whose models are not in
+    /// yet does nothing and leaves waitingForModels() true, to be called
+    /// again. Otherwise a load waits for its models.
+    void setModelsInBackground(bool background) { modelsInBackground_ = background; }
+    /// The last loads stopped for a model still being parsed. Cleared by
+    /// clearWaiting(), before the loads that are to be asked about.
+    [[nodiscard]] bool waitingForModels() const { return waiting_; }
+    void clearWaiting() { waiting_ = false; }
     void shutdown();
 
     bool loadCharacter(game::Race race, game::Gender gender,
@@ -115,8 +124,9 @@ private:
     std::unordered_set<uint16_t> buildBaseGeosets();
     [[nodiscard]] uint16_t selectedHairScalpGeoset() const;
 
-    // Read an M2 (plus its .skin for WotLK-era models) through the asset manager.
-    bool loadPreviewM2(const std::string& m2Path, pipeline::M2Model& outModel);
+    // The shared cache's parse of an M2, its skin and sequences with it; null
+    // when it is not there or, drawing in the world, still on its way.
+    std::shared_ptr<const pipeline::M2Model> loadPreviewM2(const std::string& m2Path);
     // Hang the character's weapons off the preview model's hand attachments.
     void attachWeapons(const std::vector<game::EquipmentItem>& equipment);
     // Put the weapon's enchant glint on it (char enum reports the ItemVisual id directly).
@@ -127,6 +137,9 @@ private:
 
     pipeline::AssetManager* assetManager_ = nullptr;
     const pipeline::GameTables* gameTables_ = nullptr;
+    pipeline::M2ModelCache* models_ = nullptr;
+    bool modelsInBackground_ = false;
+    bool waiting_ = false;
     VkContext* vkCtx_ = nullptr;
     std::unique_ptr<CharacterRenderer> charRenderer_;
     std::unique_ptr<Camera> camera_;

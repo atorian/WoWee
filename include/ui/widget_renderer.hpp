@@ -84,6 +84,9 @@ public:
     bool artResolves(const std::string& path, float& w, float& h) {
         return textureSize(path, w, h);
     }
+    /// The interface art at `path`, as a texture to draw; none until it has
+    /// been read and uploaded, which this asks for without waiting.
+    [[nodiscard]] VkDescriptorSet artTexture(const std::string& path) { return texture(path); }
 
 private:
     /// Request a path, then return its already-ready descriptor. A queued

@@ -1559,6 +1559,13 @@ wowee_add_test(test_dds_override
     SOURCES test_dds_override.cpp)
 target_link_libraries(test_dds_override PRIVATE wowee_pipeline wowee_base)
 
+# ── test_m2_model_cache ──────────────────────────────────────
+# A unit model is parsed once, off the frame, and shared by everyone who
+# draws it.
+wowee_add_test(test_m2_model_cache
+    SOURCES test_m2_model_cache.cpp)
+target_link_libraries(test_m2_model_cache PRIVATE wowee_pipeline wowee_base)
+
 # ── test_asset_file_cache ────────────────────────────────────
 # A texture read to be uploaded is not kept a second time in the file cache;
 # a model file read for its own sake is.

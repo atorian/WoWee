@@ -19,6 +19,27 @@ UnitPortrait::UnitPortrait() = default;
 
 UnitPortrait::~UnitPortrait() = default;
 
+bool UnitPortrait::ensurePreview(pipeline::AssetManager* assets, rendering::Renderer* renderer) {
+    if (preview_) return true;
+    renderer->drainFrames();
+    preview_ = std::make_shared<rendering::CharacterPreview>();
+    // Small: this is drawn into a circle a few dozen pixels across, and the
+    // cost of the pass scales with the target.
+    initialized_ = preview_->initialize(assets, renderer->gameTables(), renderer->unitModels(), targetWidth_,
+                                        targetHeight_);
+    if (!initialized_) {
+        LOG_WARNING("UnitPortrait: could not build the offscreen view");
+        preview_.reset();
+        return false;
+    }
+    // Drawn in the world: its models come from the cache's workers, and a
+    // unit whose model is not in yet shows the frame's default face.
+    preview_->setModelsInBackground(true);
+    renderer->registerComposite(preview_);
+    registered_ = true;
+    return true;
+}
+
 void UnitPortrait::update(game::GameHandler& gameHandler,
                           pipeline::AssetManager* assets,
                           rendering::Renderer* renderer, float deltaTime) {
@@ -32,20 +53,7 @@ void UnitPortrait::update(game::GameHandler& gameHandler,
     }
     if (!self) return;
 
-    if (!preview_) {
-        renderer->drainFrames();
-        preview_ = std::make_shared<rendering::CharacterPreview>();
-        // Small: this is drawn into a circle a few dozen pixels across, and the
-        // cost of the pass scales with the target.
-        initialized_ = preview_->initialize(assets, renderer->gameTables(), targetWidth_, targetHeight_);
-        if (!initialized_) {
-            LOG_WARNING("UnitPortrait: could not build the offscreen view");
-            preview_.reset();
-            return;
-        }
-        renderer->registerComposite(preview_);
-        registered_ = true;
-    }
+    if (!ensurePreview(assets, renderer)) return;
 
     // What they are wearing now, not what they wore when they logged in.
     //
@@ -85,6 +93,7 @@ void UnitPortrait::update(game::GameHandler& gameHandler,
         // Declared before the model loads, so the racial backdrop is never
         // built in the first place.
         preview_->setTransparentBackground(true);
+        preview_->clearWaiting();
         if (preview_->loadCharacter(self->race, self->gender, skin, face,
                                     hairStyle, hairColor, self->facialFeatures,
                                     self->useFemaleModel)) {
@@ -99,15 +108,18 @@ void UnitPortrait::update(game::GameHandler& gameHandler,
                 preview_->resetView();
             }
         }
-        // Logged because a portrait that rebuilds every frame looks like one
-        // that flickers, and the two are indistinguishable from outside.
-        LOG_INFO("UnitPortrait: rebuilt for guid ", self->guid,
-                 " appearance ", self->appearanceBytes);
-        loadedCreaturePath_.clear();
-        loadedGuid_ = self->guid;
-        loadedAppearance_ = self->appearanceBytes;
-        loadedFacialFeatures_ = self->facialFeatures;
-        loadedEquipHash_ = equipHash;
+        // A model still being parsed: built again next frame, once it is in.
+        if (!preview_->waitingForModels()) {
+            // Logged because a portrait that rebuilds every frame looks like one
+            // that flickers, and the two are indistinguishable from outside.
+            LOG_INFO("UnitPortrait: rebuilt for guid ", self->guid,
+                     " appearance ", self->appearanceBytes);
+            loadedCreaturePath_.clear();
+            loadedGuid_ = self->guid;
+            loadedAppearance_ = self->appearanceBytes;
+            loadedFacialFeatures_ = self->facialFeatures;
+            loadedEquipHash_ = equipHash;
+        }
     }
 
     preview_->update(deltaTime);
@@ -121,18 +133,7 @@ bool UnitPortrait::updatePlayer(uint8_t race, uint8_t gender,
                                 rendering::Renderer* renderer, float deltaTime) {
     if (!assets || !renderer) return false;
 
-    if (!preview_) {
-        renderer->drainFrames();
-        preview_ = std::make_shared<rendering::CharacterPreview>();
-        initialized_ = preview_->initialize(assets, renderer->gameTables(), targetWidth_, targetHeight_);
-        if (!initialized_) {
-            LOG_WARNING("UnitPortrait: could not build the offscreen view");
-            preview_.reset();
-            return false;
-        }
-        renderer->registerComposite(preview_);
-        registered_ = true;
-    }
+    if (!ensurePreview(assets, renderer)) return false;
 
     // The same three keys the player's own portrait compares, minus the guid -
     // this is asked per unit and the caller has already decided which.
@@ -150,6 +151,7 @@ bool UnitPortrait::updatePlayer(uint8_t race, uint8_t gender,
         const uint8_t hairColor = (appearanceBytes >> 24) & 0xFF;
 
         preview_->setTransparentBackground(true);
+        preview_->clearWaiting();
         if (preview_->loadCharacter(static_cast<game::Race>(race),
                                     static_cast<game::Gender>(gender),
                                     skin, face, hairStyle, hairColor,
@@ -165,6 +167,8 @@ bool UnitPortrait::updatePlayer(uint8_t race, uint8_t gender,
             if (framing_ == Framing::Face) preview_->setPortraitFraming();
             else                           preview_->resetView();
         }
+        // A model still being parsed: built again next frame, once it is in.
+        if (preview_->waitingForModels()) return false;
         LOG_INFO("UnitPortrait: rebuilt for player race ", static_cast<int>(race),
                  " appearance ", appearanceBytes);
         loadedCreaturePath_.clear();
@@ -189,24 +193,17 @@ bool UnitPortrait::updateCreature(const std::string& m2Path,
                                   float deltaTime) {
     if (!assets || !renderer || m2Path.empty()) return false;
 
-    if (!preview_) {
-        renderer->drainFrames();
-        preview_ = std::make_shared<rendering::CharacterPreview>();
-        initialized_ = preview_->initialize(assets, renderer->gameTables(), targetWidth_, targetHeight_);
-        if (!initialized_) {
-            LOG_WARNING("UnitPortrait: could not build the offscreen view");
-            preview_.reset();
-            return false;
-        }
-        renderer->registerComposite(preview_);
-        registered_ = true;
-    }
+    if (!ensurePreview(assets, renderer)) return false;
 
     if (loadedCreaturePath_ != m2Path) {
         // Declared before the model loads, so the racial backdrop is never
         // built in the first place - the same order loadCharacter needs.
         preview_->setTransparentBackground(true);
-        if (preview_->loadCreature(m2Path, skins)) {
+        preview_->clearWaiting();
+        const bool loaded = preview_->loadCreature(m2Path, skins);
+        // A model still being parsed: built again next frame, once it is in.
+        if (preview_->waitingForModels()) return false;
+        if (loaded) {
             if (framing_ == Framing::Face) {
                 preview_->setPortraitFraming();
             } else {

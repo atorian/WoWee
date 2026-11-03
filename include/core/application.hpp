@@ -75,7 +75,9 @@ using WorldMap = world_map::WorldMapFacade;
 namespace ui { class UIManager; class MapWindow; class WeatherPanel; class AgentControls; }
 namespace auth { class AuthHandler; }
 namespace game { class GameHandler; class ExpansionRegistry; struct ExpansionProfile; struct EzWowPatch; }
-namespace pipeline { class AssetManager; class ArchiveLayer; class DBCLayout; struct M2Model; struct WMOModel; }
+namespace pipeline {
+class AssetManager; class ArchiveLayer; class DBCLayout; class M2ModelCache; struct M2Model; struct WMOModel;
+}
 namespace audio { enum class VoiceType; class AudioCoordinator; }
 namespace addons { class AddonManager; class AddonCatalog; class LuaErrorReport; }
 
@@ -489,6 +491,8 @@ private:
     // The walls other players run into between their movement reports.
     std::unique_ptr<game::MovementCollision> movementCollision_;
     std::unique_ptr<pipeline::AssetManager> assetManager;
+    /// Every unit model parsed once for its file, for whoever draws it.
+    std::unique_ptr<pipeline::M2ModelCache> unitModels_;
     /// The addons on disk and which are switched on: the player's, not a
     /// character's. Each character's interface loads from it.
     std::unique_ptr<addons::AddonCatalog> addonCatalog_;

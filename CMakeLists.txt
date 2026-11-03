@@ -1066,6 +1066,7 @@ set(WOWEE_SOURCES
     src/ui/settings_schema.cpp
     src/pipeline/item_textures.cpp
     src/pipeline/m2_asset_loader.cpp
+    src/pipeline/m2_model_cache.cpp
     src/pipeline/dbc_layout.cpp
     src/pipeline/required_table.cpp
     src/pipeline/spell_icon_paths.cpp

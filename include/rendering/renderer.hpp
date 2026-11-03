@@ -40,7 +40,7 @@
 
 namespace wowee {
 namespace rendering { class VkContext; }
-namespace pipeline { class AssetManager; class GameTables; }
+namespace pipeline { class AssetManager; class GameTables; class M2ModelCache; }
 namespace collision { class CollisionWorld; class MovementWorld; }
 
 namespace rendering {
@@ -289,6 +289,11 @@ public:
     /// Stops the game when none were handed over: a part read a table before
     /// the client wired them, which is a bug in the wiring.
     [[nodiscard]] const pipeline::GameTables& gameTables() const;
+    /// Every unit model parsed once for its file (pipeline/m2_model_cache.hpp),
+    /// for the character previews to draw from; owned by whoever owns the
+    /// assets.
+    void setUnitModels(pipeline::M2ModelCache& models) { unitModels_ = &models; }
+    [[nodiscard]] pipeline::M2ModelCache& unitModels() const { return *unitModels_; }
 
     // Sub-system accessors (§4.2)
     LevelUpEffect* getLevelUpEffect() const { return levelUpEffect.get(); }
@@ -646,6 +651,7 @@ private:
     std::vector<pipeline::CustomZoneInfo> customZones_;
     pipeline::AssetManager* cachedAssetManager = nullptr;
     const pipeline::GameTables* gameTables_ = nullptr;
+    pipeline::M2ModelCache* unitModels_ = nullptr;
 
     // Post-process pipeline - owns all FSR/FXAA/FSR2 state (extracted §4.3)
     std::unique_ptr<PostProcessPipeline> postProcessPipeline_;

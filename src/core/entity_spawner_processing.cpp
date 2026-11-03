@@ -10,6 +10,7 @@
 #include "core/coordinates.hpp"
 #include "core/logger.hpp"
 #include "rendering/renderer.hpp"
+#include "pipeline/m2_model_cache.hpp"
 #include "rendering/scene_commands.hpp"
 #include "core/player_view.hpp"
 #include "rendering/camera_controller.hpp"
@@ -133,10 +134,10 @@ void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
             modelUploads++;
 
             // Use pre-decoded BLP cache to skip main-thread texture decode.
-            // The worker's parse is handed over, not copied: nothing reads it after.
+            // The cache's parse, shared with the portrait rather than copied.
             auto uploadStart = std::chrono::steady_clock::now();
             charRenderer->setPredecodedBLPCache(&result.predecodedTextures, true);
-            if (!charRenderer->loadModel(std::move(*result.model), result.modelId)) {
+            if (!charRenderer->loadModel(result.model, result.modelId)) {
                 charRenderer->setPredecodedBLPCache(nullptr);
                 assets_.unloadableCreaturePaths_.insert(result.modelKey);
                 assets_.nonRenderableCreatureDisplayIds_.insert(result.displayId);
@@ -452,7 +453,8 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited, rendering::CpuStag
 
             AsyncCreatureLoad load;
             load.future = spawns_->jobs_.submit(s.token, 
-                [am, tables = &tables_, m2Path, modelKey, parseModel, modelId, s, displayCopy,
+                [am, unitModels = &renderer_->unitModels(), tables = &tables_, m2Path, modelKey, parseModel,
+                 modelId, s, displayCopy,
                  extraCopy](const JobGroup::Token& jobToken) -> PreparedCreatureModel {
                     PreparedCreatureModel result{};
                     result.token = jobToken;
@@ -583,20 +585,18 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited, rendering::CpuStag
                     result.scale = s.scale;
 
                     // The file's model, when this display is the first of it.
-                    std::shared_ptr<pipeline::M2Model> model;
+                    std::shared_ptr<const pipeline::M2Model> model;
                     if (parseModel) {
-                        const auto m2Bytes = am->readFileShared(m2Path);
-                        if (!m2Bytes) {
+                        // From the cache every unit model is parsed by, with
+                        // its skin and every external sequence: the portrait
+                        // draws this file from the same parse.
+                        model = unitModels->load(m2Path);
+                        if (!model) {
                             result.permanent_failure = true;
                             return result;
                         }
-                        const std::vector<uint8_t>& m2Data = *m2Bytes;
-
-                        model = std::make_shared<pipeline::M2Model>(pipeline::M2Loader::load(m2Data));
-                        if (model->name.empty()) model->name = m2Path;
                         if (model->vertices.empty()) {
-                            LOG_WARNING("Creature model parsed to nothing: displayId=",
-                                        s.displayId, " ", m2Path, " (", m2Data.size(), " bytes)");
+                            LOG_WARNING("Creature model parsed to nothing: displayId=", s.displayId, " ", m2Path);
                             result.permanent_failure = true;
                             return result;
                         }
@@ -620,18 +620,6 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited, rendering::CpuStag
                                           " submeshes=", model->batches.size());
                             }
                         }
-
-                        // Load skin file
-                        if (model->version >= 264) {
-                            std::string skinPath = pipeline::skinPathForM2(m2Path);
-                            if (const auto skinData = am->readFileShared(skinPath)) {
-                                pipeline::M2Loader::loadSkin(*skinData, *model);
-                            }
-                        }
-
-                        // This runs on a background thread, so every external
-                        // sequence can be loaded.
-                        pipeline::loadExternalAnimations(*am, m2Path, m2Data, *model);
 
                         // Pre-decode model textures on background thread
                         for (const auto& tex : model->textures) {

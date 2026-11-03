@@ -18,6 +18,7 @@
 #include "core/geoset_rules.hpp"
 #include "pipeline/item_textures.hpp"
 #include "pipeline/m2_asset_loader.hpp"
+#include "pipeline/m2_model_cache.hpp"
 #include "core/logger.hpp"
 #include "core/application.hpp"
 #include <imgui.h>
@@ -182,9 +183,10 @@ std::unordered_set<uint16_t> CharacterPreview::buildBaseGeosets() {
 }
 
 bool CharacterPreview::initialize(pipeline::AssetManager* am, const pipeline::GameTables& tables,
-                                  int width, int height) {
+                                  pipeline::M2ModelCache& models, int width, int height) {
     assetManager_ = am;
     gameTables_ = &tables;
+    models_ = &models;
     // If already initialized with valid resources, reuse them.
     // This avoids destroying GPU resources that may still be referenced by
     // an in-flight command buffer (composite request recorded earlier this frame).
@@ -534,6 +536,16 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
         return false;
     }
 
+    std::string m2Path = game::getPlayerModelPath(race, gender, useFemaleModel);
+    // Parsed by the shared cache, its skin and sequences with it; until it is,
+    // the view keeps what it has and waitingForModels() says so.
+    const auto parsed = loadPreviewM2(m2Path);
+    if (!parsed) {
+        if (!waiting_) LOG_WARNING("CharacterPreview: failed to read M2: ", m2Path);
+        return false;
+    }
+    const pipeline::M2Model& model = *parsed;
+
     // Remove existing instance.
     // removeInstance retires bones after all frame fences, including commands
     // recorded by composite request earlier in this frame.
@@ -541,25 +553,6 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
         charRenderer_->removeInstance(instanceId_);
         instanceId_ = 0;
         modelLoaded_ = false;
-    }
-
-    std::string m2Path = game::getPlayerModelPath(race, gender, useFemaleModel);
-
-    auto m2Data = assetManager_->readFile(m2Path);
-    if (m2Data.empty()) {
-        LOG_WARNING("CharacterPreview: failed to read M2: ", m2Path);
-        return false;
-    }
-
-    auto model = pipeline::M2Loader::load(m2Data);
-    if (model.name.empty()) model.name = m2Path;
-
-    // M2 version 264+ (WotLK) stores submesh/bone data in external .skin files.
-    // Earlier versions (Classic ≤256, TBC ≤263) have skin data embedded in the M2.
-    std::string skinPath = pipeline::skinPathForM2(m2Path);
-    auto skinData = assetManager_->readFile(skinPath);
-    if (!skinData.empty() && model.version >= 264) {
-        pipeline::M2Loader::loadSkin(skinData, model);
     }
 
     if (!model.isValid()) {
@@ -653,37 +646,12 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
                  " underwear=", underwearPaths.size(), " textures");
     }
 
-    // Assign texture filenames on model before GPU upload
-    // pipeline/char_sections.hpp fills the runtime slots. This copy still
-    // guarded types 1 and 6 with "only if the slot is empty", which is the trap
-    // the skin-extra slot was already fixed for: a name in a runtime slot is not
-    // a filename, and 'Ohren' is what a model in the wild puts there.
-    {
-        pipeline::CharacterSectionTextures resolved;
-        resolved.bodySkin  = bodySkinPath_;
-        resolved.skinExtra = skinExtraPath_;
-        resolved.hair      = hairScalpPath;
-        resolved.underwear = underwearPaths;
-        // The race folder is the second component of the model path:
-        // Character\Human\Female\HumanFemale.m2 -> Human. Taken from the path
-        // rather than restated, so the two cannot disagree.
-        std::string raceFolder;
-        {
-            const size_t first = m2Path.find('\\');
-            const size_t second = (first == std::string::npos)
-                ? std::string::npos : m2Path.find('\\', first + 1);
-            if (first != std::string::npos && second != std::string::npos) {
-                raceFolder = m2Path.substr(first + 1, second - first - 1);
-            }
-        }
-        pipeline::applyCharacterTextures(model, resolved, raceFolder);
-    }
-
-    // Load external .anim files for sequences that store keyframes outside the M2.
-    // Flag 0x20 = embedded data; when clear, animation lives in {ModelName}{SeqID}-{Var}.anim
-    pipeline::loadExternalAnimations(*assetManager_, m2Path, m2Data, model);
-
-    if (!charRenderer_->loadModel(model, PREVIEW_MODEL_ID)) {
+    // The cache's parse itself, shared rather than copied: the runtime slots'
+    // art is bound below, so nothing is written into the model. Their names
+    // used to be written into a copy of it, which the renderer never reads -
+    // it loads only type 0 by name - and so the skin-extra slot, a night
+    // elf's ears or a draenei's horns, was never bound here at all.
+    if (!charRenderer_->loadModel(parsed, PREVIEW_MODEL_ID)) {
         LOG_WARNING("CharacterPreview: failed to load model to GPU");
         return false;
     }
@@ -732,15 +700,22 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
         }
     }
 
-    // If hair scalp texture was found, ensure it's loaded for type-6 slot
-    if (!hairScalpPath.empty()) {
-        TextureRef hairTex = charRenderer_->loadTexture(hairScalpPath);
-        if (hairTex) {
-            for (size_t ti = 0; ti < model.textures.size(); ti++) {
-                if (model.textures[ti].type == 6) {
-                    charRenderer_->setModelTexture(PREVIEW_MODEL_ID, static_cast<uint32_t>(ti), hairTex);
-                    break;
-                }
+    // The hair (type 6) and the skin extra (type 8), each into the slot the
+    // model declares for it. A race whose CharSections names no extra art
+    // takes the underwear, or the body, as pipeline::applyCharacterTextures
+    // has it.
+    const std::string& skinExtraArt = !skinExtraPath_.empty()   ? skinExtraPath_
+                                      : !underwearPaths.empty() ? underwearPaths.front()
+                                                                : bodySkinPath_;
+    for (const auto& [slotType, path] : {std::pair<uint32_t, const std::string*>{6, &hairScalpPath},
+                                         std::pair<uint32_t, const std::string*>{8, &skinExtraArt}}) {
+        if (path->empty()) continue;
+        TextureRef tex = charRenderer_->loadTexture(*path);
+        if (!tex) continue;
+        for (size_t ti = 0; ti < model.textures.size(); ti++) {
+            if (model.textures[ti].type == slotType) {
+                charRenderer_->setModelTexture(PREVIEW_MODEL_ID, static_cast<uint32_t>(ti), tex);
+                break;
             }
         }
     }
@@ -1102,15 +1077,16 @@ bool CharacterPreview::loadCreature(
     }
     if (m2Path.empty()) return false;
 
+    const auto parsed = loadPreviewM2(m2Path);
+    if (!parsed) {
+        if (!waiting_) LOG_WARNING("CharacterPreview: could not read creature model: ", m2Path);
+        return false;
+    }
+    const pipeline::M2Model& model = *parsed;
+
     if (instanceId_ > 0) {
         charRenderer_->removeInstance(instanceId_);
         instanceId_ = 0;
-    }
-
-    pipeline::M2Model model;
-    if (!loadPreviewM2(m2Path, model)) {
-        LOG_WARNING("CharacterPreview: could not read creature model: ", m2Path);
-        return false;
     }
 
     if (camera_) {
@@ -1159,7 +1135,7 @@ bool CharacterPreview::loadCreature(
         break;
     }
 
-    if (!charRenderer_->loadModel(std::move(model), PREVIEW_MODEL_ID)) {
+    if (!charRenderer_->loadModel(parsed, PREVIEW_MODEL_ID)) {
         LOG_WARNING("CharacterPreview: failed to upload creature model");
         return false;
     }
@@ -1196,9 +1172,14 @@ bool CharacterPreview::loadCreature(
     return true;
 }
 
-bool CharacterPreview::loadPreviewM2(const std::string& m2Path, pipeline::M2Model& outModel) {
-    if (!assetManager_) return false;
-    return pipeline::loadM2WithSkin(*assetManager_, m2Path, outModel);  // m2_asset_loader.hpp
+std::shared_ptr<const pipeline::M2Model> CharacterPreview::loadPreviewM2(const std::string& m2Path) {
+    // From the shared cache. Waited for here, unless the preview draws in the
+    // world (setModelsInBackground): then a model still on its way, parsed on
+    // a worker, leaves the load undone and the preview waiting.
+    if (!modelsInBackground_) return models_->load(m2Path);
+    auto asked = models_->request(m2Path);
+    if (asked.state == pipeline::M2ModelCache::State::Loading) waiting_ = true;
+    return std::move(asked.model);
 }
 
 void CharacterPreview::attachWeapons(const std::vector<game::EquipmentItem>& equipment) {
@@ -1247,14 +1228,13 @@ void CharacterPreview::attachWeapons(const std::vector<game::EquipmentItem>& equ
         const std::string& modelFile = art.modelFile;
         const std::string& textureName = art.textureName;
 
-        pipeline::M2Model weaponModel;
+        // A weapon's file is under Weapon, a shield's under Shield.
         std::string m2Path = "Item\\ObjectComponents\\Weapon\\" + modelFile;
-        if (!loadPreviewM2(m2Path, weaponModel)) {
-            m2Path = "Item\\ObjectComponents\\Shield\\" + modelFile;
-            if (!loadPreviewM2(m2Path, weaponModel)) {
-                LOG_WARNING("CharacterPreview: failed to load weapon model ", modelFile);
-                continue;
-            }
+        if (!assetManager_->fileExists(m2Path)) m2Path = "Item\\ObjectComponents\\Shield\\" + modelFile;
+        const auto weaponModel = loadPreviewM2(m2Path);
+        if (!weaponModel) {
+            if (!waiting_) LOG_WARNING("CharacterPreview: failed to load weapon model ", modelFile);
+            continue;
         }
 
         std::string texturePath;
@@ -1266,7 +1246,7 @@ void CharacterPreview::attachWeapons(const std::vector<game::EquipmentItem>& equ
         }
 
         const uint32_t weaponModelId = previewModelIdFor(m2Path);
-        if (!charRenderer_->attachWeapon(instanceId_, ws.attachmentId, weaponModel,
+        if (!charRenderer_->attachWeapon(instanceId_, ws.attachmentId, *weaponModel,
                                          weaponModelId, texturePath)) {
             continue;
         }
@@ -1296,13 +1276,13 @@ void CharacterPreview::attachWeaponEnchantVisual(uint32_t attachmentId, uint32_t
         const std::string& m2Path = effectModels[visualSlot];
         if (m2Path.empty()) continue;
 
-        pipeline::M2Model effectModel;
-        if (!loadPreviewM2(m2Path, effectModel)) {
-            LOG_WARNING("CharacterPreview: failed to load enchant visual ", m2Path);
+        const auto effectModel = loadPreviewM2(m2Path);
+        if (!effectModel) {
+            if (!waiting_) LOG_WARNING("CharacterPreview: failed to load enchant visual ", m2Path);
             continue;
         }
         charRenderer_->attachWeaponEffect(instanceId_, attachmentId, visualSlot,
-                                          effectModel, previewModelIdFor(m2Path));
+                                          *effectModel, previewModelIdFor(m2Path));
     }
 }
 
@@ -1353,11 +1333,12 @@ void CharacterPreview::loadRacialBackdrop(game::Race race) {
 
     std::string scenePath = std::string("Interface\\Glues\\Models\\") + sceneName + "\\" +
                             sceneName + ".m2";
-    pipeline::M2Model sceneModel;
-    if (!loadPreviewM2(scenePath, sceneModel)) {
+    const auto scene = loadPreviewM2(scenePath);
+    if (!scene) {
         LOG_WARNING("CharacterPreview: no racial backdrop at ", scenePath);
         return;
     }
+    const pipeline::M2Model& sceneModel = *scene;
 
     // These scenes are authored in their own space - the human one sits ~230 units
     // from its origin - and carry the camera and the spot the character stands on.
@@ -1375,7 +1356,7 @@ void CharacterPreview::loadRacialBackdrop(game::Race race) {
         if (att.id == 0) { standPos = att.position; break; }
     }
 
-    if (!charRenderer_->loadModel(sceneModel, PREVIEW_BACKDROP_MODEL_ID)) {
+    if (!charRenderer_->loadModel(scene, PREVIEW_BACKDROP_MODEL_ID)) {
         LOG_WARNING("CharacterPreview: failed to load racial backdrop ", scenePath);
         return;
     }

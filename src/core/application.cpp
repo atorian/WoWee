@@ -64,6 +64,7 @@
 #include "ui/settings_schema.hpp"
 #include "ui/weather_panel.hpp"
 #include "pipeline/m2_asset_loader.hpp"
+#include "pipeline/m2_model_cache.hpp"
 #include "core/enchant_visual.hpp"
 #include "core/coordinates.hpp"
 #include "ui/minimap_projection.hpp"
@@ -751,6 +752,10 @@ bool Application::initialize() {  // NOLINT(readability-function-size)
     LOG_INFO("Attempting to load WoW assets from: ", assetPath);
     if (assetManager->initialize(assetPath)) {
         LOG_INFO("Asset manager initialized successfully");
+        // A quarter of a gigabyte of parses: a race's body with its keys is
+        // about ten megabytes, a creature well under one.
+        unitModels_ = std::make_unique<pipeline::M2ModelCache>(*assetManager, size_t{256} << 20);
+        if (renderer) renderer->setUnitModels(*unitModels_);
         // Everything the expansion uses, read now: a broken install stops
         // here rather than when a window first asks for a table.
         gameData_->checkAll();
@@ -5496,7 +5501,12 @@ void Application::drawInterface(float deltaTime, const FramePlan& plan) {  // NO
                                 assetManager.get(), renderer.get(), io.DeltaTime);
                         }
                     }
-                    const uint64_t drawn = built ? face.portrait->textureId() : 0;
+                    // A unit whose model is still being parsed, or has none,
+                    // shows the client's stand-in face until it is drawn.
+                    const uint64_t drawn = built ? face.portrait->textureId()
+                        : face.guid != 0 ? reinterpret_cast<uint64_t>(widgetRenderer_.artTexture(
+                                               "Interface\\CharacterFrame\\TempPortrait"))
+                                         : 0;
                     for (uint32_t id : claimed) {
                         if (ui::Widget* w = widgets.get(id)) w->externalTexture = drawn;
                     }

@@ -181,7 +181,7 @@ void CharacterCreateScreen::initializePreview(pipeline::AssetManager* am) {
         auto* renderer = core::Application::getInstance().getRenderer();
         if (renderer) renderer->drainFrames();
         if (renderer) gameTables_ = &renderer->gameTables();
-        if (renderer && preview_->initialize(am, renderer->gameTables())) {
+        if (renderer && preview_->initialize(am, renderer->gameTables(), renderer->unitModels())) {
             renderer->registerComposite(preview_);
         }
     }

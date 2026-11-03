@@ -407,7 +407,8 @@ void CharacterScreen::renderDetails(game::GameHandler& gameHandler,
         if (!previewInitialized_) {
             auto* renderer = core::Application::getInstance().getRenderer();
             if (renderer) renderer->drainFrames();
-            previewInitialized_ = renderer && preview_->initialize(assetManager_, renderer->gameTables());
+            previewInitialized_ = renderer && preview_->initialize(assetManager_, renderer->gameTables(),
+                                                                    renderer->unitModels());
             if (!previewInitialized_) {
                 LOG_WARNING("CharacterScreen: failed to init CharacterPreview");
                 preview_.reset();

@@ -1698,13 +1698,29 @@ bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
 }
 
 bool CharacterRenderer::loadModel(pipeline::M2Model&& parsed, uint32_t id) {
+    auto data = std::make_shared<pipeline::M2Model>(std::move(parsed));
+    pipeline::M2Model* ownMesh = data.get();
+    return uploadModel(std::move(data), ownMesh, id);
+}
+
+bool CharacterRenderer::loadModel(std::shared_ptr<const pipeline::M2Model> model, uint32_t id) {
+    if (!model) {
+        LOG_ERROR("CharacterRenderer: no model given for id ", id, "; not loaded");
+        return false;
+    }
+    return uploadModel(std::move(model), nullptr, id);
+}
+
+bool CharacterRenderer::uploadModel(std::shared_ptr<const pipeline::M2Model> data, pipeline::M2Model* ownMesh,
+                                    uint32_t id) {
+    const pipeline::M2Model& model = *data;
     // A mesh, emitters, or both. A model of emitters alone - nearly every
     // enchant glow, and some creatures - has no batches to draw here and is
     // still an instance with a skeleton: CharacterEmitters poses its emitters
     // on that skeleton in M2Renderer. Refusing it for want of a mesh dropped
     // every weapon enchant on the floor.
-    if (!parsed.hasContent()) {
-        LOG_ERROR("CharacterRenderer: model '", parsed.name.empty() ? "<unnamed>" : parsed.name,
+    if (!model.hasContent()) {
+        LOG_ERROR("CharacterRenderer: model '", model.name.empty() ? "<unnamed>" : model.name,
                   "' (id ", id, ") has no mesh and no emitters; not loaded");
         return false;
     }
@@ -1716,9 +1732,7 @@ bool CharacterRenderer::loadModel(pipeline::M2Model&& parsed, uint32_t id) {
         models.erase(existingIt);
     }
 
-    // Built here and frozen when the model is published below.
-    auto data = std::make_shared<pipeline::M2Model>(std::move(parsed));
-    const pipeline::M2Model& model = *data;
+    // Frozen when the model is published below.
     const size_t vertexCount = model.vertices.size();
     M2ModelGPU gpuModel;
     gpuModel.data = data;
@@ -1807,8 +1821,11 @@ bool CharacterRenderer::loadModel(pipeline::M2Model&& parsed, uint32_t id) {
     // here again: what the rest of the client asked of them - how many there
     // are, how high the model stands - is kept beside them (getModelShape).
     // Six hundred character models kept them all for the life of the session.
-    std::vector<pipeline::M2Vertex>().swap(data->vertices);
-    std::vector<uint16_t>().swap(data->indices);
+    // A shared parse keeps them for whoever else holds it.
+    if (ownMesh) {
+        std::vector<pipeline::M2Vertex>().swap(ownMesh->vertices);
+        std::vector<uint16_t>().swap(ownMesh->indices);
+    }
 
     // Precompute batch render order (priorityPlane, materialLayer). The result
     // depends only on the model, so caching it here removes the per-frame

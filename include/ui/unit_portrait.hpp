@@ -113,6 +113,9 @@ public:
     void shutdown(rendering::Renderer* renderer);
 
 private:
+    /// The offscreen view, built on first use; false when it cannot be.
+    bool ensurePreview(pipeline::AssetManager* assets, rendering::Renderer* renderer);
+
     std::shared_ptr<rendering::CharacterPreview> preview_;
     bool initialized_ = false;
     Framing framing_ = Framing::Face;
