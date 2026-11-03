@@ -26,9 +26,12 @@
 namespace wowee {
 namespace rendering {
 
+/// `minAlignment` above the buffer's own requirement where the use asks for
+/// it (an acceleration structure build's instances: 16); 0 for none.
 VkResult gpuCreateBuffer(VmaAllocator allocator, const VkBufferCreateInfo* bufferInfo,
                          const VmaAllocationCreateInfo* allocationInfo, VkBuffer* buffer,
-                         VmaAllocation* allocation, VmaAllocationInfo* allocationOut);
+                         VmaAllocation* allocation, VmaAllocationInfo* allocationOut,
+                         VkDeviceSize minAlignment = 0);
 VkResult gpuCreateImage(VmaAllocator allocator, const VkImageCreateInfo* imageInfo,
                         const VmaAllocationCreateInfo* allocationInfo, VkImage* image,
                         VmaAllocation* allocation, VmaAllocationInfo* allocationOut);

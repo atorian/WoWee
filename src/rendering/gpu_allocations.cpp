@@ -112,12 +112,15 @@ VkResult createCounted(VmaAllocator allocator, const VmaAllocationCreateInfo* al
 
 VkResult gpuCreateBuffer(VmaAllocator allocator, const VkBufferCreateInfo* bufferInfo,
                          const VmaAllocationCreateInfo* allocationInfo, VkBuffer* buffer,
-                         VmaAllocation* allocation, VmaAllocationInfo* allocationOut) {
+                         VmaAllocation* allocation, VmaAllocationInfo* allocationOut,
+                         VkDeviceSize minAlignment) {
     return createCounted(allocator, allocationInfo, gpuMemoryUseOfBuffer(bufferInfo->usage),
                          allocationOut,
                          [&](const VmaAllocationCreateInfo* tagged, VmaAllocationInfo* info) {
-                             return vmaCreateBuffer(allocator, bufferInfo, tagged, buffer,
-                                                    allocation, info);
+                             return minAlignment > 0
+                                        ? vmaCreateBufferWithAlignment(allocator, bufferInfo, tagged, minAlignment,
+                                                                       buffer, allocation, info)
+                                        : vmaCreateBuffer(allocator, bufferInfo, tagged, buffer, allocation, info);
                          });
 }
 

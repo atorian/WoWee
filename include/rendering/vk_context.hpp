@@ -15,6 +15,8 @@
 #include <VkBootstrap.h>
 #include <SDL3/SDL.h>
 #include <vector>
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <future>
@@ -123,12 +125,21 @@ public:
     VkCommandBuffer beginSingleTimeCommands();
     void endSingleTimeCommands(VkCommandBuffer cmd);
 
-    // Immediate submit for one-off GPU work (descriptor pool creation, etc.)
+    /// One-off GPU work, finished when this returns: the caller may free or
+    /// read back what it used straight after. Inside an upload batch the
+    /// work joins the batch, and what the batch holds so far is submitted
+    /// and waited for, in order, before this returns.
     void immediateSubmit(std::function<void(VkCommandBuffer cmd)>&& function);
+    /// A copy out of `staging`, which this takes. Inside this thread's
+    /// upload batch the copy is only recorded and the batch frees the buffer
+    /// once it has run; outside one it is submitted, waited for and the
+    /// buffer freed before this returns. The one way to put work in a batch
+    /// without waiting for it, so nothing the work reads is freed early.
+    void submitUpload(AllocatedBuffer staging, std::function<void(VkCommandBuffer cmd)>&& record);
     /// The thread that runs the frame while a character is in the world; none
     /// out of it. With WOWEE_FRAME_PROFILE set, every immediateSubmit it makes
-    /// outside an upload batch - a submit and a wait for the GPU, in the frame -
-    /// is said with how long it waited.
+    /// - a submit and a wait for the GPU, in the frame - is said with how long
+    /// it waited.
     void setFrameThread(std::thread::id id) { frameThread_.store(id, std::memory_order_relaxed); }
 
     // Batch upload mode: records multiple upload commands into a single
@@ -144,9 +155,6 @@ public:
     using UploadCompletion = std::shared_ptr<std::atomic<int>>;
     void endUploadBatch(UploadCompletion completion = {});
     void endUploadBatchSync();   // Sync: submits and waits (for load screens)
-    /// Whether the calling thread has a batch open.
-    [[nodiscard]] bool isInUploadBatch() const;
-    void deferStagingCleanup(AllocatedBuffer staging);
     void pollUploadBatches();    // Check completed async uploads, free staging buffers
     /// No batch in flight on any thread, and none open on this one.
     [[nodiscard]] bool uploadsComplete() const;
@@ -220,12 +228,13 @@ public:
     /// cannot timestamp, which is checked once at device selection.
     void gpuMark(VkCommandBuffer cmd, const char* label);
     [[nodiscard]] bool gpuTimingSupported() const { return gpuTimingSupported_; }
-    /// A named point the driver reports as the last one each queue reached
-    /// when the device is lost. Nothing without
-    /// VK_NV_device_diagnostic_checkpoints, which is NVIDIA - where every
-    /// device loss on record has been. The label must be a string literal:
-    /// the driver hands the pointer back, not a copy.
-    void checkpoint(VkCommandBuffer cmd, const char* label);
+    /// A named point reported, when the device is lost, as the last one the
+    /// GPU reached. Through VK_NV_device_diagnostic_checkpoints on NVIDIA and
+    /// VK_AMD_buffer_marker on AMD; nothing on a device with neither. The
+    /// label must outlive the device (a literal or gpuLabel()): the report
+    /// reads the pointer back, not a copy. `upload` is for the upload lanes'
+    /// command buffers, whose marks are kept apart from the frame's.
+    void checkpoint(VkCommandBuffer cmd, const char* label, bool upload = false);
     /// Records that the device is gone and says why, once: the operation that
     /// first saw VK_ERROR_DEVICE_LOST, then what the driver can add - the last
     /// checkpoint each queue reached, and the faulting address and its kind
@@ -649,6 +658,17 @@ private:
 #endif
     PFN_vkCmdSetCheckpointNV cmdSetCheckpoint_ = nullptr;
     PFN_vkGetQueueCheckpointDataNV getQueueCheckpointData_ = nullptr;
+    /// VK_AMD_buffer_marker: each checkpoint writes its serial into a buffer
+    /// the host can read after the device is gone - when the GPU starts the
+    /// work after the mark (top of pipe) and when everything before it has
+    /// finished (bottom of pipe). A frame pair and an upload pair.
+    bool bufferMarkersSupported_ = false;
+    PFN_vkCmdWriteBufferMarkerAMD cmdWriteBufferMarker_ = nullptr;
+    AllocatedBuffer markerBuffer_{};
+    static constexpr uint32_t kMarkerLabels = 4096;
+    std::atomic<uint32_t> markerSerial_{0};
+    std::array<std::atomic<const char*>, kMarkerLabels> markerLabels_{};
+    bool createMarkerBuffer();
     void reportDeviceFault();
 
     VkSemaphore frameTimeline_ = VK_NULL_HANDLE;

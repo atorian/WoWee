@@ -26,19 +26,10 @@ void ParticlePool::takeReturned() {
     }
     for (const auto& range : ranges) range.page->records.free(range.first, range.count);
     // A page left empty goes, but for one shared one.
-    bool spareKept = false;
-    VmaAllocator allocator = context_->getAllocator();
-    for (auto& page : pages_) {
-        if (!page || page->records.used() != 0) continue;
-        if (!spareKept && !page->fitted) {
-            spareKept = true;
-            continue;
-        }
-        destroyBuffer(allocator, page->buffer);
-        page.reset();
+    if (retireEmptyPages(
+            *context_, pages_, [](const Page& page) { return page.records.used() == 0; },
+            [](VmaAllocator allocator, Page& page) { destroyBuffer(allocator, page.buffer); }))
         ++version_;
-    }
-    while (!pages_.empty() && !pages_.back()) pages_.pop_back();
 }
 
 ParticlePool::Range ParticlePool::place(uint32_t capacity, const char* name) {

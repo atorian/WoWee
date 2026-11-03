@@ -1,6 +1,7 @@
 #include "rendering/geometry_pool.hpp"
 
 #include "core/logger.hpp"
+#include "rendering/retired_pages.hpp"
 #include "rendering/vk_context.hpp"
 
 #include <algorithm>
@@ -132,22 +133,16 @@ void GeometryPool::takeReturned() {
 
 void GeometryPool::releaseEmptyPages() {
     takeReturned();
-    // A page is empty only once every mesh in it has been retired behind the
-    // frame fences, so nothing in flight reads it and it can go now.
-    bool spareKept = false;
-    VmaAllocator allocator = context_->getAllocator();
-    for (auto& page : pages_) {
-        if (!page || page->vertexRanges.used() != 0 || page->indexRanges.used() != 0) continue;
-        if (!spareKept && !page->fitted) {
-            spareKept = true;
-            continue;
-        }
-        destroyBuffer(allocator, page->vertices);
-        destroyBuffer(allocator, page->indices);
-        page.reset();
-        exhausted_ = false;
-    }
-    while (!pages_.empty() && !pages_.back()) pages_.pop_back();
+    // Every mesh in an empty page went back behind the frame fences, but a
+    // bucket of draws binds the page whole, so it goes behind them as well.
+    const auto empty = [](const Page& page) {
+        return page.vertexRanges.used() == 0 && page.indexRanges.used() == 0;
+    };
+    const auto destroy = [](VmaAllocator allocator, Page& page) {
+        destroyBuffer(allocator, page.vertices);
+        destroyBuffer(allocator, page.indices);
+    };
+    if (retireEmptyPages(*context_, pages_, empty, destroy)) exhausted_ = false;
 }
 
 ::VkBuffer GeometryPool::vertices(int32_t page) const {

@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_nonuniform_qualifier : require
 
 // The M2 particles, run and laid out on the GPU - the only place they are
 // (ParticlePool, M2ParticlePass). A workgroup runs one emitter of one

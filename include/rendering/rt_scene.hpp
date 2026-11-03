@@ -243,7 +243,7 @@ private:
     void buildMesh(Mesh& m);
     VkDeviceAddress bufferAddress(VkBuffer buffer) const;
     void ensureMapped(AllocatedBuffer& buf, uint32_t& capacity, uint32_t needed,
-                      uint32_t elementSize, VkBufferUsageFlags usage);
+                      uint32_t elementSize, VkBufferUsageFlags usage, VkDeviceSize minAlignment = 0);
     void stage(VkCommandBuffer cmd, VkBuffer dst, VkDeviceSize dstOffset, const void* data,
                VkDeviceSize size);
 

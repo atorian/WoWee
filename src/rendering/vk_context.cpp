@@ -151,6 +151,7 @@ bool VkContext::initialize(SDL_Window* window) {
     if (!selectPhysicalDevice()) return false;
     if (!createLogicalDevice()) return false;
     if (!createAllocator()) return false;
+    if (!createMarkerBuffer()) return false;
     if (!createTextureTable()) return false;
     textureDevice_ = std::make_unique<ContextTextureDevice>(*this);
     textureCache_ = std::make_unique<TextureCache>(*textureDevice_, TextureCache::configFromEnvironment());
@@ -211,6 +212,10 @@ void VkContext::shutdown() {
     }
     for (auto& pool : gpuQueryPools_) {
         if (pool) { vkDestroyQueryPool(device, pool, nullptr); pool = VK_NULL_HANDLE; }
+    }
+    if (markerBuffer_.buffer) {
+        destroyBuffer(allocator, markerBuffer_);
+        markerBuffer_ = {};
     }
     destroyTracyGpuContext();
     for (auto sem : imageAcquiredSemaphores_) { if (sem) vkDestroySemaphore(device, sem, nullptr); }
@@ -787,6 +792,13 @@ bool VkContext::createLogicalDevice() {  // NOLINT(readability-function-size)
         vkbPhysicalDevice_.enable_extension_if_present(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
     checkpointsSupported_ = vkbPhysicalDevice_.enable_extension_if_present(
         VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+    // AMD's answer to the same question: no driver report, but a buffer the
+    // GPU writes a mark's serial into as it passes it, which the host can
+    // still read once the device is gone. Three losses on this card in
+    // Dalaran said only "no faulting address".
+    bufferMarkersSupported_ =
+        !checkpointsSupported_ &&
+        vkbPhysicalDevice_.enable_extension_if_present(VK_AMD_BUFFER_MARKER_EXTENSION_NAME);
     // What the driver will actually let this process keep in each heap, and
     // what it already holds there, other processes and the driver's own share
     // included. Without it the allocator only knows what it allocated itself,
@@ -898,11 +910,14 @@ bool VkContext::createLogicalDevice() {  // NOLINT(readability-function-size)
             {supported12.descriptorBindingSampledImageUpdateAfterBind, "descriptorBindingSampledImageUpdateAfterBind"},
             {supported12.descriptorBindingUpdateUnusedWhilePending, "descriptorBindingUpdateUnusedWhilePending"},
             {supported12.shaderSampledImageArrayNonUniformIndexing, "shaderSampledImageArrayNonUniformIndexing"},
+            // The skeleton pool's pages, read by a page number that differs
+            // between the threads of one wave (m2_track.glsli).
+            {supported12.shaderStorageBufferArrayNonUniformIndexing, "shaderStorageBufferArrayNonUniformIndexing"},
         };
         bool tableSupported = true;
         for (const auto& [supported, name] : tableFeatures) {
             if (supported) continue;
-            LOG_ERROR("Vulkan device lacks ", name, ", which drawing by texture handle needs");
+            LOG_ERROR("Vulkan device lacks ", name, ", which drawing by texture handle and by pooled blobs needs");
             tableSupported = false;
         }
         if (!tableSupported) return false;
@@ -925,6 +940,7 @@ bool VkContext::createLogicalDevice() {  // NOLINT(readability-function-size)
         enabled12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
         enabled12.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
         enabled12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+        enabled12.shaderStorageBufferArrayNonUniformIndexing = VK_TRUE;
         // Add each struct separately - vk-bootstrap owns the pNext chaining;
         // manually linking them would be overwritten when it appends the next.
         if (hardwareRayQuery_) enabled12.bufferDeviceAddress = VK_TRUE;
@@ -1153,8 +1169,14 @@ bool VkContext::createLogicalDevice() {  // NOLINT(readability-function-size)
             checkpointsSupported_ = false;
         }
     }
+    if (bufferMarkersSupported_) {
+        cmdWriteBufferMarker_ = reinterpret_cast<PFN_vkCmdWriteBufferMarkerAMD>(
+            vkGetDeviceProcAddr(device, "vkCmdWriteBufferMarkerAMD"));
+        if (cmdWriteBufferMarker_ == nullptr) bufferMarkersSupported_ = false;
+    }
     // At warning level: a log of a lost device has to show whether these
     // were armed, or their silence reads as the driver having nothing to say.
+    // Buffer markers are said once their buffer exists (createMarkerBuffer).
     LOG_WARNING("Device-loss diagnostics: fault info ",
                 deviceFaultSupported_ ? "on" : "off",
                 ", queue checkpoints ", checkpointsSupported_ ? "on" : "off");
@@ -1667,9 +1689,39 @@ void VkContext::createGpuQueryPools() {
              kMaxGpuMarks, " marks per frame");
 }
 
-void VkContext::checkpoint(VkCommandBuffer cmd, const char* label) {
-    if (!checkpointsSupported_ || cmdSetCheckpoint_ == nullptr || cmd == VK_NULL_HANDLE) return;
-    cmdSetCheckpoint_(cmd, label);
+bool VkContext::createMarkerBuffer() {
+    if (!bufferMarkersSupported_) return true;
+    // Four words: the frame's started and finished serials, then the upload
+    // lanes'. Host-visible and coherent, so what the GPU wrote before it hung
+    // is there to read without a command that would need the device.
+    markerBuffer_ = createBuffer(allocator, 4 * sizeof(uint32_t), VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                 VMA_MEMORY_USAGE_GPU_TO_CPU);
+    if (!markerBuffer_.buffer || !markerBuffer_.info.pMappedData) {
+        LOG_ERROR("Could not make the buffer for AMD buffer markers; a lost device will not say which pass it was in");
+        destroyBuffer(allocator, markerBuffer_);
+        markerBuffer_ = {};
+        bufferMarkersSupported_ = false;
+        return true;
+    }
+    std::memset(markerBuffer_.info.pMappedData, 0, 4 * sizeof(uint32_t));
+    LOG_WARNING("Device-loss diagnostics: AMD buffer markers on");
+    return true;
+}
+
+void VkContext::checkpoint(VkCommandBuffer cmd, const char* label, bool upload) {
+    if (cmd == VK_NULL_HANDLE) return;
+    if (checkpointsSupported_ && cmdSetCheckpoint_ != nullptr) {
+        cmdSetCheckpoint_(cmd, label);
+        return;
+    }
+    if (!bufferMarkersSupported_) return;
+    // Serials start at 1, so 0 in the buffer is "never reached".
+    const uint32_t serial = markerSerial_.fetch_add(1, std::memory_order_relaxed) + 1;
+    markerLabels_[serial % kMarkerLabels].store(label, std::memory_order_relaxed);
+    const VkDeviceSize pair = upload ? 2 * sizeof(uint32_t) : 0;
+    cmdWriteBufferMarker_(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, markerBuffer_.buffer, pair, serial);
+    cmdWriteBufferMarker_(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, markerBuffer_.buffer,
+                          pair + sizeof(uint32_t), serial);
 }
 
 void VkContext::noteDeviceLost(const char* where, VkResult result) {
@@ -1738,6 +1790,23 @@ void VkContext::reportDeviceFault() {
         };
         report(graphicsQueue, "graphics");
         if (hasDedicatedTransfer_ && transferQueue_ != graphicsQueue) report(transferQueue_, "upload");
+    }
+    if (bufferMarkersSupported_ && markerBuffer_.info.pMappedData) {
+        // Started is the last mark whose following work the GPU began; finished
+        // the last one whose preceding work had all completed. A hang lies
+        // between the finished mark and the next one, usually the started one.
+        vmaInvalidateAllocation(allocator, markerBuffer_.allocation, 0, VK_WHOLE_SIZE);
+        const auto* words = static_cast<const volatile uint32_t*>(markerBuffer_.info.pMappedData);
+        const auto name = [&](uint32_t serial) -> std::string {
+            if (serial == 0) return "nothing";
+            const uint32_t recorded = markerSerial_.load(std::memory_order_relaxed);
+            if (recorded - serial >= kMarkerLabels) return "a mark too old to name (#" + std::to_string(serial) + ")";
+            const char* label = markerLabels_[serial % kMarkerLabels].load(std::memory_order_relaxed);
+            return std::string("'") + (label ? label : "?") + "' (#" + std::to_string(serial) + ")";
+        };
+        LOG_ERROR("  frame work: last started after ", name(words[0]), ", last finished up to ", name(words[1]));
+        LOG_ERROR("  upload work: last started after ", name(words[2]), ", last finished up to ", name(words[3]),
+                  "; ", markerSerial_.load(std::memory_order_relaxed), " marks recorded");
     }
 
 #if defined(VK_EXT_device_fault)
@@ -3388,7 +3457,7 @@ VkCommandBuffer VkContext::beginSingleTimeCommands() {
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(l.immCmd, &beginInfo);
-    checkpoint(l.immCmd, "immediate commands");
+    checkpoint(l.immCmd, "immediate commands", true);
 
     return l.immCmd;
 }
@@ -3438,28 +3507,59 @@ void VkContext::endSingleTimeCommands(VkCommandBuffer cmd) {
 
 void VkContext::immediateSubmit(std::function<void(VkCommandBuffer cmd)>&& function) {
     SubmitLane& l = lane();
-    if (l.inUploadBatch) {
-        // Record into this thread's batch command buffer - no submit, no fence
-        // wait. Opened on demand, so a batch nothing writes to costs nothing.
-        ensureBatchCmd();
-        if (l.batchCmd != VK_NULL_HANDLE) function(l.batchCmd);
-        return;
-    }
     static const bool frameProfile = core::envFlagEnabled("WOWEE_FRAME_PROFILE", false);
     const bool reported = frameProfile && std::this_thread::get_id() == frameThread_.load(std::memory_order_relaxed);
     const auto start = reported ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-    VkCommandBuffer cmd = beginSingleTimeCommands();
-    function(cmd);
-    endSingleTimeCommands(cmd);
-    if (reported) {
+    const auto report = [&] {
+        if (!reported) return;
         // The frame stopped for the GPU here. Only this thread takes the budget.
         static core::LogBudget said(300, "Immediate GPU submits the frame thread waited for");
         if (said.take()) {
             LOG_WARNING("Frame thread waited ",
                         std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count(),
-                        " ms for an immediate GPU submit outside an upload batch");
+                        " ms for an immediate GPU submit");
         }
+    };
+    if (l.inUploadBatch) {
+        // Done on return even inside a batch. Since the frame thread's batches
+        // span whole phases of the frame, a caller that freed its staging
+        // buffer after this, or sampled the image it wrote, did so before the
+        // copy was even submitted: the login screen's backdrop was freed under
+        // its own copy and never drawn. Only submitUpload, which takes what
+        // the work reads, may leave work recorded and unsent.
+        //
+        // Into the batch and then the batch out, so this work still runs after
+        // everything the batch recorded before it.
+        ensureBatchCmd();
+        if (l.batchCmd != VK_NULL_HANDLE) {
+            function(l.batchCmd);
+            submitBatchSync(l);
+            report();
+            return;
+        }
+        LOG_ERROR("Upload batch has no command buffer; submitting this work on its own");
     }
+    VkCommandBuffer cmd = beginSingleTimeCommands();
+    function(cmd);
+    endSingleTimeCommands(cmd);
+    report();
+}
+
+void VkContext::submitUpload(AllocatedBuffer staging, std::function<void(VkCommandBuffer cmd)>&& record) {
+    SubmitLane& l = lane();
+    if (l.inUploadBatch) {
+        ensureBatchCmd();
+        if (l.batchCmd != VK_NULL_HANDLE) {
+            record(l.batchCmd);
+            l.batchStaging.push_back(staging);
+            return;
+        }
+        LOG_ERROR("Upload batch has no command buffer; submitting this upload on its own");
+    }
+    VkCommandBuffer cmd = beginSingleTimeCommands();
+    record(cmd);
+    endSingleTimeCommands(cmd);
+    destroyBuffer(allocator, staging);
 }
 
 void VkContext::beginUploadBatch() {
@@ -3515,7 +3615,7 @@ void VkContext::ensureBatchCmd() {
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(l.batchCmd, &beginInfo);
-    checkpoint(l.batchCmd, "upload batch");
+    checkpoint(l.batchCmd, "upload batch", true);
 }
 
 void VkContext::endUploadBatch(UploadCompletion completion) {
@@ -3540,15 +3640,10 @@ void VkContext::endUploadBatch(UploadCompletion completion) {
         return;
     }
 
-    if (l.batchStaging.empty()) {
-        // No GPU copies were recorded - skip the submit entirely.
-        vkEndCommandBuffer(l.batchCmd);
-        vkFreeCommandBuffers(device, l.pool, 1, &l.batchCmd);
-        l.batchCmd = VK_NULL_HANDLE;
-        for (auto& done : l.batchCompletions) done->store(1);
-        l.batchCompletions.clear();
-        return;
-    }
+    // An open command buffer holds recorded work, staging or not, and goes.
+    // It used to be thrown away when it held no staging buffer, which
+    // dropped every layout transition recorded on its own - a depth target
+    // left undefined, a backdrop never copied.
 
     // Submit commands with a NEW fence - don't wait, let GPU work in parallel.
     vkEndCommandBuffer(l.batchCmd);
@@ -3656,15 +3751,6 @@ void VkContext::submitBatchSync(SubmitLane& l) {
     // Nothing ever recorded, so there is nothing to end, submit or free.
     if (l.batchCmd == VK_NULL_HANDLE) {
         l.batchStaging.clear();
-        for (auto& done : l.batchCompletions) done->store(1);
-        l.batchCompletions.clear();
-        return;
-    }
-
-    if (l.batchStaging.empty()) {
-        vkEndCommandBuffer(l.batchCmd);
-        vkFreeCommandBuffers(device, l.pool, 1, &l.batchCmd);
-        l.batchCmd = VK_NULL_HANDLE;
         for (auto& done : l.batchCompletions) done->store(1);
         l.batchCompletions.clear();
         return;
@@ -3804,10 +3890,6 @@ void VkContext::waitAllUploads() {
     if (laneGeneration_ != 0) reclaimFinished(lane());
 }
 
-bool VkContext::isInUploadBatch() const {
-    return lane().inUploadBatch;
-}
-
 bool VkContext::uploadsComplete() const {
     if (lane().inUploadBatch) return false;
     std::lock_guard<std::mutex> lock(lanesMutex_);
@@ -3816,10 +3898,6 @@ bool VkContext::uploadsComplete() const {
         if (!l->inFlight.empty()) return false;
     }
     return true;
-}
-
-void VkContext::deferStagingCleanup(AllocatedBuffer staging) {
-    lane().batchStaging.push_back(staging);
 }
 
 } // namespace rendering

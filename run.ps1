@@ -72,6 +72,13 @@ if (-not $env:WOWEE_SERVER_EXTENSIONS_DIR) {
     $env:WOWEE_SERVER_EXTENSIONS_DIR = Join-Path $env:WOW_DATA_PATH "server_extensions"
 }
 if (-not $NoProfile -and -not $env:WOWEE_FRAME_PROFILE) { $env:WOWEE_FRAME_PROFILE = "1" }
+# MSYS2's Khronos validation layer (mingw-w64-x86_64-vulkan-validation-layers)
+# installs its manifest beside its DLL in mingw64\bin, where the driver's
+# loader does not look. It is only turned on with WOWEE_VULKAN_VALIDATION=1;
+# this only lets the loader find it.
+if ((Test-Path (Join-Path $mingw "VkLayer_khronos_validation.json")) -and -not $env:VK_ADD_LAYER_PATH) {
+    $env:VK_ADD_LAYER_PATH = $mingw
+}
 
 $running = Get-Process wowee -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe }
 if ($running) {

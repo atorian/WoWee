@@ -371,19 +371,10 @@ void SkeletonPool::takeReturned() {
     }
     for (const auto& blob : blobs) blob.page->words.free(blob.first, blob.words);
     // A page left empty goes, but for one shared one.
-    bool spareKept = false;
-    VmaAllocator allocator = context_->getAllocator();
-    for (auto& page : pages_) {
-        if (!page || page->words.used() != 0) continue;
-        if (!spareKept && !page->fitted) {
-            spareKept = true;
-            continue;
-        }
-        destroyBuffer(allocator, page->buffer);
-        page.reset();
+    if (retireEmptyPages(
+            *context_, pages_, [](const Page& page) { return page.words.used() == 0; },
+            [](VmaAllocator allocator, Page& page) { destroyBuffer(allocator, page.buffer); }))
         ++version_;
-    }
-    while (!pages_.empty() && !pages_.back()) pages_.pop_back();
 }
 
 SkeletonPool::Skeleton SkeletonPool::place(const pipeline::M2Model& model, uint32_t boneLimit, const char* name) {
@@ -463,6 +454,7 @@ std::optional<std::pair<int32_t, uint32_t>> SkeletonPool::copyWords(const std::v
         }
         page->words = RangeAllocator(room);
         page->fitted = fitted;
+        LOG_INFO("Skeleton pool: page ", at, " made (", room, " words) for '", name, "'");
         if (empty == pages_.end()) pages_.push_back(std::move(page));
         else *empty = std::move(page);
         slot = static_cast<int32_t>(at);

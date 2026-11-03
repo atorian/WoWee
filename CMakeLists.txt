@@ -2608,6 +2608,12 @@ if(WOWEE_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_character_draws.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/character-draws)
         set_tests_properties(scene_character_draws PROPERTIES SKIP_RETURN_CODE 77)
+        # A unit in a crowd is drawn as it is whatever its neighbours: the
+        # cull reads each unit's animation blob from its own pool page.
+        wowee_add_gpu_test(scene_unit_crowd
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_unit_crowd.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/unit-crowd)
+        set_tests_properties(scene_unit_crowd PROPERTIES SKIP_RETURN_CODE 77)
         # A creature loaded after many others of one model is still posed.
         wowee_add_gpu_test(scene_shared_skeletons
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_shared_skeletons.py

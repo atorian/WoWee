@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_nonuniform_qualifier : require
 
 // Every animated model's bones, posed on the GPU - the only place they are
 // made (SkeletonPool, CharacterRenderer). A workgroup poses one request: its

@@ -47,7 +47,7 @@ void DeferredResources::image(AllocatedImage& value) {
 }
 
 AllocatedBuffer createBuffer(VmaAllocator allocator, VkDeviceSize size,
-    VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage)
+    VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage, VkDeviceSize minAlignment)
 {
     AllocatedBuffer result{};
 
@@ -67,7 +67,7 @@ AllocatedBuffer createBuffer(VmaAllocator allocator, VkDeviceSize size,
     }
 
     if (gpuCreateBuffer(allocator, &bufInfo, &allocInfo,
-            &result.buffer, &result.allocation, &result.info) != VK_SUCCESS) {
+            &result.buffer, &result.allocation, &result.info, minAlignment) != VK_SUCCESS) {
         LOG_ERROR("Failed to create VMA buffer (size=", size, ")");
     }
 
@@ -409,19 +409,12 @@ AllocatedBuffer uploadBuffer(VkContext& ctx, const void* data, VkDeviceSize size
     AllocatedBuffer gpuBuffer = createBuffer(ctx.getAllocator(), size,
         usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 
-    // Copy staging -> GPU
-    ctx.immediateSubmit([&](VkCommandBuffer cmd) {
+    // Copy staging -> GPU; the context frees the staging buffer once it has run.
+    ctx.submitUpload(staging, [&](VkCommandBuffer cmd) {
         VkBufferCopy copyRegion{};
         copyRegion.size = size;
         vkCmdCopyBuffer(cmd, staging.buffer, gpuBuffer.buffer, 1, &copyRegion);
     });
-
-    // Destroy staging buffer (deferred if in batch mode)
-    if (ctx.isInUploadBatch()) {
-        ctx.deferStagingCleanup(staging);
-    } else {
-        destroyBuffer(ctx.getAllocator(), staging);
-    }
 
     return gpuBuffer;
 }
@@ -476,23 +469,14 @@ bool uploadIntoBuffer(VkContext& ctx, const void* data, VkDeviceSize size,
     std::memcpy(mapped, data, size);
     vmaUnmapMemory(ctx.getAllocator(), staging.allocation);
 
-    ctx.immediateSubmit([&](VkCommandBuffer cmd) {
+    // See the header: inside a batch the copy is only recorded, and the
+    // staging buffer goes with the batch, which frees it once the copy has run.
+    ctx.submitUpload(staging, [&](VkCommandBuffer cmd) {
         VkBufferCopy region{};
         region.dstOffset = targetOffset;
         region.size = size;
         vkCmdCopyBuffer(cmd, staging.buffer, target, 1, &region);
     });
-
-    // See the header: inside a batch the copy is only recorded, so the staging
-    // buffer goes to the batch, which frees it once the copy has run. Handed
-    // to the batch it is also what makes the batch submit at all: a batch
-    // with no staging buffers of its own is thrown away unsubmitted, and a
-    // batch holding only copies made here lost every one of them.
-    if (ctx.isInUploadBatch()) {
-        ctx.deferStagingCleanup(staging);
-    } else {
-        destroyBuffer(ctx.getAllocator(), staging);
-    }
     return true;
 }
 

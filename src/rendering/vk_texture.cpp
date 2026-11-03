@@ -141,7 +141,10 @@ bool VkTexture::upload(VkContext& ctx, const uint8_t* pixels, uint32_t width, ui
         return true;
     }
 
-    ctx.immediateSubmit([&](VkCommandBuffer cmd) {
+    // Asked before recording: the mip chain goes in the same command buffer as
+    // the copy, so the whole upload rides one batch.
+    const bool blitMips = generateMips && canBlitMips(ctx, format);
+    ctx.submitUpload(staging, [&](VkCommandBuffer cmd) {
         // Transition to transfer dst
         transitionImageLayout(cmd, image_.image,
             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -157,23 +160,15 @@ bool VkTexture::upload(VkContext& ctx, const uint8_t* pixels, uint32_t width, ui
         vkCmdCopyBufferToImage(cmd, staging.buffer, image_.image,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-        if (!generateMips) {
+        if (blitMips) {
+            recordMipmaps(cmd, width, height);
+        } else {
             // Transition to shader read
             transitionImageLayout(cmd, image_.image,
                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                 VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
         }
     });
-
-    if (generateMips) {
-        generateMipmaps(ctx, format, width, height);
-    }
-
-    if (ctx.isInUploadBatch()) {
-        ctx.deferStagingCleanup(staging);
-    } else {
-        destroyBuffer(ctx.getAllocator(), staging);
-    }
     return true;
 }
 
@@ -217,7 +212,7 @@ bool VkTexture::uploadMips(VkContext& ctx, const uint8_t* const* mipData,
         return false;
     }
 
-    ctx.immediateSubmit([&](VkCommandBuffer cmd) {
+    ctx.submitUpload(staging, [&](VkCommandBuffer cmd) {
         transitionImageLayout(cmd, image_.image,
             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
@@ -244,12 +239,6 @@ bool VkTexture::uploadMips(VkContext& ctx, const uint8_t* const* mipData,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
     });
-
-    if (ctx.isInUploadBatch()) {
-        ctx.deferStagingCleanup(staging);
-    } else {
-        destroyBuffer(ctx.getAllocator(), staging);
-    }
     return true;
 }
 
@@ -458,30 +447,20 @@ VkDescriptorImageInfo VkTexture::descriptorInfo(VkImageLayout layout) const {
     return info;
 }
 
-void VkTexture::generateMipmaps(VkContext& ctx, VkFormat format,
-    uint32_t width, uint32_t height)
-{
-    // Check if format supports linear blitting
+bool VkTexture::canBlitMips(VkContext& ctx, VkFormat format) {
     VkFormatProperties formatProperties;
     vkGetPhysicalDeviceFormatProperties(ctx.getPhysicalDevice(), format, &formatProperties);
-
-    bool canBlit = (formatProperties.optimalTilingFeatures &
+    const bool canBlit = (formatProperties.optimalTilingFeatures &
         VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
-
     if (!canBlit) {
-        LOG_WARNING("Format does not support linear blitting for mipmap generation");
-        // Fall back to simple transition
-        ctx.immediateSubmit([&](VkCommandBuffer cmd) {
-            transitionImageLayout(cmd, image_.image,
-                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-        });
-        return;
+        LOG_WARNING("Format ", static_cast<int>(format),
+                    " does not support linear blitting; texture keeps only its first mip filled");
     }
+    return canBlit;
+}
 
-    ctx.immediateSubmit([&](VkCommandBuffer cmd) {
+void VkTexture::recordMipmaps(VkCommandBuffer cmd, uint32_t width, uint32_t height) {
+    {
         int32_t mipW = static_cast<int32_t>(width);
         int32_t mipH = static_cast<int32_t>(height);
 
@@ -572,7 +551,7 @@ void VkTexture::generateMipmaps(VkContext& ctx, VkFormat format,
         barrierDep.imageMemoryBarrierCount = 1;
         barrierDep.pImageMemoryBarriers = &barrier;
         cmdPipelineBarrier2(cmd, barrierDep);
-    });
+    }
 }
 
 } // namespace rendering

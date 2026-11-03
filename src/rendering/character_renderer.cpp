@@ -2798,7 +2798,15 @@ std::shared_ptr<const CharacterRenderer::Frame> CharacterRenderer::extract(const
                                       model.data->boundRadius * std::max(0.001f, inst.scale));
             CharInstanceGPU& record = records[slot];
             uint32_t flags = CharInstanceGPU::kPlaced;
-            if (!inst.hasOverrideModelMatrix && !inst.isSceneModel) flags |= CharInstanceGPU::kCulled;
+            // WOWEE_CHAR_VIEW_CULL=0 draws every shown unit whatever its
+            // distance and the view: whether one missing from the picture was
+            // culled or culled but drawn wrong is then a question of one run.
+            static const bool viewCull = [] {
+                const bool on = core::envFlagEnabled("WOWEE_CHAR_VIEW_CULL", true);
+                if (!on) LOG_WARNING("WOWEE_CHAR_VIEW_CULL=0: units are drawn without the distance and view cull");
+                return on;
+            }();
+            if (viewCull && !inst.hasOverrideModelMatrix && !inst.isSceneModel) flags |= CharInstanceGPU::kCulled;
             if (drawOpacity > 0.0f) flags |= CharInstanceGPU::kSeen;
             record.pose = glm::uvec4(index, r.outBase, boneCount, flags);
             record.interiorAmbient = inst.interiorLight.ambient;
@@ -2868,6 +2876,14 @@ std::shared_ptr<const CharacterRenderer::Frame> CharacterRenderer::extract(const
         draws.cull.viewPlanes[i] = glm::vec4(p.normal, p.distance);
     }
     draws.cull.camera = glm::vec4(camera.getPosition(), renderRadius * renderRadius);
+    // WOWEE_CHAR_ALPHA_GATE=0: whether a unit missing from the picture was
+    // left out by its batches' animated alpha is then a question of one run.
+    static const bool alphaGate = [] {
+        const bool on = core::envFlagEnabled("WOWEE_CHAR_ALPHA_GATE", true);
+        if (!on) LOG_WARNING("WOWEE_CHAR_ALPHA_GATE=0: units' batches are drawn whatever their animated alpha");
+        return on;
+    }();
+    draws.cull.flags = glm::uvec4(alphaGate ? 0u : 1u, 0u, 0u, 0u);
     return frame;
 }
 

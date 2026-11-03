@@ -126,9 +126,10 @@ inline void destroyParticleResources(VkDevice device, VmaAllocator allocator,
     destroy(allocator, vertexBuffer, vertexAllocation);
 }
 
-// Buffer creation
+// Buffer creation. `minAlignment` for a use that needs more than the
+// buffer's own requirement (gpuCreateBuffer); 0 for none.
 AllocatedBuffer createBuffer(VmaAllocator allocator, VkDeviceSize size,
-    VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage);
+    VkBufferUsageFlags usage, VmaMemoryUsage memoryUsage, VkDeviceSize minAlignment = 0);
 
 void destroyBuffer(VmaAllocator allocator, AllocatedBuffer& buffer);
 
@@ -235,13 +236,9 @@ AllocatedBuffer uploadBuffer(VkContext& ctx, const void* data, VkDeviceSize size
 
 /// The same, into a buffer that already exists.
 ///
-/// The staging buffer outlives the call. immediateSubmit does not submit while
-/// an upload batch is open - and one is open for the whole frame - so it
-/// records the copy and returns; destroying the source at that point frees
-/// memory the GPU has not read yet, and what lands in the target is whatever
-/// the allocator handed back. The grass field found that one: it came out of
-/// the copy in patches that popped in and out as it was rebuilt. So the
-/// staging buffer is handed to the batch, which frees it after the copy.
+/// The copy goes through VkContext::submitUpload: inside an upload batch -
+/// and one is open for whole phases of the frame - it is only recorded, and
+/// the staging buffer goes with the batch, which frees it after the copy.
 ///
 /// False when the staging buffer could not be made or mapped, in which case
 /// the target is untouched. `targetOffset` is where in the target, in bytes.

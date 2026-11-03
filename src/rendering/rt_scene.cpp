@@ -886,7 +886,7 @@ void RtScene::buildPendingBlas(VkCommandBuffer cmd, const std::vector<MeshId>& i
 }
 
 void RtScene::ensureMapped(AllocatedBuffer& buf, uint32_t& capacity, uint32_t needed,
-                           uint32_t elementSize, VkBufferUsageFlags usage) {
+                           uint32_t elementSize, VkBufferUsageFlags usage, VkDeviceSize minAlignment) {
     if (buf.buffer && capacity >= needed && (capacity <= 4096 || needed >= capacity / 3)) return;
     VmaAllocator alloc = ctx_->getAllocator();
     if (buf.buffer) {
@@ -897,7 +897,7 @@ void RtScene::ensureMapped(AllocatedBuffer& buf, uint32_t& capacity, uint32_t ne
     }
     capacity = grownCapacity(capacity > needed ? 0 : capacity, std::max(needed, 1u));
     buf = createBuffer(alloc, VkDeviceSize(capacity) * elementSize, usage,
-                       VMA_MEMORY_USAGE_CPU_TO_GPU);
+                       VMA_MEMORY_USAGE_CPU_TO_GPU, minAlignment);
     ++descriptorGeneration_;
 }
 
@@ -971,10 +971,14 @@ void RtScene::buildTlas(VkCommandBuffer cmd, FrameResources& fr) {
     VmaAllocator alloc = ctx_->getAllocator();
     const uint32_t count = static_cast<uint32_t>(asInstanceData_.size());
 
+    // The build reads the instances from a 16-byte aligned address
+    // (VUID-vkCmdBuildAccelerationStructuresKHR-pInfos-03715), more than a
+    // host-visible buffer's own requirement promises.
     ensureMapped(fr.asInstances, fr.asInstanceCapacity, count,
                  sizeof(VkAccelerationStructureInstanceKHR),
                  VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-                     VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+                     VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+                 16);
     if (count > 0) {
         std::memcpy(fr.asInstances.info.pMappedData, asInstanceData_.data(),
                     count * sizeof(VkAccelerationStructureInstanceKHR));

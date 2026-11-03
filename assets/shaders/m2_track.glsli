@@ -4,7 +4,12 @@
 //
 // The including shader declares, before this, the pool's pages:
 //   layout(...) readonly buffer Page { uint words[]; } pages[64];
-// and sets pageIndex and blobBase to the blob it reads.
+// and sets pageIndex and blobBase to the blob it reads. It enables
+// GL_EXT_nonuniform_qualifier: the page is indexed as non-uniform, since
+// the threads of one wave may read blobs on different pages (char_draws.comp
+// runs a thread a batch of every unit). Unmarked, a wave read the page of
+// one of its threads for all of them - on AMD, whole units drawn from
+// another model's tracks and left out as transparent.
 
 const uint kNone = 0xFFFFFFFFu;
 // Every blob's header keeps its global sequences here.
@@ -14,7 +19,7 @@ const uint kBlobGlobals = 4u;
 uint pageIndex;
 uint blobBase;
 
-uint word(uint offset) { return pages[pageIndex].words[blobBase + offset]; }
+uint word(uint offset) { return pages[nonuniformEXT(pageIndex)].words[blobBase + offset]; }
 float wordf(uint offset) { return uintBitsToFloat(word(offset)); }
 vec4 word4(uint offset) {
     return vec4(wordf(offset), wordf(offset + 1u), wordf(offset + 2u), wordf(offset + 3u));
@@ -54,7 +59,9 @@ uint lowerKey(uint times, uint keyCount, float t) {
     if (keyCount <= 1u || t <= float(word(times))) return 0u;
     uint lo = 0u, hi = keyCount;   // first key whose time is above t, by halving
     while (lo < hi) {
-        const uint mid = (lo + hi) / 2u;
+        // Not (lo + hi) / 2: above 2^31 keys that wraps, lo walks back and
+        // the loop never ends - the GPU hangs on one bad key count.
+        const uint mid = lo + (hi - lo) / 2u;
         if (t < float(word(times + mid))) hi = mid; else lo = mid + 1u;
     }
     return lo == keyCount ? keyCount - 1u : lo - 1u;

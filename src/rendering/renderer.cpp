@@ -4849,6 +4849,7 @@ void Renderer::recordModelCompute(CpuStageTimes& stages) {
     // uploaded at the top of beginFrame.
     if (wmoRenderer) {
         CpuStage stage(stages, "beginFrame", "WMO cull");
+        GpuPass pass(*vkCtx, currentCmd, "WMO cull");
         wmoRenderer->prepareDraws(currentCmd, frame, localLightBuffers_[frame].buffer,
                                   static_cast<uint32_t>(currentFrameData.localLightMeta.x));
     }
@@ -4856,6 +4857,7 @@ void Renderer::recordModelCompute(CpuStageTimes& stages) {
     // skeletons were posed and before the shadow maps draw them.
     if (characterRenderer) {
         CpuStage stage(stages, "beginFrame", "character cull");
+        GpuPass pass(*vkCtx, currentCmd, "character cull");
         characterRenderer->prepareDraws(currentCmd, frame, localLightBuffers_[frame].buffer,
                                         static_cast<uint32_t>(currentFrameData.localLightMeta.x));
     }

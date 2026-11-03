@@ -90,8 +90,13 @@ const uint kCharacterSkeleton = 32u;
 uint poolPage;
 uint poolBase;
 
-vec4 record(uint index, uint part) { return particlePages[poolPage].records[(poolBase + index) * 4u + part]; }
-void setRecord(uint index, uint part, vec4 value) { particlePages[poolPage].records[(poolBase + index) * 4u + part] = value; }
+// Non-uniform as m2_track.glsli's pages are: an index read from the data.
+vec4 record(uint index, uint part) {
+    return particlePages[nonuniformEXT(poolPage)].records[(poolBase + index) * 4u + part];
+}
+void setRecord(uint index, uint part, vec4 value) {
+    particlePages[nonuniformEXT(poolPage)].records[(poolBase + index) * 4u + part] = value;
+}
 
 // Where an emitter on `bone` stands: its instance's model, then the bone as
 // posed this frame - the doodad's own skeleton, or a creature's.

@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_nonuniform_qualifier : require
 
 // The M2 view's draws, written on the GPU (M2Renderer::prepareViewDraws).
 // A workgroup takes one group of the frame - the visible instances of one

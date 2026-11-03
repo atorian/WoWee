@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_nonuniform_qualifier : require
 
 // The characters' draws made on the GPU (CharacterRenderer,
 // character_draws.hpp), one thread per entry: a batch of an instance's draw
@@ -86,6 +87,7 @@ layout(std140, set = 1, binding = 2) uniform Frame {
     vec4 viewPlanes[6];
     vec4 camera;        // xyz the eye, w the render radius squared
     uvec4 counts;       // x entries, y lights, z colour places (solid then faded), w caster places
+    uvec4 flags;        // x 1: the animated alpha gate is off (WOWEE_CHAR_ALPHA_GATE=0)
 } frame;
 
 // Each bucket's first place: the colour buckets, then the casters'.
@@ -205,6 +207,7 @@ void main() {
         uvTransform(e.uvTransforms.x, sequence, instance.clock.x, instance.clock.y, draw.uvRow0, draw.uvRow1);
         uvTransform(e.uvTransforms.y, sequence, instance.clock.x, instance.clock.y, draw.uv2Row0, draw.uv2Row1);
     }
+    if (frame.flags.x != 0u) alpha = 1.0;
     if (alpha <= 0.01) return;
     const float opacity = instance.stateTint.a * alpha;
     draw.refs = uvec4(e.material, e.slot, 0u, 0u);

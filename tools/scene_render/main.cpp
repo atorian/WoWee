@@ -70,8 +70,10 @@
 //         "skins": [[11, "Creature\\Wolf\\WolfSkinBlack.blp"]],
 //                                          // optional: its display's skins by
 //                                          //   texture type
-//         "opacity": 0.5 }                 // optional: drawn faded, as a ghost
+//         "opacity": 0.5,                  // optional: drawn faded, as a ghost
 //                                          //   or a fade-in
+//         "animation": 5 }                 // optional: AnimationData id it
+//                                          //   plays, looped (5 Run)
 //     ],
 //     "camera": { "offset": [-8, 0, 3],   // from the origin; or "position"
 //                 "lookAt": [0, 0, 2],    // from the origin; or "yaw"/"pitch"
@@ -555,6 +557,7 @@ bool placeCharacter(const json& entry, const glm::vec3& origin, pipeline::AssetM
         return false;
     }
     if (entry.contains("opacity")) characters->setInstanceOpacity(placed.instance, entry["opacity"].get<float>());
+    if (entry.contains("animation")) characters->playAnimation(placed.instance, entry["animation"].get<uint32_t>());
     // "skins": [[texture type, path], ...] - its display's, on every slot
     // of that type, as the client dresses a creature display.
     if (entry.contains("skins")) {

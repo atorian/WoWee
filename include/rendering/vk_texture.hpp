@@ -132,7 +132,11 @@ public:
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) const;
 
 private:
-    void generateMipmaps(VkContext& ctx, VkFormat format, uint32_t width, uint32_t height);
+    /// Whether the mip chain can be blitted from mip 0 in this format.
+    static bool canBlitMips(VkContext& ctx, VkFormat format);
+    /// Blits mips 1.. from mip 0, all in TRANSFER_DST, and leaves every level
+    /// in SHADER_READ_ONLY. Recorded into the upload's own command buffer.
+    void recordMipmaps(VkCommandBuffer cmd, uint32_t width, uint32_t height);
     // Shared sampler finalization: prefer the global cache, fall back to direct creation
     bool finalizeSampler(VkDevice device, const VkSamplerCreateInfo& samplerInfo);
 

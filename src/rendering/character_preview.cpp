@@ -273,8 +273,6 @@ void CharacterPreview::createFBO() {
     // 1b. Transition the color image from UNDEFINED to SHADER_READ_ONLY_OPTIMAL
     // so that ImGui::Image doesn't sample an image in UNDEFINED layout before
     // the first composite request runs.
-    // Through immediateSubmit, so that inside the frame thread's upload batch
-    // it is recorded there rather than submitted and waited for.
     vkCtx_->immediateSubmit([&](VkCommandBuffer cmd) {
         VkImageMemoryBarrier2 barrier{.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
         barrier.srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;

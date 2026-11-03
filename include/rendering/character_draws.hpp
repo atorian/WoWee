@@ -138,6 +138,9 @@ struct CharCullFrameGPU {
     glm::vec4 camera{0.0f};
     /// x entries, y lights, z colour places, w caster places.
     glm::uvec4 counts{0u};
+    /// x 1 when WOWEE_CHAR_ALPHA_GATE=0: every batch drawn at full alpha,
+    /// whatever its colour and weight tracks say.
+    glm::uvec4 flags{0u};
 };
 
 /// What the cull counted of a frame (Stats in char_draws.comp).

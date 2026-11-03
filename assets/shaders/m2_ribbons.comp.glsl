@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_nonuniform_qualifier : require
 
 // The M2 ribbons, laid and drawn on the GPU - the only place they are
 // (M2ParticlePass). A workgroup runs one ribbon emitter of one instance for
@@ -52,9 +53,9 @@ struct Edge {
     vec3 color;
 };
 Edge edgeAt(uint record) {
-    const vec4 a = particlePages[poolPage].records[(poolBase + record) * 4u + 0u];
-    const vec4 b = particlePages[poolPage].records[(poolBase + record) * 4u + 1u];
-    const vec4 c = particlePages[poolPage].records[(poolBase + record) * 4u + 2u];
+    const vec4 a = particlePages[nonuniformEXT(poolPage)].records[(poolBase + record) * 4u + 0u];
+    const vec4 b = particlePages[nonuniformEXT(poolPage)].records[(poolBase + record) * 4u + 1u];
+    const vec4 c = particlePages[nonuniformEXT(poolPage)].records[(poolBase + record) * 4u + 2u];
     return Edge(a.xyz, a.w, b.xyz, b.w, c.rgb);
 }
 void setEdge(uint record, Edge e) {

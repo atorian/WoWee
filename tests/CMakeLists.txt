@@ -1631,6 +1631,17 @@ if(WOWEE_BUILD_RT_RENDERER_CHANGES_TEST AND NOT ANDROID)
     register_test_target(rt_renderer_changes_test)
 endif()
 
+if(NOT ANDROID)
+    add_executable(upload_batch_test upload_batch_main.cpp)
+    target_link_libraries(upload_batch_test PRIVATE wowee_render)
+    wowee_test_link_glm(upload_batch_test)
+    wowee_apply_client_flags(upload_batch_test)
+    wowee_add_gpu_test(upload_batch COMMAND upload_batch_test
+             WORKING_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
+    set_tests_properties(upload_batch PROPERTIES SKIP_RETURN_CODE 77)
+    register_test_target(upload_batch_test)
+endif()
+
 option(WOWEE_BUILD_WMO_VIEW_CULL_TEST "Build the native GPU test of the WMO view and reflection cull" OFF)
 if(WOWEE_BUILD_WMO_VIEW_CULL_TEST AND NOT ANDROID)
     add_executable(wmo_view_cull_test wmo_view_cull_main.cpp)

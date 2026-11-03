@@ -81,7 +81,9 @@ not be treated as release-critical functionality.
 The desktop build uses SDL3 and needs a Vulkan 1.3 driver (MoltenVK on
 macOS). Unicorn enables Warden execution. StormLib is needed by
 `asset_extract`, the `wowee_assets` window and the asset builder inside the
-client; without it the client still builds, with those left out.
+client; without it the client still builds, with those left out. The machine
+every change must run on, with its driver and library versions, is in
+[the compatibility page](docs/compatibility.md).
 
 <details>
 <summary>Ubuntu / Debian</summary>

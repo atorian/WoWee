@@ -66,7 +66,7 @@ bool uploadTileMapLayers(VkContext& ctx, TerrainTileMaps& maps, const uint8_t* c
     std::memcpy(static_cast<uint8_t*>(mapped) + coverBytes, normals, normalBytes);
     vmaUnmapMemory(ctx.getAllocator(), staging.allocation);
 
-    ctx.immediateSubmit([&](VkCommandBuffer cmd) {
+    ctx.submitUpload(staging, [&](VkCommandBuffer cmd) {
         const auto barrier = [&](VkImage image, VkImageLayout from, VkImageLayout to,
                                  VkAccessFlags srcAccess, VkAccessFlags dstAccess,
                                  VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage) {
@@ -103,12 +103,6 @@ bool uploadTileMapLayers(VkContext& ctx, TerrainTileMaps& maps, const uint8_t* c
                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
         }
     });
-
-    if (ctx.isInUploadBatch()) {
-        ctx.deferStagingCleanup(staging);
-    } else {
-        destroyBuffer(ctx.getAllocator(), staging);
-    }
     return true;
 }
 

@@ -66,6 +66,14 @@ builds it, one cache that holds it. Everyone who needs it asks that producer.
   - Launch the game with its working directory in `build-dev\bin` (or
     `build\bin`), so its `logs\` and `cache\` land on D:.
 
+## The reference platform
+
+User decision (2026-11-03): the client must run on the user's machine - AMD
+Radeon RX 7700 XT on Windows 11, the driver and library versions listed in
+`docs/compatibility.md`. A change that breaks it there is broken. A renderer or
+shader change proven only on the Mac (MoltenVK) is not done: the GPU tests that
+cover it run on this device before it is merged, and the commit says they did.
+
 ## Building and running
 
 - `ninja -C build-dev wowee` from `D:\games\WoWee`, with `C:\msys64\mingw64\bin`
