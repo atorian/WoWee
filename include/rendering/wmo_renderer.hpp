@@ -278,10 +278,11 @@ public:
                                         const WaterReflectionView* mirror = nullptr);
     void useFrame(std::shared_ptr<const Frame> frame) { recording_ = std::move(frame); }
     /// Record into `cmd`, outside a render pass and before any of the
-    /// frame's WMO draws, the material rows the frame carries.
-    void uploadMaterials(VkCommandBuffer cmd, uint32_t frameIndex);
-    /// The frame whose rows uploadMaterials recorded is submitted: they are
-    /// on the GPU.
+    /// frame's WMO draws, the material rows the frame carries, and give the
+    /// frame slot room for the colour passes' draws.
+    void prepareDraws(VkCommandBuffer cmd, uint32_t frameIndex);
+    /// The frame whose rows prepareDraws recorded is submitted: they are on
+    /// the GPU.
     void frameSubmitted();
     /// The passes that draw the buildings in colour. Each culls into a draw
     /// list of its own: the water's reflection is recorded on the main thread
@@ -820,12 +821,41 @@ private:
     uint32_t materialSerial_ = 0;
     std::atomic<uint32_t> materialApplied_{0};
     uint32_t pendingMaterialSerial_ = 0;
-    /// Set 2: the material table, a set per frame slot, rewritten when the
-    /// table is replaced.
+    /// What a frame's colour draws read by gl_DrawID: each drawn group's
+    /// matrix and lights (WmoDrawGroup in wmo.vert), and each draw's material
+    /// row and group (WmoDraw), beside the draws' indirect commands. Each pass
+    /// takes its range of a frame slot's buffers atomically: the view and the
+    /// reflection are recorded on different threads.
+    struct DrawGroupGPU {
+        glm::mat4 model{1.0f};
+        LocalLightSet localLights = kNoLocalLights;
+    };
+    struct DrawRecordGPU {
+        uint32_t material = 0;
+        uint32_t group = 0;
+    };
+    struct DrawStorage {
+        AllocatedBuffer groups, records, commands;
+        uint32_t groupRoom = 0, drawRoom = 0;
+        uint32_t version = 0;
+    };
+    DrawStorage drawStorage_[2];
+    mutable std::atomic<uint32_t> groupCursor_{0}, drawCursor_{0};
+    /// The device's maxDrawIndirectCount: a run longer than it is split.
+    uint32_t maxDrawsPerCall_ = 1;
+    /// This slot's buffers room for the frame's groups and draws, and its
+    /// set naming them; false, said, when there was no memory.
+    bool ensureDrawStorage(uint32_t slot, uint32_t groups, uint32_t draws);
+    /// Set 2: the material table, the frame's draw groups and draw records,
+    /// a set per frame slot, rewritten when one of them is replaced.
     VkDescriptorSetLayout materialSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool materialDescPool_ = VK_NULL_HANDLE;
     VkDescriptorSet materialSet_[2] = {};
     uint32_t materialSetVersion_[2] = {};
+    uint32_t materialSetStorageVersion_[2] = {};
+    /// Whether this slot's draws may be recorded: its set names the tables
+    /// and buffers as they are.
+    bool drawsReady_[2] = {};
     /// Every material row written anew from its batch and the settings.
     void rewriteMaterialRows();
     /// Every group's vertices and indices, in shared pages.
@@ -966,6 +996,9 @@ public:
         /// The material rows this frame carries to the GPU (gpu_row_store.hpp).
         uint32_t materialSerial = 0;
         uint32_t materialRowCount = 0;
+        /// Room the colour passes need: draw groups and draws.
+        uint32_t groupRoom = 0;
+        uint32_t drawRoom = 0;
         std::vector<uint32_t> materialUpdateSlots;
         std::vector<WmoMaterialGPU> materialUpdateRows;
     };

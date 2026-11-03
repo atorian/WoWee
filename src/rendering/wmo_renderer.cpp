@@ -246,11 +246,14 @@ bool WMORenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayou
     // the vertex shader (cloth) and the fragment shader.
     materialTable_.initialize(*vkCtx_);
     {
-        const std::vector<VkDescriptorSetLayoutBinding> bindings = {
-            {.binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
-             .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT}};
+        // Binding 0 the material table, 1 the frame's draw groups, 2 its
+        // draw records.
+        std::vector<VkDescriptorSetLayoutBinding> bindings(3);
+        for (uint32_t b = 0; b < 3; ++b)
+            bindings[b] = {.binding = b, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
+                           .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | (b == 0 ? VkShaderStageFlags(VK_SHADER_STAGE_FRAGMENT_BIT) : VkShaderStageFlags(0))};
         materialSetLayout_ = createDescriptorSetLayout(device, bindings);
-        const VkDescriptorPoolSize size{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 2};
+        const VkDescriptorPoolSize size{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 6};
         VkDescriptorPoolCreateInfo poolInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         poolInfo.maxSets = 2;
         poolInfo.poolSizeCount = 1;
@@ -278,6 +281,11 @@ bool WMORenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayou
 
     std::vector<VkDescriptorSetLayout> setLayouts = {perFrameLayout, vkCtx_->textureTable().layout(),
                                                      materialSetLayout_};
+    {
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(vkCtx_->getPhysicalDevice(), &properties);
+        maxDrawsPerCall_ = std::max(1u, properties.limits.maxDrawIndirectCount);
+    }
     pipelineLayout_ = createPipelineLayout(device, setLayouts, { pushRange });
     if (!pipelineLayout_) {
         core::Logger::getInstance().error("WMORenderer: failed to create pipeline layout");
@@ -380,6 +388,11 @@ void WMORenderer::shutdown() {
     vkCtx_->flushDeferredCleanup();
     materialTable_.destroy();
     materialRows_.reset();
+    for (auto& storage : drawStorage_) {
+        for (AllocatedBuffer* buffer : {&storage.groups, &storage.records, &storage.commands})
+            if (buffer->buffer) destroyBuffer(allocator, *buffer);
+        storage = DrawStorage{};
+    }
     geometry_.destroy();
 
     // Destroy pipelines
@@ -1088,26 +1101,74 @@ void WMORenderer::rebuildIndexById() {
     }
 }
 
-void WMORenderer::uploadMaterials(VkCommandBuffer cmd, uint32_t frameIndex) {
-    if (!recording_ || frameIndex >= 2) return;
+bool WMORenderer::ensureDrawStorage(uint32_t slot, uint32_t groups, uint32_t draws) {
+    DrawStorage& storage = drawStorage_[slot];
+    if (groups <= storage.groupRoom && draws <= storage.drawRoom && storage.groups.buffer) return true;
+    const VmaAllocator allocator = vkCtx_->getAllocator();
+    const uint32_t groupRoom = std::max({groups, storage.groupRoom + storage.groupRoom / 2, 1024u});
+    const uint32_t drawRoom = std::max({draws, storage.drawRoom + storage.drawRoom / 2, 4096u});
+    const auto make = [&](VkDeviceSize bytes, VkBufferUsageFlags usage) {
+        return createBuffer(allocator, bytes, usage, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    };
+    DrawStorage made;
+    made.groups = make(VkDeviceSize(groupRoom) * sizeof(DrawGroupGPU), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    made.records = make(VkDeviceSize(drawRoom) * sizeof(DrawRecordGPU), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    made.commands = make(VkDeviceSize(drawRoom) * sizeof(VkDrawIndexedIndirectCommand),
+                         VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT);
+    if (!made.groups.info.pMappedData || !made.records.info.pMappedData || !made.commands.info.pMappedData) {
+        for (AllocatedBuffer* buffer : {&made.groups, &made.records, &made.commands})
+            if (buffer->buffer) destroyBuffer(allocator, *buffer);
+        static core::LogBudget budget(4, "WMO draw storage");
+        if (budget.take())
+            LOG_ERROR("WMORenderer: no memory for a frame's ", groups, " draw groups and ", draws,
+                      " draws - no buildings are drawn this frame");
+        return false;
+    }
+    // The old ones go after the frames that may read them.
+    DeferredResources retired(*vkCtx_);
+    for (AllocatedBuffer* buffer : {&storage.groups, &storage.records, &storage.commands})
+        if (buffer->buffer) retired.buffer(*buffer);
+    made.groupRoom = groupRoom;
+    made.drawRoom = drawRoom;
+    made.version = storage.version + 1;
+    storage = made;
+    return true;
+}
+
+void WMORenderer::prepareDraws(VkCommandBuffer cmd, uint32_t frameIndex) {
+    if (frameIndex >= 2) return;
+    drawsReady_[frameIndex] = false;
+    groupCursor_.store(0, std::memory_order_relaxed);
+    drawCursor_.store(0, std::memory_order_relaxed);
+    if (!recording_) return;
     const Frame& frame = *recording_;
     if (frame.materialRowCount == 0) return;
     if (!materialTable_.reserve(cmd, frame.materialRowCount)) return;
-    if (materialSetVersion_[frameIndex] != materialTable_.version()) {
-        const VkDescriptorBufferInfo info{.buffer = materialTable_.buffer(), .offset = 0,
-                                          .range = materialTable_.bytes()};
-        VkWriteDescriptorSet write{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        write.dstSet = materialSet_[frameIndex];
-        write.dstBinding = 0;
-        write.descriptorCount = 1;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        write.pBufferInfo = &info;
-        vkUpdateDescriptorSets(vkCtx_->getDevice(), 1, &write, 0, nullptr);
+    if (!ensureDrawStorage(frameIndex, frame.groupRoom, frame.drawRoom)) return;
+    const DrawStorage& storage = drawStorage_[frameIndex];
+    if (materialSetVersion_[frameIndex] != materialTable_.version() ||
+        materialSetStorageVersion_[frameIndex] != storage.version) {
+        const VkDescriptorBufferInfo infos[3] = {
+            {.buffer = materialTable_.buffer(), .offset = 0, .range = materialTable_.bytes()},
+            {.buffer = storage.groups.buffer, .offset = 0, .range = VK_WHOLE_SIZE},
+            {.buffer = storage.records.buffer, .offset = 0, .range = VK_WHOLE_SIZE}};
+        VkWriteDescriptorSet writes[3] = {};
+        for (uint32_t b = 0; b < 3; ++b) {
+            writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[b].dstSet = materialSet_[frameIndex];
+            writes[b].dstBinding = b;
+            writes[b].descriptorCount = 1;
+            writes[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[b].pBufferInfo = &infos[b];
+        }
+        vkUpdateDescriptorSets(vkCtx_->getDevice(), 3, writes, 0, nullptr);
         materialSetVersion_[frameIndex] = materialTable_.version();
+        materialSetStorageVersion_[frameIndex] = storage.version;
     }
     // Not acknowledged when it fails, so the same rows come with the next frame.
     if (materialTable_.write(cmd, frameIndex, frame.materialUpdateSlots, frame.materialUpdateRows.data()))
         pendingMaterialSerial_ = frame.materialSerial;
+    drawsReady_[frameIndex] = true;
 }
 
 void WMORenderer::frameSubmitted() {
@@ -1153,6 +1214,8 @@ void WMORenderer::Frame::clear() noexcept {
         list->portalGroups.clear();
         list->clear();
     }
+    groupRoom = 0;
+    drawRoom = 0;
 }
 
 std::shared_ptr<const WMORenderer::Frame> WMORenderer::extract(const Camera& camera,
@@ -1163,6 +1226,15 @@ std::shared_ptr<const WMORenderer::Frame> WMORenderer::extract(const Camera& cam
     extractDepth(frame->depth);
     frameLights_ = nullptr;
     frame->wireframe = wireframeMode;
+    // The room its colour passes need: a group record each time a pass
+    // visits a group - once a layer, so twice - and a draw a range.
+    for (const DrawList* list : {&frame->view, &frame->reflection}) {
+        for (const DrawEntry& entry : list->drawn()) {
+            frame->groupRoom += 2 * static_cast<uint32_t>(entry.groups.size());
+            for (const auto& kept : entry.groups)
+                for (const auto& mb : kept.gpu->mergedBatches) frame->drawRoom += static_cast<uint32_t>(mb.draws.size());
+        }
+    }
     // The settings are in every row; changed, every row is written again.
     if (std::exchange(materialSettingsDirty_, false)) rewriteMaterialRows();
     // The rows ride from the first frame extracted after they were written
@@ -1348,7 +1420,6 @@ void WMORenderer::cullView(const Camera& camera, const glm::vec3& portalViewerPo
 uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const glm::vec3& camPos,
                              const DrawList& list, Layer layer) const {
     if (list.used == 0) return 0;
-    uint32_t drawCalls = 0;
     FaceCulling faces(*vkCtx_, cmd);
 
     // Select pipeline based on wireframe mode
@@ -1358,21 +1429,27 @@ uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
     // The per-frame set (0), the device's texture table (1) and the material
     // table (2), which a batch names its row of.
     const uint32_t frameIndex = vkCtx_->getCurrentFrame();
-    if (materialSetVersion_[frameIndex] != materialTable_.version() || !materialTable_.buffer()) return 0;
+    if (!drawsReady_[frameIndex]) return 0;
     const VkDescriptorSet sets[3] = {perFrameSet, vkCtx_->textureTable().set(), materialSet_[frameIndex]};
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 3, sets, 0, nullptr);
 
-    // Track which pipeline is currently bound: 0=opaque, 1=transparent,
-    // 3=alpha-tested
-    int currentPipelineKind = 0;
+    // The pass's draws in the order they are drawn, each with the state its
+    // run is recorded with, and the groups they draw: written into this
+    // slot's buffers at the range the pass takes of them, then recorded a run
+    // of the same state at a time.
+    struct Draw {
+        VkDrawIndexedIndirectCommand command;
+        DrawRecordGPU record;
+        int pipelineKind;
+        bool twoSided;
+        const GeometryPool::Range* page;
+    };
+    thread_local std::vector<DrawGroupGPU> groups;
+    thread_local std::vector<Draw> draws;
+    groups.clear();
+    draws.clear();
 
     for (const DrawEntry& entry : list.drawn()) {
-
-        // The instance's matrix; the batch's row is pushed per batch below.
-        WMOPushConstants push{};
-        push.model = entry.modelMatrix;
-        vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
-                            0, sizeof(WMOPushConstants), &push);
 
         // LOD shell groups render only beyond this distance squared (190 units)
         static constexpr float LOD_SHELL_DIST_SQ = 196.0f * 196.0f;
@@ -1402,53 +1479,100 @@ uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSe
                 continue;
             }
 
-            geometry_.bind(cmd, group.geometry);
+            // The group: its instance's matrix and the lights that reach it.
+            const auto groupIndex = static_cast<uint32_t>(groups.size());
+            groups.push_back({.model = entry.modelMatrix, .localLights = kept.lights});
 
-            vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
-                               offsetof(WMOPushConstants, localLights), sizeof(LocalLightSet), &kept.lights);
-
-            // Render each merged batch
             for (const auto& mb : group.mergedBatches) {
                 if (mb.materialRow == GpuRowStore<WmoMaterialGPU>::kNoRow || !inLayer(mb)) continue;
 
-                // Determine which pipeline this batch needs
-                int neededPipeline = 0; // opaque
+                // Which pipeline this batch needs: 0 opaque, 1 transparent
+                // (alpha blend, no depth write), 3 opaque with the alpha test
+                // compiled in.
+                int neededPipeline = 0;
                 if (mb.isTransparent && transparentPipeline_) {
-                    neededPipeline = 1; // transparent (alpha blend, no depth write)
+                    neededPipeline = 1;
                 } else if (mb.alphaTest && !recording_->wireframe) {
-                    neededPipeline = 3; // opaque, with the alpha test compiled in
+                    neededPipeline = 3;
                 }
+                if (neededPipeline == 3 && !alphaTestPipeline_) continue;
 
-                // Switch pipeline if needed (descriptor sets and push constants
-                // are preserved across compatible pipeline layout switches)
-                if (neededPipeline != currentPipelineKind) {
-                    VkPipeline targetPipeline = activePipeline;
-                    if (neededPipeline == 1) targetPipeline = transparentPipeline_;
-                    else if (neededPipeline == 3) targetPipeline = alphaTestPipeline_;
-                    if (targetPipeline == VK_NULL_HANDLE) continue;
-
-                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, targetPipeline);
-                    faces.pipelineBound();
-                    currentPipelineKind = neededPipeline;
-                }
-                faces.show(mb.twoSided);
-
-                // Its material row (wmo_material.glsli), which says where its
-                // cloth hangs too.
-                vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
-                                   offsetof(WMOPushConstants, material), sizeof(uint32_t), &mb.materialRow);
-
-                // Issue draw calls for each range in this merged batch
                 for (const auto& dr : mb.draws) {
                     if (dr.indexCount == 0) continue;
-                    vkCmdDrawIndexed(cmd, dr.indexCount, 1, group.geometry.firstIndex + dr.firstIndex,
-                                     group.geometry.baseVertex, 0);
-                    ++drawCalls;
+                    draws.push_back({.command = {.indexCount = dr.indexCount, .instanceCount = 1,
+                                                 .firstIndex = group.geometry.firstIndex + dr.firstIndex,
+                                                 .vertexOffset = group.geometry.baseVertex, .firstInstance = 0},
+                                     .record = {.material = mb.materialRow, .group = groupIndex},
+                                     .pipelineKind = neededPipeline,
+                                     .twoSided = mb.twoSided,
+                                     .page = &group.geometry});
                 }
             }
         }
     }
-    return drawCalls;
+    if (draws.empty()) return 0;
+
+    // The pass's ranges of this slot's buffers.
+    const DrawStorage& storage = drawStorage_[frameIndex];
+    const auto groupCount = static_cast<uint32_t>(groups.size());
+    const auto drawCount = static_cast<uint32_t>(draws.size());
+    const uint32_t firstGroup = groupCursor_.fetch_add(groupCount, std::memory_order_relaxed);
+    const uint32_t firstDraw = drawCursor_.fetch_add(drawCount, std::memory_order_relaxed);
+    if (firstGroup + groupCount > storage.groupRoom || firstDraw + drawCount > storage.drawRoom) {
+        static core::LogBudget budget(4, "WMO draw room full");
+        if (budget.take())
+            LOG_WARNING("WMORenderer: a pass's ", drawCount, " draws over ", groupCount,
+                        " groups found the frame's room full - its buildings are not drawn this frame");
+        return 0;
+    }
+    std::memcpy(static_cast<DrawGroupGPU*>(storage.groups.info.pMappedData) + firstGroup, groups.data(),
+                groups.size() * sizeof(DrawGroupGPU));
+    auto* records = static_cast<DrawRecordGPU*>(storage.records.info.pMappedData) + firstDraw;
+    auto* commands = static_cast<VkDrawIndexedIndirectCommand*>(storage.commands.info.pMappedData) + firstDraw;
+    for (uint32_t d = 0; d < drawCount; ++d) {
+        records[d] = {.material = draws[d].record.material, .group = firstGroup + draws[d].record.group};
+        commands[d] = draws[d].command;
+    }
+
+    // A call a run of the same pipeline, faces and geometry page, in order.
+    int currentPipelineKind = 0;
+    const GeometryPool::Range* currentPage = nullptr;
+    std::optional<bool> currentTwoSided;
+    const auto drawRun = [&](uint32_t first, uint32_t count) {
+        while (count > 0) {
+            const uint32_t n = std::min(count, maxDrawsPerCall_);
+            const WMOPushConstants push{.drawBase = firstDraw + first};
+            vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
+            vkCmdDrawIndexedIndirect(cmd, storage.commands.buffer,
+                                     VkDeviceSize(firstDraw + first) * sizeof(VkDrawIndexedIndirectCommand), n,
+                                     sizeof(VkDrawIndexedIndirectCommand));
+            first += n;
+            count -= n;
+        }
+    };
+    uint32_t runFirst = 0;
+    for (uint32_t d = 0; d <= drawCount; ++d) {
+        const bool sameRun = d < drawCount && d > runFirst && draws[d].pipelineKind == currentPipelineKind &&
+                             currentTwoSided == draws[d].twoSided &&
+                             draws[d].page->vertices == currentPage->vertices;
+        if (d < drawCount && sameRun) continue;
+        if (d > runFirst) drawRun(runFirst, d - runFirst);
+        if (d == drawCount) break;
+        const Draw& draw = draws[d];
+        if (draw.pipelineKind != currentPipelineKind) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              draw.pipelineKind == 1 ? transparentPipeline_
+                              : draw.pipelineKind == 3 ? alphaTestPipeline_ : activePipeline);
+            faces.pipelineBound();
+            currentPipelineKind = draw.pipelineKind;
+        }
+        faces.show(draw.twoSided);
+        currentTwoSided = draw.twoSided;
+        if (!currentPage || draw.page->vertices != currentPage->vertices) geometry_.bind(cmd, *draw.page);
+        currentPage = draw.page;
+        runFirst = d;
+    }
+    return drawCount;
 }
 
 bool WMORenderer::initializeShadow(VkRenderPass shadowRenderPass) {

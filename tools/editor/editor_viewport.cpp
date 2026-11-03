@@ -730,7 +730,7 @@ void EditorViewport::prepare(VkCommandBuffer cmd) {
     }
     if (wmoRenderer_) {
         wmoRenderer_->useFrame(wmoRenderer_->extract(*camera_, camera_->getPosition(), {}));
-        wmoRenderer_->uploadMaterials(cmd, frame);
+        wmoRenderer_->prepareDraws(cmd, frame);
     }
 }
 

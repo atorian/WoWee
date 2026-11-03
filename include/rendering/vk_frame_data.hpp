@@ -80,12 +80,9 @@ struct GPUPushConstants {
 /// The WMO's own, which carries where a batch of cloth hangs beside the model
 /// matrix: (top z, drop, centre x, centre y) in the model's local space.
 struct WMOPushConstants {
-    glm::mat4 model;
-    /// The point lights that reach the group being drawn (local_lights.glsli).
-    LocalLightSet localLights = kNoLocalLights;
-    /// The batch's row of the material table (wmo_material.glsli).
-    uint32_t material = 0;
-    uint32_t pad[3] = {};
+    /// A call's draws name their records from here: draw gl_DrawID's is
+    /// wmoDraws[drawBase + gl_DrawID] (wmo.vert).
+    uint32_t drawBase = 0;
 };
 
 // Push constants for the terrain's, the buildings' and the characters'

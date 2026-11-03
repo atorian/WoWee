@@ -4836,7 +4836,7 @@ void Renderer::recordModelCompute(CpuStageTimes& stages) {
                                   characterRenderer ? characterRenderer->posedBones(frame) : PosedBones{});
     }
     // The buildings' material rows, before any pass draws a building.
-    if (wmoRenderer) wmoRenderer->uploadMaterials(currentCmd, frame);
+    if (wmoRenderer) wmoRenderer->prepareDraws(currentCmd, frame);
     // Their view draws, written on the GPU from the frame's groups.
     if (m2Renderer) {
         CpuStage stage(stages, "beginFrame", "M2 view draws");

@@ -1,4 +1,5 @@
 #version 450
+#extension GL_ARB_shader_draw_parameters : require
 
 layout(set = 0, binding = 0) uniform PerFrame {
     mat4 view;
@@ -42,11 +43,29 @@ layout(set = 0, binding = 0) uniform PerFrame {
 
 #include "wmo_material.glsli"
 
+// A call's draws - a run of an indirect call - name their records from here:
+// draw gl_DrawID's is wmoDraws[drawBase + gl_DrawID].
 layout(push_constant) uniform Push {
+    uint drawBase;
+} push;
+
+// A drawn group (WMORenderer::DrawGroupGPU): its instance's matrix and the
+// point lights that reach it.
+struct WmoDrawGroup {
     mat4 model;
     uvec4 localLights;  // local_lights.glsli
-    uint material;      // the batch's row in wmoMaterials
-} push;
+};
+layout(std430, set = 2, binding = 1) readonly buffer WmoDrawGroups {
+    WmoDrawGroup wmoDrawGroups[];
+};
+// A draw (WMORenderer::DrawRecordGPU): its batch's material row and its group.
+struct WmoDraw {
+    uint material;
+    uint group;
+};
+layout(std430, set = 2, binding = 2) readonly buffer WmoDraws {
+    WmoDraw wmoDraws[];
+};
 
 layout(location = 0) in vec3 aPos;
 layout(location = 1) in vec3 aNormal;
@@ -64,8 +83,10 @@ layout(location = 6) flat out uvec4 vLocalLights;
 layout(location = 7) flat out uint vMaterial;
 
 void main() {
-    vLocalLights = push.localLights;
-    vMaterial = push.material;
+    const WmoDraw draw = wmoDraws[push.drawBase + uint(gl_DrawIDARB)];
+    const mat4 model = wmoDrawGroups[draw.group].model;
+    vLocalLights = wmoDrawGroups[draw.group].localLights;
+    vMaterial = draw.material;
     vec3 pos = aPos;
 
     // Cloth hung inside the building's own mesh. A banner painted into a wall
@@ -75,19 +96,19 @@ void main() {
     // sway a banner doodad gets (wind.glsli), in the building's own
     // coordinates: held at the top edge, free at the hem. The phase comes
     // from where the cloth hangs, so two banners on one gate are not in step.
-    const vec4 cloth = wmoMaterials[push.material].cloth;
+    const vec4 cloth = wmoMaterials[draw.material].cloth;
     if (cloth.y > 0.0) {
         float span = max(cloth.y, 0.01);
         float drop = clamp((cloth.x - pos.z) / span, 0.0, 1.0);
         drop *= drop;
         float amp = span * 0.05 * drop;
-        pos += clothWindSway(perFrameClothWind(push.model), pos, aNormal, cloth.zw, amp);
+        pos += clothWindSway(perFrameClothWind(model), pos, aNormal, cloth.zw, amp);
     }
 
-    vec4 worldPos = push.model * vec4(pos, 1.0);
+    vec4 worldPos = model * vec4(pos, 1.0);
     FragPos = worldPos.xyz;
 
-    mat3 normalMatrix = mat3(push.model);
+    mat3 normalMatrix = mat3(model);
     Normal = normalMatrix * aNormal;
     TexCoord = aTexCoord;
     VertColor = aColor;
