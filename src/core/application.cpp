@@ -6146,20 +6146,11 @@ void Application::spawnPlayerCharacter() {
     std::string m2Path =
         game::getPlayerModelPath(playerRace_, playerGender_, useFemaleModel);
 
-    // Try loading selected character model from MPQ
-    if (assetManager && assetManager->isInitialized()) {
-        auto m2Data = assetManager->readFile(m2Path);
-        if (!m2Data.empty()) {
-            auto model = pipeline::M2Loader::load(m2Data);
-            if (model.name.empty()) model.name = m2Path;
-
-            // Load skin file for submesh/batch data
-            std::string skinPath = pipeline::skinPathForM2(m2Path);
-            auto skinData = assetManager->readFile(skinPath);
-            if (!skinData.empty() && model.version >= 264) {
-                pipeline::M2Loader::loadSkin(skinData, model);
-            }
-
+    // From the cache every unit model is parsed by, with its skin and every
+    // sequence: the portrait and this race's NPCs draw the same parse.
+    if (assetManager && assetManager->isInitialized() && unitModels_) {
+        if (const auto parsed = unitModels_->load(m2Path)) {
+            const pipeline::M2Model& model = *parsed;
             if (model.isValid()) {
                 // Log texture slots
                 for (size_t ti = 0; ti < model.textures.size(); ti++) {
@@ -6182,12 +6173,7 @@ void Application::spawnPlayerCharacter() {
                         model, playerRace_, playerGender_, appearanceBytes, useFemaleModel);
                 }
 
-                // Load external .anim files for sequences with external data.
-                // Sequences WITH flag 0x20 have their animation data inline in the M2 file.
-                // Sequences WITHOUT flag 0x20 store data in external .anim files.
-                pipeline::loadExternalAnimations(*assetManager, m2Path, m2Data, model);
-
-                charRenderer->loadModel(model, 1);
+                charRenderer->loadModel(parsed, 1);
 
                 // Apply composited textures via AppearanceComposer (saves skin state for re-compositing)
                 if (useCharSections && appearanceComposer_) {
@@ -6289,8 +6275,8 @@ void Application::spawnPlayerCharacter() {
 	            ? appearanceComposer_->buildDefaultPlayerGeosets(raceId, sexId, hairStyleId, facialId)
 	            : std::unordered_set<uint16_t>{};
 	        renderer->scene().characters().setActiveGeosets(instanceId, activeGeosets);
-	        // The player's type 8 slot is filled from CharSections by
-	        // resolvePlayerTextures above, so the head-detail batch has art to
+	        // The player's type 8 slot is bound from CharSections by
+	        // compositePlayerSkin above, so the head-detail batch has art to
 	        // draw and is worth drawing. Nothing else is set up for it.
 	        renderer->scene().characters().setDrawSkinExtra(instanceId, true);
 

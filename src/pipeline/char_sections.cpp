@@ -1,7 +1,6 @@
 #include "pipeline/char_sections.hpp"
 
 #include "pipeline/dbc_loader.hpp"
-#include "pipeline/m2_loader.hpp"
 
 namespace wowee {
 namespace pipeline {
@@ -92,40 +91,11 @@ CharacterSectionTextures resolveCharacterSections(
     return out;
 }
 
-void applyCharacterTextures(M2Model& model,
-                            const CharacterSectionTextures& textures,
-                            const std::string& raceFolderName) {
-    for (auto& tex : model.textures) {
-        switch (tex.type) {
-            case 1:  // the body, composited from skin, face and underwear
-                if (!textures.bodySkin.empty()) tex.filename = textures.bodySkin;
-                break;
-            case 6:  // hair and scalp
-                if (!textures.hair.empty()) {
-                    tex.filename = textures.hair;
-                } else if (tex.filename.empty()) {
-                    tex.filename = "Character\\" + raceFolderName + "\\Hair00_00.blp";
-                }
-                break;
-            case 8:
-                // Skin Extra. What this art is depends entirely on the race - a
-                // head-detail sheet for a human or an orc, the ears for a night
-                // elf, the horns for a draenei male, the tail for a draenei
-                // female - and seven of the twenty race and sex pairs name none
-                // at all. Those fall back to art that exists rather than keeping
-                // a name that does not.
-                if (!textures.skinExtra.empty()) {
-                    tex.filename = textures.skinExtra;
-                } else if (!textures.underwear.empty()) {
-                    tex.filename = textures.underwear.front();
-                } else if (!textures.bodySkin.empty()) {
-                    tex.filename = textures.bodySkin;
-                }
-                break;
-            default:
-                break;
-        }
-    }
+const std::string& skinExtraArt(const std::string& skinExtra, const std::vector<std::string>& underwear,
+                                const std::string& bodySkin) {
+    if (!skinExtra.empty()) return skinExtra;
+    if (!underwear.empty()) return underwear.front();
+    return bodySkin;
 }
 
 }  // namespace pipeline

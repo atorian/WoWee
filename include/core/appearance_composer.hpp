@@ -50,12 +50,12 @@ public:
 
     // Player model path resolution
 
-    // Resolve texture paths from CharSections.dbc and fill model texture slots.
-    // Call BEFORE charRenderer->loadModel().
+    /// The character's skin, face, hair and skin-extra art from CharSections.dbc,
+    /// bound to the model's runtime slots by compositePlayerSkin.
     /// `useFemaleModel` is the body a nonbinary character chose. The skin
     /// textures are picked per sex, so a female body reading male skins is
     /// the same mismatch the model path had.
-    PlayerTextureInfo resolvePlayerTextures(pipeline::M2Model& model,
+    PlayerTextureInfo resolvePlayerTextures(const pipeline::M2Model& model,
                                             game::Race race, game::Gender gender,
                                             uint32_t appearanceBytes,
                                             bool useFemaleModel = false);

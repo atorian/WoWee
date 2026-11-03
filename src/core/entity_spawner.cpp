@@ -104,7 +104,8 @@ void EntitySpawner::update(rendering::CpuStageTimes* stages) {
         }
         auto ready = it->second.get();
         if (!spawns_->jobs_.accepts(ready.token)) { it = spawns_->asyncAttachmentLoads_.erase(it); continue; }
-        for (auto& [path, model] : ready.models) assets_.attachmentModelData_[path] = std::move(model);
+        for (const auto& [path, model] : ready.models)
+            if (model) assets_.preparedAttachmentModels_.insert(path);
         for (auto& [path, texture] : ready.predecodedTextures)
             spawns_->preparedAttachmentTextures_[path] = std::move(texture);
         it = spawns_->asyncAttachmentLoads_.erase(it);
@@ -1032,54 +1033,6 @@ bool EntitySpawner::getRenderPositionForGuid(uint64_t guid, glm::vec3& outPos) c
     if (instanceId == 0) return false;
 
     return renderer_->getCharacterRenderer()->getInstancePosition(instanceId, outPos);
-}
-
-EntitySpawner::CachedAttachmentModel
-EntitySpawner::getOrLoadAttachmentModel(const std::vector<std::string>& candidatePaths,
-                                        const std::string& texturePath) {
-    // 1) Geometry: first candidate that yields a valid model wins, parsed at most once.
-    std::shared_ptr<pipeline::M2Model> model;
-    std::string resolvedPath;
-    for (const auto& path : candidatePaths) {
-        auto it = assets_.attachmentModelData_.find(path);
-        if (it != assets_.attachmentModelData_.end()) {
-            if (!it->second) continue;  // known missing - try the next candidate
-            model = it->second;
-            resolvedPath = path;
-            break;
-        }
-
-        auto data = assetManager_->readFile(path);
-        if (data.empty()) {
-            assets_.attachmentModelData_[path] = nullptr;
-            continue;
-        }
-        auto parsed = std::make_shared<pipeline::M2Model>(pipeline::M2Loader::load(data));
-        if (parsed->name.empty()) parsed->name = path;
-        // Skin is a sidecar file for WotLK M2s; vanilla embeds it.
-        if (parsed->version >= 264) {
-            std::string skinPath = pipeline::skinPathForM2(path);
-            auto skinData = assetManager_->readFile(skinPath);
-            if (!skinData.empty()) pipeline::M2Loader::loadSkin(skinData, *parsed);
-        }
-        if (!parsed->isValid()) {
-            assets_.attachmentModelData_[path] = nullptr;
-            continue;
-        }
-        assets_.attachmentModelData_[path] = parsed;
-        model = std::move(parsed);
-        resolvedPath = path;
-        break;
-    }
-    if (!model) return {};
-
-    // 2) Model id is per (geometry, texture) - see assets_.attachmentModelIds_.
-    const std::string key = resolvedPath + '|' + texturePath;
-    auto idIt = assets_.attachmentModelIds_.find(key);
-    if (idIt == assets_.attachmentModelIds_.end()) {
-        idIt = assets_.attachmentModelIds_.emplace(key, nextCreatureModelId_++).first;
-    }
-    return CachedAttachmentModel{.modelId = idIt->second, .model = std::move(model)};
 }
 
 std::string EntitySpawner::getHumanoidBakePath(uint32_t displayId) const {

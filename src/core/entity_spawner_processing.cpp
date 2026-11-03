@@ -753,7 +753,6 @@ void EntitySpawner::processPlayerSpawnQueue() {
         if (!spawns_->jobs_.accepts(s.token) ||
             !spawns_->pendingPlayerSpawnGuids_.erase(s.guid) || spawns_->playerInstances_.count(s.guid)) continue;
         if (!ready.model) continue;
-        assets_.preparedPlayerModels_[(uint32_t(s.raceId) << 8) | s.genderId] = ready.model;
         // Use the latest position after the asynchronous load, not its old snapshot.
         float x = s.x, y = s.y, z = s.z, orientation = s.orientation;
         if (gameHandler_) {
@@ -786,28 +785,18 @@ void EntitySpawner::processPlayerSpawnQueue() {
         spawns_->pendingPlayerSpawns_.pop_front();
         if (!spawns_->pendingPlayerSpawnGuids_.count(request.guid)) continue;
         auto* assets = assetManager_;
-        const uint32_t key = (uint32_t(request.raceId) << 8) | request.genderId;
-        auto cached = assets_.preparedPlayerModels_.find(key);
-        auto model = cached != assets_.preparedPlayerModels_.end() ? cached->second : nullptr;
-        spawns_->asyncPlayerLoads_.push_back(spawns_->jobs_.submit(request.token, 
-            [assets, tables = &tables_, request, model = std::move(model)](const JobGroup::Token& jobToken) mutable {
+        spawns_->asyncPlayerLoads_.push_back(spawns_->jobs_.submit(request.token,
+            [assets, tables = &tables_, request, unitModels = &renderer_->unitModels()](
+                const JobGroup::Token& jobToken) {
                 PreparedPlayerSpawn ready{};
                 ready.request = request;
                 if (!jobToken.current()) return ready;
-                ready.request = request;
-                if (!model) {
-                    const auto path = game::getPlayerModelPath(static_cast<game::Race>(request.raceId),
-                        request.genderId == 1 ? game::Gender::FEMALE : game::Gender::MALE);
-                    auto bytes = assets->readFile(path);
-                    if (bytes.empty()) return ready;
-                    model = std::make_shared<pipeline::M2Model>(pipeline::M2Loader::load(bytes));
-                    const auto skin = assets->readFile(pipeline::skinPathForM2(path));
-                    if (model->version >= 264 && !skin.empty()) pipeline::M2Loader::loadSkin(skin, *model);
-                    if (!model->isValid()) return ready;
-                    if (model->name.empty()) model->name = path;
-                    pipeline::loadExternalAnimations(*assets, path, bytes, *model,
-                        {rendering::anim::STAND, rendering::anim::WALK, rendering::anim::RUN});
-                }
+                // The race's model, with every sequence, from the cache the
+                // portrait and the race's NPCs draw it from.
+                const auto path = game::getPlayerModelPath(static_cast<game::Race>(request.raceId),
+                    request.genderId == 1 ? game::Gender::FEMALE : game::Gender::MALE);
+                const auto model = unitModels->load(path);
+                if (!model || !model->isValid()) return ready;
                 ready.model = model;
                 ready.bodySkinPath = defaultBodySkinPath(request.raceId, request.genderId);
                 {
@@ -903,7 +892,8 @@ void EntitySpawner::processDeferredEquipmentQueue() {
     const auto token = spawns_->jobs_.request(JobGroup::Channel::Equipment, guid);
     auto* assets = assetManager_;
     AsyncEquipmentLoad load;
-    load.future = spawns_->jobs_.submit(token, [assets, tables = &tables_, guid, equipment, snapshot](const JobGroup::Token& jobToken) {
+    load.future = spawns_->jobs_.submit(token, [assets, tables = &tables_, unitModels = &renderer_->unitModels(), guid,
+                                                equipment, snapshot](const JobGroup::Token& jobToken) {
         PreparedEquipmentUpdate ready;
         ready.guid = guid; ready.instanceId = snapshot.instanceId; ready.token = jobToken;
         if (!jobToken.current()) return ready;
@@ -921,8 +911,12 @@ void EntitySpawner::processDeferredEquipmentQueue() {
             if (path.empty()) return;
             const auto key = keyFor(path);
             if (ready.models.count(key)) return;
-            auto model = std::make_shared<pipeline::M2Model>();
-            if (!pipeline::loadM2WithSkin(*assets, path, *model)) {
+            // Candidates, several of which are not on disk (a shield under
+            // Weapon, a shoulder without the race's suffix): only those that
+            // are go to the cache, which reports a missing file as a fault.
+            if (!assets->fileExists(path)) return;
+            auto model = unitModels->load(path);
+            if (!model) {
                 ready.models[key] = nullptr;
                 return;
             }
@@ -1967,19 +1961,12 @@ EntitySpawner::ModelLoad EntitySpawner::loadRemoteMountModel(uint32_t displayId,
     const auto loadedModel = assets_.creatureModelByPath_.find(key);
     const bool modelLoaded = loadedModel != assets_.creatureModelByPath_.end() && cr->getModelData(loadedModel->second);
     if (!modelLoaded || !assets_.displaySkins_.count(displayId)) {
-        pipeline::M2Model model;
-        if (!loadWeaponM2(modelPath, model)) {
-            // An empty entry is a model the workers could not load, not one
-            // still being prepared.
-            std::string key = modelPath;
-            std::replace(key.begin(), key.end(), '/', '\\');
-            std::transform(key.begin(), key.end(), key.begin(),
-                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            auto loaded = assets_.attachmentModelData_.find(key);
-            if (loaded != assets_.attachmentModelData_.end() && !loaded->second)
-                return fail("its model could not be loaded");
+        const auto parsed = attachmentModel(modelPath);
+        if (!parsed) {
+            if (attachmentModelFailed(modelPath)) return fail("its model could not be loaded");
             return ModelLoad::Pending;
         }
+        const pipeline::M2Model& model = *parsed;
         auto skins = getCreatureSkinPaths(displayId, modelPath);
         if (skins.empty()) {
             auto display = assets_.displayDataMap_.find(displayId);
@@ -2014,7 +2001,7 @@ EntitySpawner::ModelLoad EntitySpawner::loadRemoteMountModel(uint32_t displayId,
         bool ready = true;
         for (const auto& [type, path] : skins) {
             (void)type;
-            if (!loadWeaponM2(modelPath, model, path)) ready = false;
+            if (!attachmentModel(modelPath, path)) ready = false;
         }
         if (!ready) return ModelLoad::Pending;
         cr->setPredecodedBLPCache(&spawns_->preparedAttachmentTextures_, true);
@@ -2024,7 +2011,7 @@ EntitySpawner::ModelLoad EntitySpawner::loadRemoteMountModel(uint32_t displayId,
         } guard{cr};
         if (!modelLoaded) {
             const uint32_t loadedId = nextCreatureModelId_++;
-            if (!cr->loadModel(model, loadedId)) {
+            if (!cr->loadModel(parsed, loadedId)) {
                 assets_.unloadableCreaturePaths_.insert(key);
                 return fail("the renderer refused its model");
             }
@@ -2460,16 +2447,14 @@ void EntitySpawner::despawnGameObject(uint64_t guid) {
 
 bool EntitySpawner::loadWeaponM2(const std::string& m2Path, pipeline::M2Model& outModel,
                                  const std::string& texturePath) {
-    if (spawns_->preparedEquipmentUpdate_) {
-        std::string key = m2Path;
-        std::replace(key.begin(), key.end(), '/', '\\');
-        std::transform(key.begin(), key.end(), key.begin(),
-            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        auto ready = spawns_->preparedEquipmentUpdate_->models.find(key);
-        if (ready == spawns_->preparedEquipmentUpdate_->models.end() || !ready->second) return false;
-        outModel = *ready->second;
-        return outModel.hasContent();
-    }
+    const auto model = attachmentModel(m2Path, texturePath);
+    if (!model) return false;
+    outModel = *model;
+    return true;
+}
+
+std::shared_ptr<const pipeline::M2Model> EntitySpawner::attachmentModel(const std::string& m2Path,
+                                                                        const std::string& texturePath) {
     auto normalize = [](std::string path) {
         std::replace(path.begin(), path.end(), '/', '\\');
         std::transform(path.begin(), path.end(), path.begin(),
@@ -2477,79 +2462,61 @@ bool EntitySpawner::loadWeaponM2(const std::string& m2Path, pipeline::M2Model& o
         return path;
     };
     const std::string key = normalize(m2Path);
+    if (spawns_->preparedEquipmentUpdate_) {
+        const auto ready = spawns_->preparedEquipmentUpdate_->models.find(key);
+        return ready == spawns_->preparedEquipmentUpdate_->models.end() ? nullptr : ready->second;
+    }
     const std::string skinKey = normalize(texturePath);
     const std::string taskKey = key + '|' + skinKey;
     if (auto pending = spawns_->asyncAttachmentLoads_.find(taskKey); pending != spawns_->asyncAttachmentLoads_.end()) {
-        if (pending->second.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) return false;
+        if (pending->second.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) return nullptr;
         auto result = pending->second.get();
         spawns_->asyncAttachmentLoads_.erase(pending);
-        if (!spawns_->jobs_.accepts(result.token)) return false;
-        assets_.attachmentModelData_[key] = result.models[key];
+        if (!spawns_->jobs_.accepts(result.token)) return nullptr;
+        if (result.models[key]) assets_.preparedAttachmentModels_.insert(key);
         for (auto& [path, texture] : result.predecodedTextures)
             spawns_->preparedAttachmentTextures_[path] = std::move(texture);
     }
-    auto cached = assets_.attachmentModelData_.find(key);
-    if (cached != assets_.attachmentModelData_.end() && !cached->second) return false;
-    if (cached != assets_.attachmentModelData_.end() &&
-        (skinKey.empty() || spawns_->preparedAttachmentTextures_.count(skinKey))) {
-        outModel = *cached->second;
-        return outModel.hasContent();
-    }
-    if (spawns_->asyncAttachmentLoads_.size() >= 2) return false;
-    auto model = cached == assets_.attachmentModelData_.end() ? nullptr : cached->second;
+    // The model is the unit model cache's; what is waited for here is its
+    // textures, and the skin asked for, decoded by a worker.
+    auto& unitModels = renderer_->unitModels();
+    const auto asked = unitModels.request(key);
+    if (asked.state == pipeline::M2ModelCache::State::Failed) return nullptr;
+    const bool texturesReady = assets_.preparedAttachmentModels_.count(key) &&
+                               (skinKey.empty() || spawns_->preparedAttachmentTextures_.count(skinKey));
+    if (asked.state == pipeline::M2ModelCache::State::Ready && texturesReady) return asked.model;
+    if (texturesReady || spawns_->asyncAttachmentLoads_.count(taskKey) ||
+        spawns_->asyncAttachmentLoads_.size() >= 2)
+        return nullptr;
     auto* assets = assetManager_;
-    spawns_->asyncAttachmentLoads_[taskKey] = spawns_->jobs_.submit([assets, key, skinKey, model](const JobGroup::Token& jobToken) {
-        PreparedEquipmentUpdate ready{};
-                    ready.token = jobToken;
-                    if (!jobToken.current()) return ready;
-        auto parsed = model;
-        if (!parsed) {
-            parsed = std::make_shared<pipeline::M2Model>();
-            // Each failure is reported here, where its cause is known; the
-            // empty result is cached, so this runs once per model.
-            const auto shared = assets->readFileShared(key);
-            if (!shared) {
-                LOG_WARNING("Model not found in any archive: ", key);
-                parsed.reset();
-            } else {
-                const std::vector<uint8_t>& bytes = *shared;
-                *parsed = pipeline::M2Loader::load(bytes);
-                if (parsed->name.empty()) parsed->name = key;
-                if (parsed->version >= 264) {
-                    const std::string skinPath = pipeline::skinPathForM2(key);
-                    const auto skin = assets->readFileShared(skinPath);
-                    if (!skin) {
-                        LOG_WARNING("Model ", key, ": skin file ", skinPath, " not found");
-                    } else if (!pipeline::M2Loader::loadSkin(*skin, *parsed)) {
-                        LOG_WARNING("Model ", key, ": skin file ", skinPath, " did not parse");
-                    }
+    spawns_->asyncAttachmentLoads_[taskKey] = spawns_->jobs_.submit(
+        [assets, models = &unitModels, key, skinKey](const JobGroup::Token& jobToken) {
+            PreparedEquipmentUpdate ready{};
+            ready.token = jobToken;
+            if (!jobToken.current()) return ready;
+            // A file that is missing or draws nothing is reported once, by
+            // the cache, and answers null from then on.
+            const auto model = models->load(key);
+            ready.models[key] = model;
+            if (model) {
+                for (const auto& texture : model->textures) {
+                    if (texture.type != 0) continue;
+                    auto path = texture.filename;
+                    std::replace(path.begin(), path.end(), '/', '\\');
+                    std::transform(path.begin(), path.end(), path.begin(),
+                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                    ready.predecodedTextures[path] = rendering::CharacterRenderer::prepareTexture(assets, path);
                 }
-                if (!parsed->hasContent()) {
-                    LOG_WARNING("Model ", key, " has nothing to draw - no geometry and no emitters (version ",
-                                parsed->version, ", ", parsed->vertices.size(), " vertices, ",
-                                parsed->indices.size(), " indices, ", bytes.size(), " bytes)");
-                    parsed.reset();
-                } else pipeline::loadExternalAnimations(*assets, key, bytes, *parsed,
-                    {rendering::anim::STAND, rendering::anim::WALK, rendering::anim::RUN,
-                     rendering::anim::FLY_IDLE, rendering::anim::FLY_FORWARD});
             }
-        }
-        ready.models[key] = parsed;
-        if (parsed) {
-            for (const auto& texture : parsed->textures) {
-                if (texture.type != 0) continue;
-                auto path = texture.filename;
-                std::replace(path.begin(), path.end(), '/', '\\');
-                std::transform(path.begin(), path.end(), path.begin(),
-                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                ready.predecodedTextures[path] = rendering::CharacterRenderer::prepareTexture(assets, path);
-            }
-        }
-        if (!skinKey.empty())
-            ready.predecodedTextures[skinKey] = rendering::CharacterRenderer::prepareTexture(assets, skinKey);
-        return ready;
-    });
-    return false;
+            if (!skinKey.empty())
+                ready.predecodedTextures[skinKey] = rendering::CharacterRenderer::prepareTexture(assets, skinKey);
+            return ready;
+        });
+    return nullptr;
+}
+
+bool EntitySpawner::attachmentModelFailed(const std::string& m2Path) {
+    return renderer_->unitModels().request(m2Path).state == pipeline::M2ModelCache::State::Failed;
 }
 
 

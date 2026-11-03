@@ -701,14 +701,10 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
     }
 
     // The hair (type 6) and the skin extra (type 8), each into the slot the
-    // model declares for it. A race whose CharSections names no extra art
-    // takes the underwear, or the body, as pipeline::applyCharacterTextures
-    // has it.
-    const std::string& skinExtraArt = !skinExtraPath_.empty()   ? skinExtraPath_
-                                      : !underwearPaths.empty() ? underwearPaths.front()
-                                                                : bodySkinPath_;
+    // model declares for it.
+    const std::string& skinExtra = pipeline::skinExtraArt(skinExtraPath_, underwearPaths, bodySkinPath_);
     for (const auto& [slotType, path] : {std::pair<uint32_t, const std::string*>{6, &hairScalpPath},
-                                         std::pair<uint32_t, const std::string*>{8, &skinExtraArt}}) {
+                                         std::pair<uint32_t, const std::string*>{8, &skinExtra}}) {
         if (path->empty()) continue;
         TextureRef tex = charRenderer_->loadTexture(*path);
         if (!tex) continue;

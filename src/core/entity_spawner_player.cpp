@@ -122,7 +122,7 @@ void EntitySpawner::spawnOnlinePlayer(uint64_t guid,
     if (!spawns_->preparedPlayerSpawn_ || !spawns_->preparedPlayerSpawn_->model) return;
     if (modelId == 0) {
         modelId = nextPlayerModelId_++;
-        if (!charRenderer->loadModel(*spawns_->preparedPlayerSpawn_->model, modelId)) return;
+        if (!charRenderer->loadModel(spawns_->preparedPlayerSpawn_->model, modelId)) return;
         assets_.playerModelCache_[cacheKey] = modelId;
     }
 

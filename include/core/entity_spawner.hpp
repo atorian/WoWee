@@ -442,9 +442,18 @@ private:
     // Creature display lookup building
     void buildCreatureDisplayLookups();
 
-    // Weapon M2 loading helper
+    /// An attachment's or a mount's model - the unit model cache's parse - once
+    /// a worker has decoded its textures and `texturePath`; null until then,
+    /// and for a model that cannot be had (attachmentModelFailed). Inside an
+    /// equipment update, the model that update's worker prepared.
+    std::shared_ptr<const pipeline::M2Model> attachmentModel(const std::string& m2Path,
+                                                             const std::string& texturePath = {});
+    /// attachmentModel, copied out, for the callers that take a model by value.
     bool loadWeaponM2(const std::string& m2Path, pipeline::M2Model& outModel,
                       const std::string& texturePath = {});
+    /// Whether `m2Path` is a model that will never load, rather than one on
+    /// its way.
+    bool attachmentModelFailed(const std::string& m2Path);
 
     // GameObject display lookups
     void buildGameObjectDisplayLookups();
@@ -489,24 +498,6 @@ private:
     static constexpr int MAX_ASYNC_CREATURE_LOADS = 4;
 
     // --- NPC equipment attachment models (helm, shoulders) ---
-    // Equipment is shared across NPCs, so a crowd wearing the same gear would
-    // otherwise re-read, re-parse and re-upload the same M2 once per spawn. Cache
-    // it by resolved path. A modelId of 0 negative-caches a path that has no model,
-    // so a missing file is not retried against the disk on every spawn.
-    struct CachedAttachmentModel {
-        uint32_t modelId = 0;                      // 0 = no usable model
-        std::shared_ptr<pipeline::M2Model> model;  // shared_ptr: M2Model is incomplete here
-    };
-    // Parsed geometry, keyed by path. A null value negative-caches a missing file so
-    // it is not probed against the disk on every spawn.
-    // Renderer model id, keyed by "path|texture". attachWeapon() binds the texture to
-    // the model id, so two recolours of one mesh must not share an id or the last
-    // NPC spawned would retexture every other NPC wearing that mesh.
-    /// Resolve the first candidate path with a usable model, reading and parsing it
-    /// at most once. Returns modelId == 0 when no candidate yields a valid model.
-    CachedAttachmentModel getOrLoadAttachmentModel(
-        const std::vector<std::string>& candidatePaths, const std::string& texturePath);
-
     /// Says which model the first few humanoid displays resolved to, so an
     /// asset overlay that re-points them can be told apart from one that never
     /// reached the client. Five is enough to see and few enough to ignore.
@@ -595,7 +586,9 @@ private:
         JobGroup::Token token;
         uint32_t instanceId = 0;
         std::vector<std::pair<int, std::string>> regions;
-        std::unordered_map<std::string, std::shared_ptr<pipeline::M2Model>> models;
+        /// The unit model cache's parses, by lower-case path; null where one
+        /// could not be had.
+        std::unordered_map<std::string, std::shared_ptr<const pipeline::M2Model>> models;
         WornEquipment equipment;
         std::unordered_map<std::string, pipeline::BLPImage> predecodedTextures;
     };
@@ -620,7 +613,8 @@ private:
     };
     struct PreparedPlayerSpawn {
         PendingPlayerSpawn request;
-        std::shared_ptr<pipeline::M2Model> model;
+        /// The unit model cache's parse of the race's model.
+        std::shared_ptr<const pipeline::M2Model> model;
         std::string bodySkinPath, skinExtraPath, hairTexturePath, faceLowerPath, faceUpperPath;
         std::vector<std::string> underwearPaths;
         std::unordered_map<std::string, pipeline::BLPImage> textures;
@@ -784,7 +778,10 @@ private:
     std::unordered_map<uint32_t, std::string> gameObjectDisplayIdToPath_;
     bool gameObjectLookupsBuilt_ = false;
     std::unordered_map<uint32_t, bool> modelIdIsWolfLike_;
-    std::unordered_map<std::string, std::shared_ptr<pipeline::M2Model>> attachmentModelData_;
+    /// Attachment and mount models (by lower-case path) whose own textures a
+    /// worker has decoded into preparedAttachmentTextures_; the model itself
+    /// is the unit model cache's.
+    std::unordered_set<std::string> preparedAttachmentModels_;
     std::unordered_map<std::string, uint32_t> attachmentModelIds_;
     /// The model each display draws: its file's (creatureModelByPath_).
     std::unordered_map<uint32_t, uint32_t> displayIdModelCache_;
@@ -817,7 +814,6 @@ private:
     std::unordered_set<uint32_t> nonRenderableCreatureDisplayIds_;
     std::unordered_map<uint32_t, uint32_t> playerModelCache_;
     std::unordered_map<uint32_t, PlayerTextureSlots> playerTextureSlotsByModelId_;
-    std::unordered_map<uint32_t, std::shared_ptr<pipeline::M2Model>> preparedPlayerModels_;
     std::unordered_map<uint32_t, uint32_t> gameObjectDisplayIdModelCache_;
     std::unordered_set<uint32_t> gameObjectDisplayIdFailedCache_;
     std::unordered_map<uint32_t, uint32_t> gameObjectDisplayIdWmoCache_;

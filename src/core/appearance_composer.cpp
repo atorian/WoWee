@@ -46,7 +46,7 @@ AppearanceComposer::AppearanceComposer(rendering::Renderer* renderer,
 {
 }
 
-PlayerTextureInfo AppearanceComposer::resolvePlayerTextures(pipeline::M2Model& model,
+PlayerTextureInfo AppearanceComposer::resolvePlayerTextures(const pipeline::M2Model& model,
                                                             game::Race race, game::Gender gender,
                                                             uint32_t appearanceBytes,
                                                             bool useFemaleModel) {
@@ -59,7 +59,6 @@ PlayerTextureInfo AppearanceComposer::resolvePlayerTextures(pipeline::M2Model& m
                         (gender == game::Gender::NONBINARY && useFemaleModel);
     uint32_t targetSexId = female ? 1u : 0u;
 
-    const char* raceFolderName = raceModelFolder(targetRaceId);
     result.bodySkinPath = defaultBodySkinPath(targetRaceId, targetSexId);
 
     const AppearanceBytes look = unpackAppearanceBytes(appearanceBytes);
@@ -121,28 +120,18 @@ PlayerTextureInfo AppearanceComposer::resolvePlayerTextures(pipeline::M2Model& m
         }
     }
 
-    // pipeline/char_sections.hpp fills the runtime slots - the same rules the
-    // portrait and the NPC path use, in one place.
-    {
-        pipeline::CharacterSectionTextures resolved;
-        resolved.bodySkin  = result.bodySkinPath;
-        resolved.skinExtra = result.skinExtraPath;
-        resolved.hair      = result.hairTexturePath;
-        resolved.underwear = result.underwearPaths;
-        pipeline::applyCharacterTextures(model, resolved, raceFolderName);
-    }
-
     // Everything the head detail depends on, in one line, whichever way it went.
     // Skin-coloured eyelashes are what you see when type 8 falls back to the
     // body or pelvis art, and the three things that decide it - whether the
     // model asks for type 8, whether CharSections offered an extra texture, and
-    // what was bound in the end - cannot be told apart from a screenshot.
+    // what is bound (compositePlayerSkin) - cannot be told apart from a
+    // screenshot.
     {
         bool modelWantsExtra = false;
-        std::string bound;
-        for (const auto& tex : model.textures) {
-            if (tex.type == 8) { modelWantsExtra = true; bound = tex.filename; break; }
-        }
+        for (const auto& tex : model.textures) modelWantsExtra = modelWantsExtra || tex.type == 8;
+        const std::string bound = modelWantsExtra
+            ? pipeline::skinExtraArt(result.skinExtraPath, result.underwearPaths, result.bodySkinPath)
+            : std::string();
         LOG_WARNING("Character head detail: model asks for type 8: ",
                     (modelWantsExtra ? "yes" : "no"),
                     " | CharSections extra: '", result.skinExtraPath,
@@ -209,6 +198,22 @@ void AppearanceComposer::compositePlayerSkin(uint32_t modelSlotId, const PlayerT
                         break;
                     }
                 }
+            }
+        }
+    }
+
+    // The skin extra (type 8): ears, horns, the head-detail sheet. Its name
+    // used to be written into the model, which the renderer never reads, and
+    // the slot drew nothing.
+    if (const std::string& extraPath = pipeline::skinExtraArt(texInfo.skinExtraPath, texInfo.underwearPaths,
+                                                              texInfo.bodySkinPath);
+        !extraPath.empty()) {
+        rendering::TextureRef extraTex = charRenderer->loadTexture(extraPath);
+        const auto* modelData = charRenderer->getModelData(modelSlotId);
+        if (extraTex && extraTex != charRenderer->whiteTexture() && modelData) {
+            for (size_t ti = 0; ti < modelData->textures.size(); ti++) {
+                if (modelData->textures[ti].type == 8)
+                    charRenderer->setModelTexture(modelSlotId, static_cast<uint32_t>(ti), extraTex);
             }
         }
     }

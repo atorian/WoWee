@@ -28,7 +28,6 @@ namespace wowee {
 namespace pipeline {
 
 class DBCFile;
-struct M2Model;
 
 /// Which character these textures are for.
 struct CharacterAppearance {
@@ -71,20 +70,18 @@ CharacterSectionTextures resolveCharacterSections(
     bool (*keepUnderwear)(const std::string&, void*) = nullptr,
     void* keepUnderwearContext = nullptr);
 
-/// Put the resolved textures into a character model's runtime texture slots.
+/// The art for a character model's Skin Extra slot (texture type 8): a
+/// head-detail sheet for a human or an orc, the ears for a night elf, the
+/// horns for a draenei male, the tail for a draenei female. Seven of the
+/// twenty race and sex pairs name none, and take the first underwear, else
+/// the body skin - art that exists rather than nothing. Empty only when the
+/// character has no body skin either.
 ///
-/// A non-zero texture type means the client supplies the art - that is what the
-/// type is for, and only type 0 carries a filename that means anything. So a
-/// name found in one of these slots is not authoritative and must not be
-/// treated as one: a model in the wild has 'Ohren' baked into its Skin Extra
-/// slot, and every copy of this loop that filled "only if empty" left that name
-/// in place, resolved it to nothing, and drew the ears and eyelashes from a
-/// blank.
-///
-/// `raceFolderName` is used only for the last-resort hair path.
-void applyCharacterTextures(M2Model& model,
-                            const CharacterSectionTextures& textures,
-                            const std::string& raceFolderName);
+/// The slot is the client's to fill: whatever name a model carries in it is
+/// not a file (one in the wild says 'Ohren'), and the renderer reads no name
+/// but type 0's - so the art is bound to the slot, not written into the model.
+const std::string& skinExtraArt(const std::string& skinExtra, const std::vector<std::string>& underwear,
+                                const std::string& bodySkin);
 
 }  // namespace pipeline
 }  // namespace wowee
