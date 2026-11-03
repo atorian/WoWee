@@ -1382,44 +1382,11 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
                 const pipeline::RequiredTable itemDisplayDbc(tables_, "ItemDisplayInfo.dbc",
                                                              "humanoid creatures' equipment");
 
-                uint32_t capeDisplayId = itExtra->second.equipDisplayId[10];
-                if (capeDisplayId != 0) {
-                        int32_t recIdx = itemDisplayDbc->findRecordById(capeDisplayId);
-                        if (recIdx >= 0) {
-                            const uint32_t leftTexField = itemDisplayDbc.column("LeftModelTexture");
-                            const uint32_t rightTexField = itemDisplayDbc.column("RightModelTexture");
-                            std::vector<std::string> capeNames;
-                            auto addName = [&](const std::string& n) {
-                                if (!n.empty() &&
-                                    std::find(capeNames.begin(), capeNames.end(), n) == capeNames.end()) {
-                                    capeNames.push_back(n);
-                                }
-                            };
-                            addName(itemDisplayDbc->getString(static_cast<uint32_t>(recIdx), leftTexField));
-                            addName(itemDisplayDbc->getString(static_cast<uint32_t>(recIdx), rightTexField));
-
-                            const bool npcIsFemale = (itExtra->second.sexId == 1);
-                            // Same list, same order, one place:
-                            // pipeline/item_textures.hpp.
-                            std::vector<std::string> candidates;
-                            for (const auto& raw : capeNames) {
-                                for (auto& c : pipeline::capeTextureCandidates(raw, npcIsFemale)) {
-                                    if (std::find(candidates.begin(), candidates.end(), c) ==
-                                        candidates.end()) {
-                                        candidates.push_back(std::move(c));
-                                    }
-                                }
-                            }
-
-                            for (const auto& p : candidates) {
-                                if (assetManager_->fileExists(p)) {
-                                    hasRenderableCape = true;
-                                    capeTexturePath = p;
-                                    break;
-                                }
-                            }
-                        }
-                }
+                // The same answer the display's worker decoded for it.
+                capeTexturePath = pipeline::findCapeTexture(*assetManager_, itemDisplayDbc,
+                                                            itExtra->second.equipDisplayId[10],
+                                                            itExtra->second.sexId == 1);
+                hasRenderableCape = !capeTexturePath.empty();
 
                 // Read GeosetGroup1 from equipment to drive clothed mesh selection
                 {
@@ -1607,15 +1574,16 @@ if (const auto* md = charRenderer->getModelData(modelId)) {
 
         // Apply cape texture override so the cloak mesh shows the actual cape
         // instead of the default body texture.
-        if (hasRenderableCape && !capeTexturePath.empty()) {
-            rendering::TextureRef capeTex = charRenderer->loadTexture(capeTexturePath);
-            if (capeTex && capeTex != charRenderer->whiteTexture()) {
-                scene().characters().setGroupTextureOverride(instanceId, 15, capeTex);
-                if (const auto* md2 = charRenderer->getModelData(modelId)) {
-                    for (size_t ti = 0; ti < md2->textures.size(); ti++) {
-                        if (md2->textures[ti].type == 2) {
-                            scene().characters().setTextureSlotOverride(instanceId, static_cast<uint16_t>(ti), capeTex);
-                        }
+        // Decoded with the display's other textures, by its worker
+        // (resolveHumanoidInstanceTextures).
+        if (const auto cape = assets_.humanoidCapeTextures_.find(displayId);
+            hasRenderableCape && cape != assets_.humanoidCapeTextures_.end()) {
+            const rendering::TextureRef& capeTex = cape->second;
+            scene().characters().setGroupTextureOverride(instanceId, 15, capeTex);
+            if (const auto* md2 = charRenderer->getModelData(modelId)) {
+                for (size_t ti = 0; ti < md2->textures.size(); ti++) {
+                    if (md2->textures[ti].type == 2) {
+                        scene().characters().setTextureSlotOverride(instanceId, static_cast<uint16_t>(ti), capeTex);
                     }
                 }
             }
@@ -1753,6 +1721,19 @@ EntitySpawner::resolveHumanoidInstanceTextures(uint32_t modelId, uint32_t displa
                                     if (tt == 1 || tt == 11) out.emplace_back(static_cast<uint16_t>(ti), skinTex);
                                 }
                             }
+                        }
+                    }
+
+                    // The cape, which every instance's clothing pass binds
+                    // (normalizeHumanoidClothingGeosets).
+                    if (extra.equipDisplayId[10] != 0) {
+                        const pipeline::RequiredTable itemDisplayDbc(tables_, "ItemDisplayInfo.dbc",
+                                                                     "humanoid creatures' capes");
+                        const std::string capePath = pipeline::findCapeTexture(
+                            *assetManager_, itemDisplayDbc, extra.equipDisplayId[10], extra.sexId == 1);
+                        if (!capePath.empty()) {
+                            rendering::TextureRef capeTex = charRenderer->loadTexture(capePath);
+                            if (capeTex && capeTex != whiteTex) assets_.humanoidCapeTextures_[displayId] = capeTex;
                         }
                     }
             }

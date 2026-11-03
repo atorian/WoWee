@@ -554,64 +554,18 @@ void EntitySpawner::setOnlinePlayerEquipment(uint64_t guid, const WornEquipment&
     // The geoset above enables the cape mesh, but without a texture it renders blank.
     if (hasInvType({16})) {
         // Back/cloak is WoW equipment slot 14 (BACK) in the 19-element array.
-        uint32_t capeDid = displayInfoIds[14];
-        if (capeDid != 0) {
-            int32_t capeRecIdx = displayInfoDbc->findRecordById(capeDid);
-            if (capeRecIdx >= 0) {
-                const uint32_t leftTexField = displayInfoDbc.column("LeftModelTexture");
-                // Some cloaks (e.g. Jaina's Radiance) carry their texture only in
-                // the right field; the character-preview screen checks both, so
-                // match it here - otherwise the world model shows the cape mesh
-                // untextured even though the paperdoll preview looks correct.
-                const uint32_t rightTexField = displayInfoDbc.column("RightModelTexture");
-                std::string leftName = displayInfoDbc->getString(
-                    static_cast<uint32_t>(capeRecIdx), leftTexField);
-                std::string rightName = displayInfoDbc->getString(
-                    static_cast<uint32_t>(capeRecIdx), rightTexField);
-
-                std::vector<std::string> capeNames;
-                auto addCapeName = [&](const std::string& n) {
-                    if (!n.empty() &&
-                        std::find(capeNames.begin(), capeNames.end(), n) == capeNames.end())
-                        capeNames.push_back(n);
-                };
-                if (st.genderId == 1) { addCapeName(rightName); addCapeName(leftName); }
-                else                  { addCapeName(leftName);  addCapeName(rightName); }
-
-                if (!capeNames.empty()) {
-                    // Where a cape's art might be, in the order to try it -
-                    // pipeline/item_textures.hpp. Written out here, in the NPC
-                    // path and in the portrait, identically, which is the only
-                    // reason the three agreed.
-                    std::vector<std::string> capeCandidates;
-                    for (const auto& capeName : capeNames) {
-                        for (auto& c : pipeline::capeTextureCandidates(capeName, st.genderId == 1)) {
-                            if (std::find(capeCandidates.begin(), capeCandidates.end(), c) ==
-                                capeCandidates.end()) {
-                                capeCandidates.push_back(std::move(c));
-                            }
-                        }
-                    }
-
-                    rendering::TextureRef capeTexture;
-                    for (const auto& candidate : capeCandidates) {
-                        rendering::TextureRef tex = charRenderer->loadTexture(candidate);
-                        if (tex && tex != charRenderer->whiteTexture()) {
-                            capeTexture = std::move(tex);
-                            break;
-                        }
-                    }
-
-                    if (capeTexture) {
-                        scene().characters().setGroupTextureOverride(st.instanceId, 15, capeTexture);
-                        if (const auto* md = charRenderer->getModelData(st.modelId)) {
-                            for (size_t ti = 0; ti < md->textures.size(); ti++) {
-                                if (md->textures[ti].type == 2) {
-                                    scene().characters().setTextureSlotOverride(
-                                        st.instanceId, static_cast<uint16_t>(ti), capeTexture);
-                                }
-                            }
-                        }
+        // The path the equipment worker decoded for it.
+        const std::string capePath =
+            pipeline::findCapeTexture(*assetManager_, displayInfoDbc, displayInfoIds[14], st.genderId == 1);
+        rendering::TextureRef capeTexture;
+        if (!capePath.empty()) capeTexture = charRenderer->loadTexture(capePath);
+        if (capeTexture && capeTexture != charRenderer->whiteTexture()) {
+            scene().characters().setGroupTextureOverride(st.instanceId, 15, capeTexture);
+            if (const auto* md = charRenderer->getModelData(st.modelId)) {
+                for (size_t ti = 0; ti < md->textures.size(); ti++) {
+                    if (md->textures[ti].type == 2) {
+                        scene().characters().setTextureSlotOverride(
+                            st.instanceId, static_cast<uint16_t>(ti), capeTexture);
                     }
                 }
             }

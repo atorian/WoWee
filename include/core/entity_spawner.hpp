@@ -804,6 +804,9 @@ private:
     /// What a humanoid display's instances wear over its skin - hair, the
     /// head detail, a skin without armour - by texture slot, decoded once.
     std::unordered_map<uint32_t, std::vector<std::pair<uint16_t, rendering::TextureRef>>> humanoidInstanceTextures_;
+    /// A humanoid display's cape, decoded with those; absent for a display
+    /// that wears none.
+    std::unordered_map<uint32_t, rendering::TextureRef> humanoidCapeTextures_;
     std::unordered_set<uint32_t> displayIdTexturesApplied_;
     mutable std::unordered_set<uint32_t> warnedMissingDisplayDataIds_;
     mutable std::unordered_set<uint32_t> warnedMissingModelPathIds_;

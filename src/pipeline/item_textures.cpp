@@ -1,6 +1,7 @@
 #include "pipeline/item_textures.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <mutex>
 #include <unordered_set>
@@ -70,6 +71,22 @@ ItemDisplayArt readItemDisplayArt(const RequiredTable& itemDisplayInfo, uint32_t
     if (dot != std::string::npos) art.modelFile.resize(dot);
     art.modelFile += ".m2";
     return art;
+}
+
+std::string findCapeTexture(AssetManager& assets, const RequiredTable& itemDisplayInfo,
+                            uint32_t displayId, bool isFemale) {
+    if (displayId == 0) return {};
+    const int32_t row = itemDisplayInfo->findRecordById(displayId);
+    if (row < 0) return {};
+    const std::string left = itemDisplayInfo->getString(static_cast<uint32_t>(row),
+                                                        itemDisplayInfo.column("LeftModelTexture"));
+    const std::string right = itemDisplayInfo->getString(static_cast<uint32_t>(row),
+                                                         itemDisplayInfo.column("RightModelTexture"));
+    for (const std::string* name : isFemale ? std::array{&right, &left} : std::array{&left, &right}) {
+        for (const auto& candidate : capeTextureCandidates(*name, isFemale))
+            if (assets.fileExists(candidate)) return candidate;
+    }
+    return {};
 }
 
 void getItemDisplayInfoTextureFields(const RequiredTable& itemDisplayInfo, uint32_t (&out)[8]) {

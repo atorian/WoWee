@@ -15,6 +15,7 @@
 // with load(), which parses on the calling thread when no one has yet. What is
 // handed out is never changed; a consumer that needs to change it copies it.
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <future>
@@ -51,21 +52,31 @@ public:
     /// failed.
     [[nodiscard]] Request request(const std::string& path);
     /// For a worker: the model of `path`, parsed on this thread when no one
-    /// has parsed it yet; null when it cannot be had.
+    /// has begun to parse it; null when it cannot be had. It waits only for a
+    /// parse already running, never for one still queued: a worker of the
+    /// pool that request() queues on would otherwise wait for its own pool.
     [[nodiscard]] std::shared_ptr<const M2Model> load(const std::string& path);
 
 private:
+    /// One file's parse, done by whoever claims it first: the worker
+    /// request() queued, or a load() that comes before it.
+    struct Parse {
+        std::promise<std::shared_ptr<const M2Model>> promise;
+        std::shared_future<std::shared_ptr<const M2Model>> result = promise.get_future().share();
+        std::atomic<bool> claimed{false};
+    };
     struct Entry {
-        std::shared_future<std::shared_ptr<const M2Model>> parse;
+        std::shared_ptr<Parse> parse;
         size_t bytes = 0;
         std::list<std::string>::iterator recent;
     };
     [[nodiscard]] static std::string keyOf(const std::string& path);
     [[nodiscard]] std::shared_ptr<const M2Model> parse(const std::string& path) const;
-    /// Under the lock: the entry for `key`, made (and its parse begun on a
-    /// worker when `onWorker`, else left for the caller) if there is none.
-    Entry& entryFor(const std::string& key, const std::string& path, bool onWorker,
-                    std::shared_ptr<std::promise<std::shared_ptr<const M2Model>>>* parseHere);
+    /// Under the lock: the entry for `key`, made if there is none, with its
+    /// parse queued on a worker when `queue`.
+    Entry& entryFor(const std::string& key, const std::string& path, bool queue);
+    /// Parses `path` into `parse` unless someone claimed it first.
+    void run(const std::string& key, const std::string& path, Parse& parse);
     void noteParsed(const std::string& key, const std::shared_ptr<const M2Model>& model);
     void evict();
 

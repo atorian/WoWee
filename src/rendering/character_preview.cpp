@@ -979,52 +979,15 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
 
     // Cloak texture (group 15) is separate from body compositing.
     if (hasInvType({16})) {
-        uint32_t capeDisplayId = findDisplayId({16});
-        if (capeDisplayId != 0) {
-            int32_t capeRecIdx = displayInfoDbc->findRecordById(capeDisplayId);
-            if (capeRecIdx >= 0) {
-                std::vector<std::string> capeNames;
-                auto addName = [&](const std::string& n) {
-                    if (!n.empty() && std::find(capeNames.begin(), capeNames.end(), n) == capeNames.end()) {
-                        capeNames.push_back(n);
-                    }
-                };
-                std::string leftName = displayInfoDbc->getString(static_cast<uint32_t>(capeRecIdx),
-                                                                 displayInfoDbc.column("LeftModelTexture"));
-                std::string rightName = displayInfoDbc->getString(static_cast<uint32_t>(capeRecIdx),
-                                                                  displayInfoDbc.column("RightModelTexture"));
-                if (gender_ == game::Gender::FEMALE) {
-                    addName(rightName);
-                    addName(leftName);
-                } else {
-                    addName(leftName);
-                    addName(rightName);
-                }
-
-                // pipeline/item_textures.hpp knows where a cape's art is and
-                // in what order to try for it.
-                std::vector<std::string> candidates;
-                for (const auto& nameRaw : capeNames) {
-                    for (auto& c : pipeline::capeTextureCandidates(
-                             nameRaw, gender_ == game::Gender::FEMALE)) {
-                        if (std::find(candidates.begin(), candidates.end(), c) == candidates.end()) {
-                            candidates.push_back(std::move(c));
-                        }
-                    }
-                }
-                const TextureRef& whiteTex = charRenderer_->whiteTexture();
-                for (const auto& c : candidates) {
-                    TextureRef capeTex = charRenderer_->loadTexture(c);
-                    if (capeTex && capeTex != whiteTex) {
-                        charRenderer_->setGroupTextureOverride(instanceId_, 15, capeTex);
-                        if (const auto* md = charRenderer_->getModelData(PREVIEW_MODEL_ID)) {
-                            for (size_t ti = 0; ti < md->textures.size(); ti++) {
-                                if (md->textures[ti].type == 2) {
-                                    charRenderer_->setTextureSlotOverride(instanceId_, static_cast<uint16_t>(ti), capeTex);
-                                }
-                            }
-                        }
-                        break;
+        const std::string capePath = pipeline::findCapeTexture(*assetManager_, displayInfoDbc, findDisplayId({16}),
+                                                               gender_ == game::Gender::FEMALE);
+        const TextureRef capeTex = capePath.empty() ? TextureRef{} : charRenderer_->loadTexture(capePath);
+        if (capeTex && capeTex != charRenderer_->whiteTexture()) {
+            charRenderer_->setGroupTextureOverride(instanceId_, 15, capeTex);
+            if (const auto* md = charRenderer_->getModelData(PREVIEW_MODEL_ID)) {
+                for (size_t ti = 0; ti < md->textures.size(); ti++) {
+                    if (md->textures[ti].type == 2) {
+                        charRenderer_->setTextureSlotOverride(instanceId_, static_cast<uint16_t>(ti), capeTex);
                     }
                 }
             }

@@ -4,6 +4,7 @@
 // frame thread, while the world held it parsed already.
 #include <catch_amalgamated.hpp>
 
+#include "core/thread_pool.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/m2_model_cache.hpp"
@@ -13,6 +14,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <future>
 #include <thread>
 #include <vector>
 
@@ -83,6 +85,36 @@ TEST_CASE("a unit model is parsed once and every asker is handed that parse", "[
     // get the very same parse rather than another one.
     CHECK(cache.load("creature/wolf/wolf.m2") == asked.model);
     CHECK(cache.request("CREATURE\\WOLF\\WOLF.M2").model == asked.model);
+}
+
+TEST_CASE("a load does a parse still queued itself rather than wait for the queue", "[m2][cache]") {
+    const auto root = wowee::test::makeDataRoot("wowee_m2_model_cache_queued", {
+        {"creature\\wolf\\wolf.m2", triangleM2()},
+        {"creature\\wolf\\wolf00.skin", triangleSkin()},
+    });
+    wowee::pipeline::AssetManager assets;
+    REQUIRE(assets.initialize(root.string()));
+    M2ModelCache cache(assets, size_t{64} << 20);
+
+    // Every IO worker busy - as they are when the workers that load() are
+    // themselves the pool's - and the frame's request queued behind them.
+    auto& pool = wowee::core::ThreadPool::ioWorkers();
+    std::promise<void> gate;
+    const std::shared_future<void> open = gate.get_future().share();
+    std::vector<std::future<void>> busy;
+    for (size_t i = 0; i < pool.threadCount(); ++i) busy.push_back(pool.submit([open] { open.wait(); }));
+    CHECK(cache.request("Creature\\Wolf\\Wolf.m2").state == M2ModelCache::State::Loading);
+
+    auto loaded = std::async(std::launch::async, [&cache] { return cache.load("Creature\\Wolf\\Wolf.m2"); });
+    const bool answered = loaded.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    gate.set_value();
+    REQUIRE(answered);
+    const auto model = loaded.get();
+    REQUIRE(model);
+    CHECK(model->vertices.size() == 3);
+    // The queued worker, when it comes, finds the parse done.
+    pool.waitIdle();
+    CHECK(cache.request("Creature\\Wolf\\Wolf.m2").model == model);
 }
 
 TEST_CASE("a unit model that is not there fails once and is not waited for", "[m2][cache]") {

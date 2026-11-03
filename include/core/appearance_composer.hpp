@@ -4,6 +4,9 @@
 #include "game/character.hpp"
 #include "game/inventory.hpp"
 #include "rendering/animation/weapon_type.hpp"
+#include <glm/glm.hpp>
+#include <future>
+#include <memory>
 #include <string>
 #include <vector>
 #include <unordered_set>
@@ -65,8 +68,15 @@ public:
     std::unordered_set<uint16_t> buildDefaultPlayerGeosets(uint8_t raceId, uint8_t sexId,
                                                            uint8_t hairStyleId, uint8_t facialId);
 
-    // Equipment weapon loading (reads inventory, attaches weapon M2 models)
+    /// Hang what the character wears on it again - helm, shoulders, weapons,
+    /// their enchants - from the inventory and the sheath state. Its models
+    /// and textures are made ready on a worker and put on in update(), a frame
+    /// or two later; until then the character keeps what it has. They were
+    /// read and parsed here, on the frame, at world entry and on every
+    /// sheathe.
     void loadEquippedWeapons();
+    /// Puts the equipment on once it is ready. Every frame.
+    void update();
 
     // Weapon sheathe state
     void setWeaponsSheathed(bool sheathed) { weaponsSheathed_ = sheathed; }
@@ -92,19 +102,30 @@ public:
     [[nodiscard]] uint32_t getSkinTextureSlotIndex() const { return skinTextureSlotIndex_; }
     [[nodiscard]] uint32_t getCloakTextureSlotIndex() const { return cloakTextureSlotIndex_; }
 
+    ~AppearanceComposer();
+    AppearanceComposer(const AppearanceComposer&) = delete;
+    AppearanceComposer& operator=(const AppearanceComposer&) = delete;
+
 private:
+    /// One model the character wears on a bone, as the inventory says.
+    struct WornAttachment {
+        const char* what;               ///< "helm", "shoulder", "weapon", "ranged weapon"
+        uint32_t attachmentId = 0;
+        std::string modelPath;          ///< the file on disk, chosen among the candidates
+        std::string texturePath;
+        glm::mat4 localTransform{1.0f};
+        uint32_t enchantId = 0;         ///< shown on it, 0 for none
+    };
+    /// Everything worn, in the order it is hung: helm, shoulders, the hands,
+    /// the ranged weapon when the main hand is empty.
+    std::vector<WornAttachment> wornAttachments() const;
+    struct PreparedEquipment;
+    void startPreparingEquipment();
+    void applyEquipment(PreparedEquipment& prepared);
+
+    /// From the shared unit model cache; while equipment is put on, from what
+    /// was prepared for it.
     bool loadWeaponM2(const std::string& m2Path, pipeline::M2Model& outModel);
-
-    /// Attach the equipped head item's model. Other players resolve this through
-    /// EntitySpawner; the local character had no equivalent at all.
-    void loadEquippedHelm(game::Inventory& inventory);
-
-    /// Attach the equipped shoulders' two models, the same way.
-    void loadEquippedShoulders(game::Inventory& inventory);
-
-    // Attach the enchant visual (sharpening-stone glint, weapon glow) of the item in
-    // the given equipment slot to the weapon already attached at attachmentId.
-    void applyEnchantVisuals(uint32_t charInstanceId, int equipSlotIndex, uint32_t attachmentId);
 
     rendering::Renderer* renderer_;
 
@@ -125,6 +146,13 @@ private:
     bool showingMiningPick_ = false;
     uint32_t miningPickInstanceId_ = 0;
     bool showingFishingPole_ = false;
+
+    /// The equipment being made ready, and whether it was asked for again
+    /// meanwhile (and so is out of date when it arrives).
+    std::future<std::shared_ptr<PreparedEquipment>> preparing_;
+    bool equipmentAskedAgain_ = false;
+    /// What applyEquipment is putting on, for loadWeaponM2.
+    const PreparedEquipment* applying_ = nullptr;
 };
 
 } // namespace core

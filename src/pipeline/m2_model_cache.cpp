@@ -41,14 +41,17 @@ M2ModelCache::M2ModelCache(AssetManager& assets, size_t budgetBytes)
 
 M2ModelCache::~M2ModelCache() {
     // A parse still running on a worker notes its result here: it finishes
-    // first.
-    std::vector<std::shared_future<std::shared_ptr<const M2Model>>> running;
+    // first. One still queued is claimed, so that when its worker comes to it
+    // it finds the parse taken and touches nothing of this.
+    std::vector<std::shared_ptr<Parse>> parses;
     {
         std::lock_guard lock(mutex_);
-        for (const auto& [key, entry] : entries_) running.push_back(entry.parse);
+        for (const auto& [key, entry] : entries_) parses.push_back(entry.parse);
     }
-    for (const auto& parse : running)
-        if (parse.valid()) parse.wait();
+    for (const auto& parse : parses) {
+        if (!parse->claimed.exchange(true)) parse->promise.set_value(nullptr);
+        parse->result.wait();
+    }
 }
 
 std::string M2ModelCache::keyOf(const std::string& path) {
@@ -70,9 +73,7 @@ std::shared_ptr<const M2Model> M2ModelCache::parse(const std::string& path) cons
     return model;
 }
 
-M2ModelCache::Entry& M2ModelCache::entryFor(
-        const std::string& key, const std::string& path, bool onWorker,
-        std::shared_ptr<std::promise<std::shared_ptr<const M2Model>>>* parseHere) {
+M2ModelCache::Entry& M2ModelCache::entryFor(const std::string& key, const std::string& path, bool queue) {
     auto it = entries_.find(key);
     if (it != entries_.end()) {
         recent_.splice(recent_.begin(), recent_, it->second.recent);
@@ -81,19 +82,21 @@ M2ModelCache::Entry& M2ModelCache::entryFor(
     recent_.push_front(key);
     Entry entry;
     entry.recent = recent_.begin();
-    if (onWorker) {
-        entry.parse = core::ThreadPool::ioWorkers()
-                          .submit("unit model", [this, key, path]() {
-                              auto model = parse(path);
-                              noteParsed(key, model);
-                              return model;
-                          })
-                          .share();
-    } else {
-        *parseHere = std::make_shared<std::promise<std::shared_ptr<const M2Model>>>();
-        entry.parse = (*parseHere)->get_future().share();
+    entry.parse = std::make_shared<Parse>();
+    if (queue) {
+        // Nobody waits on this task's future: whoever needs the model sooner
+        // claims the parse and does it (run).
+        (void)core::ThreadPool::ioWorkers().submit(
+            "unit model", [this, key, path, parse = entry.parse]() { run(key, path, *parse); });
     }
     return entries_.emplace(key, std::move(entry)).first->second;
+}
+
+void M2ModelCache::run(const std::string& key, const std::string& path, Parse& parse) {
+    if (parse.claimed.exchange(true)) return;
+    auto model = this->parse(path);
+    noteParsed(key, model);
+    parse.promise.set_value(std::move(model));
 }
 
 void M2ModelCache::noteParsed(const std::string& key, const std::shared_ptr<const M2Model>& model) {
@@ -111,7 +114,7 @@ void M2ModelCache::evict() {
     while (totalBytes_ > budgetBytes_ && it != recent_.begin()) {
         --it;
         auto entry = entries_.find(*it);
-        if (entry->second.parse.wait_for(std::chrono::seconds(0)) != std::future_status::ready) continue;
+        if (entry->second.parse->result.wait_for(std::chrono::seconds(0)) != std::future_status::ready) continue;
         totalBytes_ -= entry->second.bytes;
         entries_.erase(entry);
         it = recent_.erase(it);
@@ -120,31 +123,27 @@ void M2ModelCache::evict() {
 
 M2ModelCache::Request M2ModelCache::request(const std::string& path) {
     const std::string key = keyOf(path);
-    std::shared_future<std::shared_ptr<const M2Model>> parse;
+    std::shared_ptr<Parse> parse;
     {
         std::lock_guard lock(mutex_);
-        parse = entryFor(key, path, true, nullptr).parse;
+        parse = entryFor(key, path, true).parse;
     }
-    if (parse.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return {State::Loading, nullptr};
-    auto model = parse.get();
+    if (parse->result.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+        return {State::Loading, nullptr};
+    auto model = parse->result.get();
     return model ? Request{State::Ready, std::move(model)} : Request{State::Failed, nullptr};
 }
 
 std::shared_ptr<const M2Model> M2ModelCache::load(const std::string& path) {
     const std::string key = keyOf(path);
-    std::shared_ptr<std::promise<std::shared_ptr<const M2Model>>> parseHere;
-    std::shared_future<std::shared_ptr<const M2Model>> parse;
+    std::shared_ptr<Parse> parse;
     {
         std::lock_guard lock(mutex_);
-        parse = entryFor(key, path, false, &parseHere).parse;
+        parse = entryFor(key, path, false).parse;
     }
-    if (parseHere) {
-        auto model = this->parse(path);
-        noteParsed(key, model);
-        parseHere->set_value(model);
-        return model;
-    }
-    return parse.get();
+    // Here, unless a worker has begun it already; then that one is waited for.
+    run(key, path, *parse);
+    return parse->result.get();
 }
 
 } // namespace pipeline

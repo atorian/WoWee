@@ -83,6 +83,18 @@ struct ItemDisplayArt {
 
 ItemDisplayArt readItemDisplayArt(const RequiredTable& itemDisplayInfo, uint32_t recordIndex);
 
+/// The file a cape's art is in, or empty when the display names none that is
+/// on disk. The table's two texture names, the wearer's own side first - the
+/// right for a woman, the left for a man, since some cloaks (Jaina's Radiance)
+/// fill only one - each through capeTextureCandidates.
+///
+/// The worker that prepares a wearer's textures and the spawn that binds them
+/// ask this one function, so what was decoded is what is asked for. The
+/// player, the NPC, the portrait and the equipment worker each wrote it out,
+/// and the NPC's tried the left first for a woman too.
+std::string findCapeTexture(AssetManager& assets, const RequiredTable& itemDisplayInfo,
+                            uint32_t displayId, bool isFemale);
+
 /// ItemDisplayInfo.dbc's eight texture-region columns, arm upper first, as the
 /// expansion's layout names TextureArmUpper.
 ///

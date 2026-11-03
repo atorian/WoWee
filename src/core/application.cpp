@@ -4272,6 +4272,7 @@ void Application::updateInGame(float deltaTime, const char*& updateCheckpoint) {
     updateCheckpoint = "in_game: spawn/equipment queues";
     runInGameStage("spawn/equipment queues", [&] {
         if (entitySpawner_) entitySpawner_->update(&spawnStages_);
+        if (appearanceComposer_) appearanceComposer_->update();
         if (auto* cr = renderer ? renderer->getCharacterRenderer() : nullptr) {
             rendering::CpuStage stage(spawnStages_, "spawn/equipment queues", "character normal maps");
             cr->processPendingNormalMaps(4);

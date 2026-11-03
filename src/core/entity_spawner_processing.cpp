@@ -571,6 +571,10 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited, rendering::CpuStag
                                             if (!path.empty()) displaySkinPaths.push_back(path);
                                         }
                                     }
+                                    // The cape, as the spawn will ask for it.
+                                    const std::string cape = pipeline::findCapeTexture(
+                                        *am, idiDbc, he.equipDisplayId[10], isFem);
+                                    if (!cape.empty()) displaySkinPaths.push_back(cape);
                                 }
                             }
                         }
@@ -958,13 +962,9 @@ void EntitySpawner::processDeferredEquipmentQueue() {
                         }
                     }
                 }
-                if (slot == 14) {
-                    for (const auto field : {dbc.column("LeftModelTexture"), dbc.column("RightModelTexture")}) {
-                        const auto name = dbc->getString(row, field);
-                        const auto candidates = pipeline::capeTextureCandidates(name, snapshot.genderId == 1);
-                        paths.insert(paths.end(), candidates.begin(), candidates.end());
-                    }
-                }
+                if (slot == 14)
+                    paths.push_back(pipeline::findCapeTexture(*assets, dbc, displayInfoIds[slot],
+                                                              snapshot.genderId == 1));
                 if (slot == 15 || slot == 16) {
                     const auto art = pipeline::readItemDisplayArt(dbc, row);
                     if (!art.modelFile.empty()) {

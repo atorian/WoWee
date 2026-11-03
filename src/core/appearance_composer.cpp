@@ -2,7 +2,6 @@
 #include "core/player_view.hpp"
 #include "core/geoset_rules.hpp"
 #include "pipeline/item_textures.hpp"
-#include "pipeline/m2_asset_loader.hpp"
 #include "core/character_paths.hpp"
 #include "core/helm_visual.hpp"
 #include "core/enchant_visual.hpp"
@@ -20,7 +19,14 @@
 #include "pipeline/dbc_layout.hpp"
 #include "pipeline/required_table.hpp"
 #include "game/game_handler.hpp"
+#include "core/thread_pool.hpp"
+#include "pipeline/blp_loader.hpp"
+#include "pipeline/m2_model_cache.hpp"
 #include <glm/gtc/matrix_transform.hpp>
+#include <algorithm>
+#include <cctype>
+#include <chrono>
+#include <unordered_map>
 
 namespace wowee {
 namespace core {
@@ -256,119 +262,269 @@ std::unordered_set<uint16_t> AppearanceComposer::buildDefaultPlayerGeosets(uint8
     return activeGeosets;
 }
 
-void AppearanceComposer::applyEnchantVisuals(uint32_t charInstanceId, int equipSlotIndex,
-                                             uint32_t attachmentId) {
-    auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
-    if (!charRenderer || !gameHandler_ || !assetManager_ || !entitySpawner_) return;
+/// The equipment's models and decoded textures, made ready on a worker.
+struct AppearanceComposer::PreparedEquipment {
+    std::vector<WornAttachment> worn;
+    /// By lower-case, backslashed path; null where a file did not load.
+    std::unordered_map<std::string, std::shared_ptr<const pipeline::M2Model>> models;
+    std::unordered_map<std::string, pipeline::BLPImage> textures;
+};
 
-    const auto& inventory = gameHandler_->inventory();
-    const uint64_t itemGuid = inventory.getEquipSlotGuid(equipSlotIndex);
-    const uint32_t enchantId = itemGuid != 0 ? inventory.shownEnchantId(itemGuid) : 0;
-    attachEnchantVisuals(
-        renderer_->scene().characters(), tables_, charInstanceId, attachmentId, enchantId,
-        [this](const std::string& path, pipeline::M2Model& model) { return loadWeaponM2(path, model); },
-        [this] { return entitySpawner_->allocateWeaponModelId(); });
+namespace {
+
+/// How the unit model cache and the character renderer key a file.
+std::string assetKey(std::string path) {
+    std::replace(path.begin(), path.end(), '/', '\\');
+    std::transform(path.begin(), path.end(), path.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return path;
+}
+
+}  // namespace
+
+AppearanceComposer::~AppearanceComposer() {
+    // Its worker reads the shared caches, which outlive this: it finishes first.
+    if (preparing_.valid()) preparing_.wait();
 }
 
 bool AppearanceComposer::loadWeaponM2(const std::string& m2Path, pipeline::M2Model& outModel) {
-    // pipeline/m2_asset_loader.hpp. Kept as a method because a dozen call sites
-    // read better for it.
-    return pipeline::loadM2WithSkin(*assetManager_, m2Path, outModel);
-}
-
-// Head gear, which only other players used to get. The local character's
-// appearance is assembled here while everyone else's goes through
-// EntitySpawner, and the head slot was simply missing from this side: no
-// helmet model, and hair left showing through where one should be.
-void AppearanceComposer::loadEquippedHelm(game::Inventory& inventory) {
-    auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
-    const uint32_t charInstanceId = renderer_ ? renderer_->getCharacterInstanceId() : 0;
-    if (!charRenderer || charInstanceId == 0 || !assetManager_ || !gameHandler_) return;
-
-    // Only the helm point. Detaching 0 as well would drop the shield.
-    renderer_->scene().characters().detachWeapon(charInstanceId, kAttachHelm);
-
-    // Hiding the helm is a display choice, not an unequip: the item stays on,
-    // the model comes off, and the hair comes back.
-    if (!gameHandler_->player().helmVisible()) return;
-
-    const auto& headSlot = inventory.getEquipSlot(game::EquipSlot::HEAD);
-    if (headSlot.empty()) return;
-    const auto* info = gameHandler_->inventory().getItemInfo(headSlot.item.itemId);
-    const uint32_t displayId = info && info->valid ? info->displayInfoId
-                                                   : headSlot.item.displayInfoId;
-    if (displayId == 0) return;
-
-    uint8_t raceId = 0;
-    uint8_t genderId = 0;
-    if (const auto* ch = gameHandler_->getActiveCharacter()) {
-        raceId = static_cast<uint8_t>(ch->race);
-        genderId = static_cast<uint8_t>(ch->gender);
-    }
-
-    const core::HelmVisual helm =
-        core::resolveHelmVisual(*assetManager_, tables_, displayId, raceId, genderId);
-    if (!helm.valid()) return;
-
-    pipeline::M2Model helmModel;
-    std::string helmPath;
-    if (!helm.racialModelPath.empty()) {
-        helmPath = helm.racialModelPath;
-        if (!loadWeaponM2(helmPath, helmModel)) helmModel = {};
-    }
-    if (!helmModel.isValid()) {
-        helmPath = helm.baseModelPath;
-        if (!loadWeaponM2(helmPath, helmModel)) return;
-    }
-
-    const uint32_t helmModelId = entitySpawner_ ? entitySpawner_->allocateWeaponModelId() : 0;
-    const bool attached = renderer_->scene().characters().attachWeapon(charInstanceId, kAttachHelm, helmModel,
-                                                     helmModelId, helm.texturePath);
-    if (attached) {
-        LOG_INFO("Equipped helm: ", helmPath, " tex: ", helm.texturePath);
-    }
-}
-
-// Shoulders, which the local character never had: the same gap as the helm,
-// found after it - other players wore their pauldrons and you did not.
-void AppearanceComposer::loadEquippedShoulders(game::Inventory& inventory) {
-    auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
-    const uint32_t charInstanceId = renderer_ ? renderer_->getCharacterInstanceId() : 0;
-    if (!charRenderer || charInstanceId == 0 || !assetManager_ || !gameHandler_) return;
-
-    renderer_->scene().characters().detachWeapon(charInstanceId, kAttachShoulderRight);
-    renderer_->scene().characters().detachWeapon(charInstanceId, kAttachShoulderLeft);
-
-    const auto& slot = inventory.getEquipSlot(game::EquipSlot::SHOULDERS);
-    if (slot.empty()) return;
-    const auto* info = gameHandler_->inventory().getItemInfo(slot.item.itemId);
-    const uint32_t displayId = info && info->valid ? info->displayInfoId
-                                                   : slot.item.displayInfoId;
-    if (displayId == 0) return;
-
-    uint8_t raceId = 0;
-    uint8_t genderId = 0;
-    if (const auto* ch = gameHandler_->getActiveCharacter()) {
-        raceId = static_cast<uint8_t>(ch->race);
-        genderId = static_cast<uint8_t>(ch->gender);
-    }
-
-    const core::ShoulderVisual shoulders =
-        core::resolveShoulderVisual(*assetManager_, tables_, displayId, raceId, genderId);
-    auto attachSide = [&](const core::HelmVisual& side, uint32_t attachmentId) {
-        if (!side.valid()) return;
-        pipeline::M2Model model;
-        if (side.racialModelPath.empty() || !loadWeaponM2(side.racialModelPath, model)) model = {};
-        if (!model.isValid() && !loadWeaponM2(side.baseModelPath, model)) return;
-        const uint32_t modelId = entitySpawner_ ? entitySpawner_->allocateWeaponModelId() : 0;
-        if (renderer_->scene().characters().attachWeapon(charInstanceId, attachmentId, model, modelId,
-                                       side.texturePath)) {
-            LOG_INFO("Equipped shoulder ", attachmentId, ": ", side.baseModelPath,
-                     " tex: ", side.texturePath);
+    std::shared_ptr<const pipeline::M2Model> model;
+    if (applying_) {
+        const auto ready = applying_->models.find(assetKey(m2Path));
+        if (ready == applying_->models.end()) {
+            LOG_ERROR("Equipment model ", m2Path, " was not prepared with the rest of the equipment; not shown");
+            return false;
         }
+        model = ready->second;
+    } else {
+        // The mining pick, the fishing pole, the ranged swap: parsed once by
+        // the shared cache, on this thread the first time each is shown.
+        model = renderer_->unitModels().load(m2Path);
+    }
+    if (!model) return false;
+    outModel = *model;
+    return true;
+}
+
+std::vector<AppearanceComposer::WornAttachment> AppearanceComposer::wornAttachments() const {
+    std::vector<WornAttachment> worn;
+    const auto& inventory = gameHandler_->inventory().items();
+    uint8_t raceId = 0;
+    uint8_t genderId = 0;
+    if (const auto* ch = gameHandler_->getActiveCharacter()) {
+        raceId = static_cast<uint8_t>(ch->race);
+        genderId = static_cast<uint8_t>(ch->gender);
+    }
+    const auto displayOf = [this](const game::ItemSlot& slot) -> uint32_t {
+        const auto* info = gameHandler_->inventory().getItemInfo(slot.item.itemId);
+        return info && info->valid ? info->displayInfoId : slot.item.displayInfoId;
     };
-    attachSide(shoulders.left, kAttachShoulderLeft);
-    attachSide(shoulders.right, kAttachShoulderRight);
+    // The race's own model where it has one, else the shared one.
+    const auto onDisk = [this](const HelmVisual& visual) {
+        return !visual.racialModelPath.empty() && assetManager_->fileExists(visual.racialModelPath)
+                   ? visual.racialModelPath
+                   : visual.baseModelPath;
+    };
+
+    // Head gear, which the local character once did not have at all. Hiding
+    // the helm is a display choice, not an unequip: the item stays on, the
+    // model comes off, and the hair comes back.
+    if (const auto& head = inventory.getEquipSlot(game::EquipSlot::HEAD);
+        gameHandler_->player().helmVisible() && !head.empty()) {
+        if (const uint32_t displayId = displayOf(head)) {
+            const HelmVisual helm = resolveHelmVisual(*assetManager_, tables_, displayId, raceId, genderId);
+            if (helm.valid())
+                worn.push_back({.what = "helm", .attachmentId = kAttachHelm, .modelPath = onDisk(helm),
+                                .texturePath = helm.texturePath});
+        }
+    }
+
+    // The shoulders' two models, found missing after the helm.
+    if (const auto& shoulders = inventory.getEquipSlot(game::EquipSlot::SHOULDERS); !shoulders.empty()) {
+        if (const uint32_t displayId = displayOf(shoulders)) {
+            const ShoulderVisual pair = resolveShoulderVisual(*assetManager_, tables_, displayId, raceId, genderId);
+            for (const auto& [side, attachmentId] : {std::pair{&pair.left, kAttachShoulderLeft},
+                                                     std::pair{&pair.right, kAttachShoulderRight}}) {
+                if (side->valid())
+                    worn.push_back({.what = "shoulder", .attachmentId = attachmentId, .modelPath = onDisk(*side),
+                                    .texturePath = side->texturePath});
+            }
+        }
+    }
+
+    const pipeline::RequiredTable displayInfoDbc(tables_, "ItemDisplayInfo.dbc", "the player's weapons");
+    // A display's model and texture, from whichever of the Weapon and Shield
+    // folders has it.
+    const auto weaponArt = [&](uint32_t displayInfoId, WornAttachment& weapon) {
+        const int32_t recIdx = displayInfoDbc->findRecordById(displayInfoId);
+        if (recIdx < 0) {
+            LOG_WARNING("loadEquippedWeapons: displayInfoId ", displayInfoId, " not found in DBC");
+            return false;
+        }
+        // The left pair first, the right one when there is none.
+        const auto art = pipeline::readItemDisplayArt(displayInfoDbc, static_cast<uint32_t>(recIdx));
+        if (art.modelFile.empty()) {
+            LOG_WARNING("loadEquippedWeapons: empty model name for displayInfoId ", displayInfoId);
+            return false;
+        }
+        weapon.modelPath = "Item\\ObjectComponents\\Weapon\\" + art.modelFile;
+        if (!assetManager_->fileExists(weapon.modelPath))
+            weapon.modelPath = "Item\\ObjectComponents\\Shield\\" + art.modelFile;
+        if (!art.textureName.empty()) {
+            weapon.texturePath = "Item\\ObjectComponents\\Weapon\\" + art.textureName + ".blp";
+            if (!assetManager_->fileExists(weapon.texturePath))
+                weapon.texturePath = "Item\\ObjectComponents\\Shield\\" + art.textureName + ".blp";
+        }
+        return true;
+    };
+
+    // The hands, held or put away by the sheath state and the item's type.
+    bool mainHandWorn = false;
+    for (const auto& [slot, isMainHand] : {std::pair{game::EquipSlot::MAIN_HAND, true},
+                                           std::pair{game::EquipSlot::OFF_HAND, false}}) {
+        const auto& equipped = inventory.getEquipSlot(slot);
+        if (equipped.empty() || equipped.item.displayInfoId == 0) continue;
+        const uint32_t attachmentId = weaponAttachment(weaponsSheathed_, slot, equipped.item.inventoryType);
+        if (attachmentId == UINT32_MAX) continue;
+        WornAttachment weapon{.what = "weapon", .attachmentId = attachmentId};
+        if (!weaponArt(equipped.item.displayInfoId, weapon)) continue;
+        weapon.localTransform = weaponLocalTransform(weaponsSheathed_, equipped.item.inventoryType);
+        const uint64_t itemGuid = gameHandler_->inventory().getEquipSlotGuid(static_cast<int>(slot));
+        weapon.enchantId = itemGuid != 0 ? gameHandler_->inventory().shownEnchantId(itemGuid) : 0;
+        mainHandWorn = mainHandWorn || isMainHand;
+        worn.push_back(std::move(weapon));
+    }
+
+    // A bow, gun or thrown weapon in the right hand when it holds nothing else.
+    const auto& ranged = inventory.getEquipSlot(game::EquipSlot::RANGED);
+    if (!mainHandWorn && !ranged.empty() && ranged.item.displayInfoId != 0) {
+        WornAttachment weapon{.what = "ranged weapon",
+                              .attachmentId = weaponsSheathed_ ? kAttachBack : kAttachRightHand};
+        if (weaponArt(ranged.item.displayInfoId, weapon)) {
+            weapon.localTransform = weaponsSheathed_ ? weaponLocalTransform(true, game::InvType::TWO_HAND)
+                                                     : glm::mat4(1.0f);
+            worn.push_back(std::move(weapon));
+        }
+    }
+    return worn;
+}
+
+void AppearanceComposer::loadEquippedWeapons() {
+    // One at a time: asked again while one is being made ready, that one is
+    // out of date when it comes, and another is made.
+    if (preparing_.valid()) {
+        equipmentAskedAgain_ = true;
+        return;
+    }
+    startPreparingEquipment();
+}
+
+void AppearanceComposer::startPreparingEquipment() {
+    if (!renderer_ || !assetManager_ || !assetManager_->isInitialized() || !gameHandler_) return;
+    auto prepared = std::make_shared<PreparedEquipment>();
+    prepared->worn = wornAttachments();
+    std::vector<std::string> modelPaths;
+    std::vector<std::string> texturePaths;
+    for (const auto& worn : prepared->worn) {
+        modelPaths.push_back(worn.modelPath);
+        texturePaths.push_back(worn.texturePath);
+        if (worn.enchantId != 0)
+            for (const auto& path : resolveEnchantVisualModels(tables_, worn.enchantId)) modelPaths.push_back(path);
+    }
+    preparing_ = ThreadPool::ioWorkers().submit(
+        "player equipment", [prepared, modelPaths = std::move(modelPaths), texturePaths = std::move(texturePaths),
+                             assets = assetManager_, models = &renderer_->unitModels()]() mutable {
+            for (const auto& path : modelPaths) {
+                if (path.empty()) continue;
+                auto model = models->load(path);
+                if (model)
+                    for (const auto& texture : model->textures)
+                        if (texture.type == 0) texturePaths.push_back(texture.filename);
+                prepared->models[assetKey(path)] = std::move(model);
+            }
+            for (const auto& path : texturePaths) {
+                if (path.empty()) continue;
+                auto key = assetKey(path);
+                if (!prepared->textures.count(key))
+                    prepared->textures[std::move(key)] = rendering::CharacterRenderer::prepareTexture(assets, path);
+            }
+            return prepared;
+        });
+}
+
+void AppearanceComposer::update() {
+    if (!preparing_.valid() || preparing_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+    const auto prepared = preparing_.get();
+    if (equipmentAskedAgain_) {
+        equipmentAskedAgain_ = false;
+        startPreparingEquipment();
+        return;
+    }
+    applyEquipment(*prepared);
+}
+
+void AppearanceComposer::applyEquipment(PreparedEquipment& prepared) {
+    // Equipment refreshes can arrive during a gather cast. Keep the temporary
+    // tool authoritative until the cast-end callback restores real equipment.
+    const uint32_t currentInstanceId = renderer_ ? renderer_->getCharacterInstanceId() : 0;
+    if (showingMiningPick_ && currentInstanceId == miningPickInstanceId_) return;
+    if (showingMiningPick_) {
+        showingMiningPick_ = false;
+        miningPickInstanceId_ = 0;
+    }
+    showingRanged_ = false;
+    if (renderer_ && playerView_->getAnimationController())
+        playerView_->getAnimationController()->setRangedWeaponActive(false);
+    auto* charRenderer = renderer_ ? renderer_->getCharacterRenderer() : nullptr;
+    if (!charRenderer || !entitySpawner_) return;
+    const uint32_t charInstanceId = renderer_->getCharacterInstanceId();
+    if (charInstanceId == 0) return;
+
+    // Everything below from what the worker made ready, and to the GPU in one
+    // batch.
+    applying_ = &prepared;
+    charRenderer->setPredecodedBLPCache(&prepared.textures, true);
+    auto* uploadCtx = renderer_->getVkContext();
+    if (uploadCtx) uploadCtx->beginUploadBatch();
+    struct Guard {
+        AppearanceComposer* composer;
+        rendering::CharacterRenderer* renderer;
+        rendering::VkContext* ctx;
+        ~Guard() {
+            composer->applying_ = nullptr;
+            renderer->setPredecodedBLPCache(nullptr);
+            if (ctx) ctx->endUploadBatch();
+        }
+    } guard{this, charRenderer, uploadCtx};
+
+    // Equipment reloads and Z toggles can move models between these points.
+    // Clear every one, so old copies never remain behind. Only the helm's
+    // point for the head: detaching 0 as well would drop the shield.
+    auto& characters = renderer_->scene().characters();
+    characters.detachWeapon(charInstanceId, kAttachHelm);
+    characters.detachWeapon(charInstanceId, kAttachShoulderRight);
+    characters.detachWeapon(charInstanceId, kAttachShoulderLeft);
+    for (uint32_t attachmentId : kWeaponAttachmentPoints) characters.detachWeapon(charInstanceId, attachmentId);
+
+    for (const auto& worn : prepared.worn) {
+        pipeline::M2Model model;
+        if (!loadWeaponM2(worn.modelPath, model)) {
+            LOG_WARNING("Equipped ", worn.what, " ", worn.modelPath, " did not load; not shown");
+            continue;
+        }
+        if (!characters.attachWeapon(charInstanceId, worn.attachmentId, model,
+                                     entitySpawner_->allocateWeaponModelId(), worn.texturePath,
+                                     worn.localTransform))
+            continue;
+        LOG_INFO("Equipped ", worn.what, ": ", worn.modelPath, " at attachment ", worn.attachmentId,
+                 weaponsSheathed_ ? " (sheathed)" : "");
+        if (worn.enchantId != 0) {
+            attachEnchantVisuals(
+                characters, tables_, charInstanceId, worn.attachmentId, worn.enchantId,
+                [this](const std::string& path, pipeline::M2Model& out) { return loadWeaponM2(path, out); },
+                [this] { return entitySpawner_->allocateWeaponModelId(); });
+        }
+    }
 }
 
 rendering::SheathSpot AppearanceComposer::sheathSpot(game::EquipSlot slot) const {
@@ -381,173 +537,6 @@ rendering::SheathSpot AppearanceComposer::sheathSpot(game::EquipSlot slot) const
         case kAttachBack:
         case kAttachSheathShield:   return rendering::SheathSpot::BACK;
         default:                    return rendering::SheathSpot::NONE;
-    }
-}
-
-void AppearanceComposer::loadEquippedWeapons() {
-    // Equipment refreshes can arrive during a gather cast. Keep the temporary
-    // tool authoritative until the cast-end callback restores real equipment.
-    const uint32_t currentInstanceId = renderer_ ? renderer_->getCharacterInstanceId() : 0;
-    if (showingMiningPick_ && currentInstanceId == miningPickInstanceId_) return;
-    if (showingMiningPick_) {
-        showingMiningPick_ = false;
-        miningPickInstanceId_ = 0;
-    }
-    showingRanged_ = false;
-    if (renderer_ && playerView_->getAnimationController())
-        playerView_->getAnimationController()->setRangedWeaponActive(false);
-    if (!renderer_ || !renderer_->getCharacterRenderer() || !assetManager_ || !assetManager_->isInitialized())
-        return;
-    if (!gameHandler_) return;
-
-    uint32_t charInstanceId = renderer_->getCharacterInstanceId();
-    if (charInstanceId == 0) return;
-
-    auto& inventory = gameHandler_->inventory().items();
-
-    loadEquippedHelm(inventory);
-    loadEquippedShoulders(inventory);
-
-    const pipeline::RequiredTable displayInfoDbc(tables_, "ItemDisplayInfo.dbc", "the player's weapons");
-    // Mapping: EquipSlot → held attachment. Sheathed attachment is resolved
-    // from the item's InventoryType below.
-    struct WeaponSlot {
-        game::EquipSlot slot;
-        uint32_t attachmentId;
-    };
-    // NOLINTBEGIN(modernize-use-designated-initializers) - a table whose
-    // columns are its field names, with the struct in view directly above.
-    WeaponSlot weaponSlots[] = {
-        { game::EquipSlot::MAIN_HAND, kAttachRightHand },
-        { game::EquipSlot::OFF_HAND,  kAttachLeftHand },
-    };
-    // NOLINTEND(modernize-use-designated-initializers)
-
-    // Equipment reloads and Z toggles can move models between these points.
-    // Clear both held and sheathed locations so old copies never remain behind.
-    for (uint32_t attachmentId : kWeaponAttachmentPoints) {
-        renderer_->scene().characters().detachWeapon(charInstanceId, attachmentId);
-    }
-
-    bool rightHandFilled = false;
-
-    for (const auto& ws : weaponSlots) {
-        const auto& equipSlot = inventory.getEquipSlot(ws.slot);
-
-        // If slot is empty or has no displayInfoId, detach any existing weapon
-        if (equipSlot.empty() || equipSlot.item.displayInfoId == 0) {
-            renderer_->scene().characters().detachWeapon(charInstanceId, ws.attachmentId);
-            continue;
-        }
-
-        const uint32_t attachmentId = weaponAttachment(
-            weaponsSheathed_, ws.slot, equipSlot.item.inventoryType);
-        if (attachmentId == UINT32_MAX) continue;
-
-        uint32_t displayInfoId = equipSlot.item.displayInfoId;
-        int32_t recIdx = displayInfoDbc->findRecordById(displayInfoId);
-        if (recIdx < 0) {
-            LOG_WARNING("loadEquippedWeapons: displayInfoId ", displayInfoId, " not found in DBC");
-            renderer_->scene().characters().detachWeapon(charInstanceId, ws.attachmentId);
-            continue;
-        }
-
-        // The left pair first, the right one when there is none - the rule this
-        // copy did not have, which is why a weapon whose display names only the
-        // right model rendered on an NPC and not on the player holding it.
-        const auto art = pipeline::readItemDisplayArt(displayInfoDbc,
-                                                      static_cast<uint32_t>(recIdx));
-        const std::string& textureName = art.textureName;
-
-        if (art.modelFile.empty()) {
-            LOG_WARNING("loadEquippedWeapons: empty model name for displayInfoId ", displayInfoId);
-            renderer_->scene().characters().detachWeapon(charInstanceId, ws.attachmentId);
-            continue;
-        }
-
-        const std::string& modelFile = art.modelFile;
-
-        // Try Weapon directory first, then Shield
-        std::string m2Path = "Item\\ObjectComponents\\Weapon\\" + modelFile;
-        pipeline::M2Model weaponModel;
-        if (!loadWeaponM2(m2Path, weaponModel)) {
-            m2Path = "Item\\ObjectComponents\\Shield\\" + modelFile;
-            if (!loadWeaponM2(m2Path, weaponModel)) {
-                LOG_WARNING("loadEquippedWeapons: failed to load ", modelFile);
-                renderer_->scene().characters().detachWeapon(charInstanceId, ws.attachmentId);
-                continue;
-            }
-        }
-
-        // Build texture path
-        std::string texturePath;
-        if (!textureName.empty()) {
-            texturePath = "Item\\ObjectComponents\\Weapon\\" + textureName + ".blp";
-            if (!assetManager_->fileExists(texturePath)) {
-                texturePath = "Item\\ObjectComponents\\Shield\\" + textureName + ".blp";
-            }
-        }
-
-        uint32_t weaponModelId = entitySpawner_->allocateWeaponModelId();
-        const glm::mat4 localTransform = weaponLocalTransform(
-            weaponsSheathed_, equipSlot.item.inventoryType);
-        bool ok = renderer_->scene().characters().attachWeapon(charInstanceId, attachmentId,
-                                              weaponModel, weaponModelId, texturePath,
-                                              localTransform);
-        if (ok) {
-            LOG_INFO("Equipped weapon: ", m2Path, " at attachment ", attachmentId,
-                     weaponsSheathed_ ? " (sheathed)" : " (held)");
-            if (ws.slot == game::EquipSlot::MAIN_HAND) rightHandFilled = true;
-            applyEnchantVisuals(charInstanceId, static_cast<int>(ws.slot), attachmentId);
-        }
-    }
-
-    // --- RANGED slot (bow, gun, crossbow, thrown) ---
-    // Show ranged weapon in right hand when main hand is empty.
-    const auto& rangedSlot = inventory.getEquipSlot(game::EquipSlot::RANGED);
-    if (!rightHandFilled && !rangedSlot.empty() && rangedSlot.item.displayInfoId != 0) {
-        uint32_t displayInfoId = rangedSlot.item.displayInfoId;
-        int32_t recIdx = displayInfoDbc->findRecordById(displayInfoId);
-        if (recIdx >= 0) {
-            const auto art = pipeline::readItemDisplayArt(displayInfoDbc,
-                                                          static_cast<uint32_t>(recIdx));
-            const std::string& textureName = art.textureName;
-
-            if (!art.modelFile.empty()) {
-                const std::string& modelFile = art.modelFile;
-
-                std::string m2Path = "Item\\ObjectComponents\\Weapon\\" + modelFile;
-                pipeline::M2Model weaponModel;
-                if (!loadWeaponM2(m2Path, weaponModel)) {
-                    m2Path = "Item\\ObjectComponents\\Shield\\" + modelFile;
-                    loadWeaponM2(m2Path, weaponModel);
-                }
-
-                if (!weaponModel.vertices.empty()) {
-                    std::string texturePath;
-                    if (!textureName.empty()) {
-                        texturePath = "Item\\ObjectComponents\\Weapon\\" + textureName + ".blp";
-                        if (!assetManager_->fileExists(texturePath)) {
-                            texturePath = "Item\\ObjectComponents\\Shield\\" + textureName + ".blp";
-                        }
-                    }
-
-                    uint32_t weaponModelId = entitySpawner_->allocateWeaponModelId();
-                    const uint32_t rangedAttachment = weaponsSheathed_
-                        ? kAttachBack : kAttachRightHand;
-                    const glm::mat4 localTransform = weaponsSheathed_
-                        ? weaponLocalTransform(true, game::InvType::TWO_HAND)
-                        : glm::mat4(1.0f);
-                    bool ok = renderer_->scene().characters().attachWeapon(charInstanceId, rangedAttachment,
-                                                          weaponModel, weaponModelId, texturePath,
-                                                          localTransform);
-                    if (ok) {
-                        LOG_INFO("Equipped ranged weapon: ", m2Path, " at attachment ",
-                                 rangedAttachment, weaponsSheathed_ ? " (sheathed)" : " (held)");
-                    }
-                }
-            }
-        }
     }
 }
 
