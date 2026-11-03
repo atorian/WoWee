@@ -197,8 +197,6 @@ public:
     void free(uint32_t slot);
     /// Every instance gone, the models kept.
     void clearInstances();
-    /// Whether the instance in `slot` is placed against the model as it is.
-    [[nodiscard]] bool placedCurrent(uint32_t slot, uint32_t model) const;
     /// The group rows of the instance in `slot`, by model group; empty for
     /// one with none placed.
     [[nodiscard]] std::span<const uint32_t> groupRows(uint32_t slot) const;
@@ -314,8 +312,6 @@ private:
     };
     bool ensure(Slot& slot, const WmoDrawFrame& frame);
     void writeSet(Slot& slot);
-    void barrier(VkCommandBuffer cmd, VkPipelineStageFlags2 src, VkAccessFlags2 srcAccess,
-                 VkPipelineStageFlags2 dst, VkAccessFlags2 dstAccess) const;
 
     VkContext* context_ = nullptr;
     GpuSlotTable instances_{sizeof(WmoInstanceGPU), "WMO instance table"};

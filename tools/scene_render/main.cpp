@@ -67,9 +67,11 @@
 //         "sameModelAs": 0,                // optional: the model of the
 //                                          //   character placed at this index,
 //                                          //   not one of its own
-//         "skins": [[11, "Creature\\Wolf\\WolfSkinBlack.blp"]] }
+//         "skins": [[11, "Creature\\Wolf\\WolfSkinBlack.blp"]],
 //                                          // optional: its display's skins by
 //                                          //   texture type
+//         "opacity": 0.5 }                 // optional: drawn faded, as a ghost
+//                                          //   or a fade-in
 //     ],
 //     "camera": { "offset": [-8, 0, 3],   // from the origin; or "position"
 //                 "lookAt": [0, 0, 2],    // from the origin; or "yaw"/"pitch"
@@ -552,6 +554,7 @@ bool placeCharacter(const json& entry, const glm::vec3& origin, pipeline::AssetM
         LOG_ERROR("scene_render: cannot place ", path);
         return false;
     }
+    if (entry.contains("opacity")) characters->setInstanceOpacity(placed.instance, entry["opacity"].get<float>());
     // "skins": [[texture type, path], ...] - its display's, on every slot
     // of that type, as the client dresses a creature display.
     if (entry.contains("skins")) {
@@ -1200,6 +1203,11 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
                 keptStatistics.m2CulledFromColumns ? "columns" : "GPU verdict");
     std::printf("scene_render: WMO shadow draw calls: %u in the kept frame\n",
                 renderer.getWMORenderer()->getShadowDrawCallCount());
+    if (const auto* characters = renderer.getCharacterRenderer()) {
+        const auto& counted = characters->cullCounts();
+        std::printf("scene_render: character draws in the kept frame: %u solid, %u faded, %u cast\n",
+                    counted.solidDraws, counted.fadedDraws, counted.casterDraws);
+    }
     if (const auto* rt = renderer.getRtScene()) {
         const auto stats = rt->stats();
         std::printf("scene_render: RT scene %u meshes %u instances %llu bytes\n",

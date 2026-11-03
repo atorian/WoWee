@@ -3368,12 +3368,6 @@ void VkContext::freeDescriptorSets(VkDescriptorPool pool, uint32_t count, const 
     vkFreeDescriptorSets(device, pool, count, sets);
 }
 
-void VkContext::resetDescriptorPool(VkDescriptorPool pool) {
-    if (!pool) return;
-    std::lock_guard<std::mutex> lock(descriptorPoolLock(pool));
-    vkResetDescriptorPool(device, pool, 0);
-}
-
 VkCommandBuffer VkContext::beginSingleTimeCommands() {
     SubmitLane& l = lane();
     reclaimFinished(l);

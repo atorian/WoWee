@@ -105,7 +105,6 @@ private:
         bool frameSetCurrent = false;
     };
     bool ensure(Slot& slot, const M2DrawFrame& frame);
-    void writePageSet(Slot& slot, const std::vector<::VkBuffer>& pages, uint32_t pagesVersion);
     void writeFrameSet(Slot& slot, const Targets& targets);
 
     VkContext* context_ = nullptr;

@@ -1,0 +1,20 @@
+// One indexed draw as the GPU reads it back (VkDrawIndexedIndirectCommand),
+// written by a cull at a draw's place: one instance of an index range.
+
+struct DrawCommand {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int vertexOffset;
+    uint firstInstance;
+};
+
+DrawCommand indexedDraw(uint indexCount, uint firstIndex, int baseVertex) {
+    DrawCommand c;
+    c.indexCount = indexCount;
+    c.instanceCount = 1u;
+    c.firstIndex = firstIndex;
+    c.vertexOffset = baseVertex;
+    c.firstInstance = 0u;
+    return c;
+}

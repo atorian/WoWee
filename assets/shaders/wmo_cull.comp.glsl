@@ -77,13 +77,7 @@ layout(std430, set = 0, binding = 4) readonly buffer BucketStarts { uint bucketS
 // A bit a group row: the portal walk left it out.
 layout(std430, set = 0, binding = 5) readonly buffer PortalCulled { uint portalCulled[]; };
 
-struct DrawCommand {    // VkDrawIndexedIndirectCommand
-    uint indexCount;
-    uint instanceCount;
-    uint firstIndex;
-    int vertexOffset;
-    uint firstInstance;
-};
+#include "draw_command.glsli"
 // The view's list, the reflection's, then each shadow map's.
 layout(std430, set = 0, binding = 6) writeonly buffer Commands { DrawCommand commands[]; };
 // By colour place: the draw's material row and group row (wmo.vert).
@@ -132,16 +126,6 @@ uint colourSlot(Group g, uint kind) {
     return kind < 4u ? g.slots0[kind] : g.slots1[kind - 4u];
 }
 
-DrawCommand commandOf(Range r) {
-    DrawCommand c;
-    c.indexCount = r.indexCount;
-    c.instanceCount = 1u;
-    c.firstIndex = r.firstIndex;
-    c.vertexOffset = r.baseVertex;
-    c.firstInstance = 0u;
-    return c;
-}
-
 void colour(uint index, Group g, Instance instance) {
     const vec3 boxMin = g.worldMin.xyz;
     const vec3 boxMax = g.worldMax.xyz;
@@ -187,7 +171,7 @@ void colour(uint index, Group g, Instance instance) {
         const uint kind = range.place & 7u;
         const uint slot = bucketStarts[page * kColourKinds + kind] + colourSlot(g, kind) + (range.place >> 3);
         colourRecords[slot] = uvec2(range.material, index);
-        const DrawCommand c = commandOf(range);
+        const DrawCommand c = indexedDraw(range.indexCount, range.firstIndex, range.baseVertex);
         if (inView) {
             commands[slot] = c;
             if (kind >= kBlendedKinds) atomicAdd(stats.blendedDraws, 1u);
@@ -214,7 +198,7 @@ void depth(uint index, Group g) {
         const uint slot = first + range.caster;
         casterRecords[slot] = uvec4(range.texture, range.casterFlags,
                                     (range.casterFlags & 2u) != 0u ? kAlphaKeyRef : 0u, index);
-        commands[map + slot] = commandOf(range);
+        commands[map + slot] = indexedDraw(range.indexCount, range.firstIndex, range.baseVertex);
         atomicAdd(stats.casterDraws, 1u);
     }
 }

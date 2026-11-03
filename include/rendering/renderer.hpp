@@ -841,7 +841,6 @@ private:
     /// doodads' caster texture sets, which a later one in the frame then
     /// reuses: the sun's pass resets both, the sea bed's the buildings', the
     /// shelter map's whichever is still to be reset.
-    bool characterCasterSetsReset_ = false;
     bool m2CasterSetsReset_ = false;
 
     // Screen recording: the GPU side reads frames back, the recorder encodes.

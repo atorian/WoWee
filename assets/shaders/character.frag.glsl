@@ -1,4 +1,5 @@
 #version 450
+#extension GL_EXT_nonuniform_qualifier : require
 
 layout(set = 0, binding = 0) uniform PerFrame {
     mat4 view;
@@ -45,20 +46,16 @@ layout(set = 0, binding = 0) uniform PerFrame {
 #include "aerial_frame.glsli"
 #include "interior_light.glsli"
 
-layout(push_constant) uniform Push {
-    uvec4 pose;          // read by character.vert
-    vec4 interiorAmbient;
-    vec4 interiorDirect;
-    uvec4 localLights;   // local_lights.glsli
-} push;
-
-layout(set = 1, binding = 0) uniform sampler2D uTexture;
-
+// The device's texture table: a draw's textures are handles in its
+// material row (character_material.glsli).
+#define TEXTURE_TABLE_SET 1
+#include "texture_table.glsli"
 #include "character_material.glsli"
 #include "m2_combiner.glsli"
 
-layout(set = 1, binding = 2) uniform sampler2D uNormalHeightMap;
-layout(set = 1, binding = 3) uniform sampler2D uSecondTexture;
+#define uTexture tablePlain2D(charTexture)
+#define uNormalHeightMap tablePlain2D(charNormalHeight)
+#define uSecondTexture tablePlain2D(charSecondTexture)
 
 layout(set = 0, binding = 1) uniform sampler2DShadow uShadowMap;
 
@@ -68,6 +65,7 @@ layout(location = 2) in vec2 TexCoord;
 layout(location = 3) in vec3 Tangent;
 layout(location = 4) in vec3 Bitangent;
 layout(location = 5) in vec2 TexCoord2;
+layout(location = 6) flat in uint vDraw;
 
 layout(location = 0) out vec4 outColor;
 
@@ -121,17 +119,17 @@ ivec2 wrapPreviewTexel(ivec2 texel, ivec2 texSize) {
                  (texel.y % texSize.y + texSize.y) % texSize.y);
 }
 
-vec4 samplePreviewTexture(sampler2D tex, vec2 uv) {
-    ivec2 texSize = textureSize(tex, 0);
+vec4 samplePreviewTexture(uint handle, vec2 uv) {
+    ivec2 texSize = textureSize(tablePlain2D(handle), 0);
     if (texSize.x <= 0 || texSize.y <= 0) {
-        return textureLod(tex, uv, 0.0);
+        return textureLod(tablePlain2D(handle), uv, 0.0);
     }
 
     vec2 wrappedUv = uv - floor(uv);
     ivec2 baseTexel = ivec2(floor(wrappedUv * vec2(texSize)));
     baseTexel = wrapPreviewTexel(baseTexel, texSize);
 
-    vec4 color = texelFetch(tex, baseTexel, 0);
+    vec4 color = texelFetch(tablePlain2D(handle), baseTexel, 0);
     if (!isMagentaKeyColor(color)) {
         return color;
     }
@@ -142,7 +140,7 @@ vec4 samplePreviewTexture(sampler2D tex, vec2 uv) {
                 if (abs(x) != radius && abs(y) != radius) {
                     continue;
                 }
-                vec4 candidate = texelFetch(tex, wrapPreviewTexel(baseTexel + ivec2(x, y), texSize), 0);
+                vec4 candidate = texelFetch(tablePlain2D(handle), wrapPreviewTexel(baseTexel + ivec2(x, y), texSize), 0);
                 if (!isMagentaKeyColor(candidate)) {
                     return vec4(candidate.rgb, 0.0);
                 }
@@ -231,13 +229,14 @@ vec3 applyFog(vec3 color, vec3 worldPos, float dist) {
     return color;
 }
 void main() {
+    loadCharacterDraw(vDraw);
     const vec3 receiverFace = receiverFaceNormal(FragPos);
     if (fogSkyBand1.w > 0.0 && length(FragPos.xy - viewPos.xy) >= fogSkyBand1.w) discard;
 
     if (enablePOM == PREVIEW_SIMPLE_TEXTURE_MODE) {
         vec4 t1 = hasSecondTexture != 0 ? texture(uSecondTexture, TexCoord2) : vec4(1.0);
         vec3 stageAdd;
-        vec4 texColor = combineStages(combiner, samplePreviewTexture(uTexture, TexCoord), t1, stageAdd);
+        vec4 texColor = combineStages(combiner, samplePreviewTexture(charTexture, TexCoord), t1, stageAdd);
         texColor.a = clamp(texColor.a, 0.0, 1.0);
         if (isMagentaKeyColor(texColor)) {
             discard;
@@ -355,10 +354,10 @@ void main() {
         // The texture as it is, as on doodads.
         result = texColor.rgb;
     } else {
-        bool inside = insideInterior(push.interiorAmbient);
-        vec3 ldir = normalize(-interiorLightDir(push.interiorAmbient, lightDir.xyz));
+        bool inside = insideInterior(charInteriorAmbient);
+        vec3 ldir = normalize(-interiorLightDir(charInteriorAmbient, lightDir.xyz));
         float diff = max(dot(norm, ldir), 0.0);
-        vec3 sunColor = interiorDirect(push.interiorAmbient, push.interiorDirect, lightColor.rgb);
+        vec3 sunColor = interiorDirect(charInteriorAmbient, charInteriorDirect, lightColor.rgb);
 
         vec3 viewDir = normalize(viewPos.xyz - FragPos);
         vec3 halfDir = normalize(ldir + viewDir);
@@ -391,13 +390,13 @@ void main() {
         if (inside) unitShadow = mix(unitShadow, 1.0, unitShadowAboveFade(FragPos));
         shadow = min(shadow, unitShadow);
 
-        result = (rtAmbient(rt, interiorAmbient(push.interiorAmbient, ambientColor.rgb))
+        result = (rtAmbient(rt, interiorAmbient(charInteriorAmbient, ambientColor.rgb))
                   + diff * sunColor) * texColor.rgb * shadowLightFactor(shadow)
                + shadow * spec * sunColor;
     }
 
     if (unlit == 0) result += lightningDiffuse(FragPos, norm, texColor.rgb);
-    if (unlit == 0) result += localLightContribution(FragPos, norm, texColor.rgb, push.localLights);
+    if (unlit == 0) result += localLightContribution(FragPos, norm, texColor.rgb, charLocalLights);
     result += stageAdd;
     // Not on a Mod layer: it multiplies what is behind it, and tinting that
     // would colour the scene rather than the unit.

@@ -1639,7 +1639,7 @@ FrameInputs Renderer::extractFrameInputs() {
         scene->buildings = wmoRenderer->extract(in.camera, in.characterPosition, mirror);
     }
     extraction.lap("WMO");
-    if (characterRenderer) scene->characters = characterRenderer->extract(in.camera, in.localLights);
+    if (characterRenderer) scene->characters = characterRenderer->extract(in.camera);
     extraction.lap("characters");
     if (m2Renderer) {
         m2Renderer->setViewDistance(in.viewDistance);
@@ -2202,6 +2202,7 @@ void Renderer::endFrame() {
     if (skyboxModelRenderer_) skyboxModelRenderer_->frameSubmitted();
     if (terrainRenderer) terrainRenderer->frameSubmitted();
     if (wmoRenderer) wmoRenderer->frameSubmitted();
+    if (characterRenderer) characterRenderer->frameSubmitted();
     vkCtx->cpuStages().add("Render", "endFrame", std::chrono::duration<float, std::milli>(
         std::chrono::steady_clock::now() - recordingStart).count());
     publishFrameResults();
@@ -4669,6 +4670,13 @@ void Renderer::renderShadowMap(ShadowView view) {
         CpuStage stage(vkCtx->cpuStages(), "beginFrame/graph/shadow_pass", strike ? "lightning: wmo cull" : "sun: wmo cull");
         wmoMap = wmoRenderer->cullShadowMap(currentCmd, passCenter, shadowCullRadius);
     }
+    // And the characters, into every map.
+    std::optional<uint32_t> characterMap;
+    if (drawCasters && characterRenderer) {
+        CpuStage stage(vkCtx->cpuStages(), "beginFrame/graph/shadow_pass",
+                       strike ? "lightning: characters cull" : contact ? "units: characters cull" : "sun: characters cull");
+        characterMap = characterRenderer->cullShadowMap(currentCmd, passCenter, shadowCullRadius);
+    }
 
     // Barrier 1: transition this frame's shadow map into writable depth layout.
     VkImageMemoryBarrier2 b1{};
@@ -4766,10 +4774,9 @@ void Renderer::renderShadowMap(ShadowView view) {
                                  !m2CasterSetsReset_, /*reuseCull=*/!contact && !strike);
         m2CasterSetsReset_ = true;
     }
-    if (characterRenderer) {
+    if (characterMap) {
         CpuStage stage(vkCtx->cpuStages(), kStageGroup, strike ? "lightning: characters" : contact ? "units: characters" : "sun: characters");
-        characterRenderer->renderShadow(currentCmd, passMatrix, passCenter, shadowCullRadius, !characterCasterSetsReset_);
-        characterCasterSetsReset_ = true;
+        characterRenderer->renderShadow(currentCmd, passMatrix, *characterMap);
     }
     }  // drawCasters
 
@@ -4844,6 +4851,13 @@ void Renderer::recordModelCompute(CpuStageTimes& stages) {
         CpuStage stage(stages, "beginFrame", "WMO cull");
         wmoRenderer->prepareDraws(currentCmd, frame, localLightBuffers_[frame].buffer,
                                   static_cast<uint32_t>(currentFrameData.localLightMeta.x));
+    }
+    // The characters' rows and the cull of their colour lists, after their
+    // skeletons were posed and before the shadow maps draw them.
+    if (characterRenderer) {
+        CpuStage stage(stages, "beginFrame", "character cull");
+        characterRenderer->prepareDraws(currentCmd, frame, localLightBuffers_[frame].buffer,
+                                        static_cast<uint32_t>(currentFrameData.localLightMeta.x));
     }
     // Their view draws, written on the GPU from the frame's groups.
     if (m2Renderer) {
@@ -5301,7 +5315,7 @@ void Renderer::buildFrameGraph() {
     if (!renderGraph_) return;
 
     renderGraph_->reset();
-    characterCasterSetsReset_ = m2CasterSetsReset_ = false;
+    m2CasterSetsReset_ = false;
 
     auto shadowDepth = renderGraph_->findResource("shadow_depth");
     auto reflTex = renderGraph_->findResource("reflection_texture");

@@ -1,6 +1,7 @@
 #include "rendering/wmo_draws.hpp"
 
 #include "core/logger.hpp"
+#include "rendering/gpu_cull.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_pipeline.hpp"
 #include "rendering/vk_shader.hpp"
@@ -223,14 +224,6 @@ void WmoDrawLayout::clearInstances() {
     for (uint32_t slot = 0; slot < instances_.size(); ++slot) free(slot);
 }
 
-bool WmoDrawLayout::placedCurrent(uint32_t slot, uint32_t model) const {
-    if (slot >= instances_.size()) return false;
-    const Instance& instance = instances_[slot];
-    const auto found = models_.find(model);
-    return instance.placed && instance.model == model && found != models_.end() &&
-           found->second.serial == instance.modelSerial;
-}
-
 std::span<const uint32_t> WmoDrawLayout::groupRows(uint32_t slot) const {
     if (slot >= instances_.size()) return {};
     return instances_[slot].rows;
@@ -371,44 +364,32 @@ void WmoDrawPass::destroy() {
 }
 
 bool WmoDrawPass::ensure(Slot& slot, const WmoDrawFrame& frame) {
-    DeferredResources retired(*context_);
     constexpr VkBufferUsageFlags kStorage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bool replaced = false;
     const auto grow = [&](AllocatedBuffer& buffer, VkDeviceSize bytes, VkBufferUsageFlags usage,
                           VmaMemoryUsage memory, const char* what) {
-        bytes = std::max<VkDeviceSize>(bytes, 256);
-        if (buffer.buffer && buffer.info.size >= bytes) return true;
-        // Half again what is wanted now, so a scene streaming in does not
-        // replace them every frame.
-        const VkDeviceSize next = std::max(bytes, buffer.info.size + buffer.info.size / 2);
-        AllocatedBuffer made = createBuffer(context_->getAllocator(), next, usage, memory);
-        if (!made.buffer) {
-            static core::LogBudget budget(4, "WMO cull buffers");
-            if (budget.take())
-                LOG_ERROR("WMO cull: no memory for its ", what, " (", next, " bytes) - no buildings are drawn");
-            return false;
-        }
-        if (buffer.buffer) retired.buffer(buffer);
-        buffer = made;
-        ++slot.version;
-        return true;
+        return growCullBuffer(*context_, buffer, bytes, usage, memory, "WMORenderer", what, replaced);
     };
     const VkDeviceSize commands =
         VkDeviceSize(2 * frame.colourPlaces + kWmoShadowMaps * frame.casterPlaces) * sizeof(VkDrawIndexedIndirectCommand);
-    return grow(slot.frame, sizeof(WmoCullFrameGPU), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU,
-                "frame view") &&
-           grow(slot.bucketStarts, frame.bucketStarts.size() * sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                VMA_MEMORY_USAGE_CPU_TO_GPU, "bucket starts") &&
-           grow(slot.portalCulled, ((frame.groupRowCount + 31) / 32) * sizeof(uint32_t),
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, "portal verdict") &&
-           grow(slot.commands, commands, kStorage | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY,
-                "draw commands") &&
-           grow(slot.colourRecords, VkDeviceSize(frame.colourPlaces) * sizeof(glm::uvec2), kStorage,
-                VMA_MEMORY_USAGE_GPU_ONLY, "colour records") &&
-           grow(slot.casterRecords, VkDeviceSize(frame.casterPlaces) * sizeof(glm::uvec4), kStorage,
-                VMA_MEMORY_USAGE_GPU_ONLY, "caster records") &&
-           grow(slot.groupLights, VkDeviceSize(frame.groupRowCount) * sizeof(glm::uvec4), kStorage,
-                VMA_MEMORY_USAGE_GPU_ONLY, "group lights") &&
-           grow(slot.stats, sizeof(WmoCullStatsGPU), kStorage, VMA_MEMORY_USAGE_GPU_TO_CPU, "statistics");
+    const bool grown =
+        grow(slot.frame, sizeof(WmoCullFrameGPU), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU,
+             "frame view") &&
+        grow(slot.bucketStarts, frame.bucketStarts.size() * sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+             VMA_MEMORY_USAGE_CPU_TO_GPU, "bucket starts") &&
+        grow(slot.portalCulled, ((frame.groupRowCount + 31) / 32) * sizeof(uint32_t),
+             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU, "portal verdict") &&
+        grow(slot.commands, commands, kStorage | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY,
+             "draw commands") &&
+        grow(slot.colourRecords, VkDeviceSize(frame.colourPlaces) * sizeof(glm::uvec2), kStorage,
+             VMA_MEMORY_USAGE_GPU_ONLY, "colour records") &&
+        grow(slot.casterRecords, VkDeviceSize(frame.casterPlaces) * sizeof(glm::uvec4), kStorage,
+             VMA_MEMORY_USAGE_GPU_ONLY, "caster records") &&
+        grow(slot.groupLights, VkDeviceSize(frame.groupRowCount) * sizeof(glm::uvec4), kStorage,
+             VMA_MEMORY_USAGE_GPU_ONLY, "group lights") &&
+        grow(slot.stats, sizeof(WmoCullStatsGPU), kStorage, VMA_MEMORY_USAGE_GPU_TO_CPU, "statistics");
+    if (replaced) ++slot.version;
+    return grown;
 }
 
 void WmoDrawPass::writeSet(Slot& slot) {
@@ -439,41 +420,18 @@ void WmoDrawPass::writeSet(Slot& slot) {
     slot.setVersion = slot.version;
 }
 
-void WmoDrawPass::barrier(VkCommandBuffer cmd, VkPipelineStageFlags2 src, VkAccessFlags2 srcAccess,
-                          VkPipelineStageFlags2 dst, VkAccessFlags2 dstAccess) const {
-    VkMemoryBarrier2 b{.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-    b.srcStageMask = src;
-    b.srcAccessMask = srcAccess;
-    b.dstStageMask = dst;
-    b.dstAccessMask = dstAccess;
-    VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-    dep.memoryBarrierCount = 1;
-    dep.pMemoryBarriers = &b;
-    cmdPipelineBarrier2(cmd, dep);
-}
 
 uint32_t WmoDrawPass::drawVersion(uint32_t slot) const {
     return slots_[slot].version;
 }
 
-namespace {
-
-constexpr VkPipelineStageFlags2 kDraws = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
-                                         VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
-                                         VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
-
-}  // namespace
 
 bool WmoDrawPass::prepare(VkCommandBuffer cmd, uint32_t slotIndex, const WmoDrawFrame& frame, ::VkBuffer lights,
                           uint32_t lightCount) {
     if (slotIndex >= 2) return false;
     Slot& slot = slots_[slotIndex];
     // What this slot's last frame counted: beginFrame waited for it.
-    if (slot.counting && slot.stats.info.pMappedData) {
-        vmaInvalidateAllocation(context_->getAllocator(), slot.stats.allocation, 0, VK_WHOLE_SIZE);
-        std::memcpy(&counted_, slot.stats.info.pMappedData, sizeof(counted_));
-        slot.counting = false;
-    }
+    if (std::exchange(slot.counting, false)) readCullCounts(*context_, slot.stats, &counted_, sizeof(counted_));
     slot.ready = false;
     slot.shadowMaps = 0;
     if (!pipeline_) return false;
@@ -483,15 +441,9 @@ bool WmoDrawPass::prepare(VkCommandBuffer cmd, uint32_t slotIndex, const WmoDraw
     }
 
     // The rows the frame carries, before anything reads the tables.
-    const auto upload = [&](GpuSlotTable& table, uint32_t count, const std::vector<uint32_t>& slots,
-                            const void* rows) {
-        if (count == 0) return true;
-        if (!table.reserve(cmd, count)) return false;
-        return slots.empty() || table.write(cmd, slotIndex, slots, rows);
-    };
-    if (!upload(instances_, frame.instanceRowCount, frame.instanceSlots, frame.instanceRows.data()) ||
-        !upload(groups_, frame.groupRowCount, frame.groupSlots, frame.groupRows.data()) ||
-        !upload(ranges_, frame.rangeRowCount, frame.rangeSlots, frame.rangeRows.data())) {
+    if (!instances_.update(cmd, slotIndex, frame.instanceRowCount, frame.instanceSlots, frame.instanceRows.data()) ||
+        !groups_.update(cmd, slotIndex, frame.groupRowCount, frame.groupSlots, frame.groupRows.data()) ||
+        !ranges_.update(cmd, slotIndex, frame.rangeRowCount, frame.rangeSlots, frame.rangeRows.data())) {
         return false;
     }
     if (frame.groupRowCount == 0 || frame.colourPlaces + frame.casterPlaces == 0) return false;
@@ -520,23 +472,13 @@ bool WmoDrawPass::prepare(VkCommandBuffer cmd, uint32_t slotIndex, const WmoDraw
     slot.casterPlaces = frame.casterPlaces;
     slot.groupRows = frame.groupRowCount;
 
-    // After this slot's earlier frame's draws, every place empty and every
-    // count zero; then the colour lists.
-    barrier(cmd, kDraws | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
-    vkCmdFillBuffer(cmd, slot.commands.buffer, 0, VK_WHOLE_SIZE, 0);
-    vkCmdFillBuffer(cmd, slot.stats.buffer, 0, VK_WHOLE_SIZE, 0);
-    barrier(cmd, VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT);
+    clearCullTargets(cmd, slot.commands.buffer, slot.stats.buffer);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_, 0, 1, &slot.set, 0, nullptr);
     const CullPush push{};
     vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
     vkCmdDispatch(cmd, (frame.groupRowCount + 63) / 64, 1, 1);
-    barrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT,
-            kDraws | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT);
+    finishColourCull(cmd);
     slot.ready = true;
     slot.counting = true;
     return true;
@@ -555,16 +497,13 @@ std::optional<uint32_t> WmoDrawPass::cullShadowMap(VkCommandBuffer cmd, uint32_t
         return std::nullopt;
     }
     const uint32_t map = slot.shadowMaps++;
-    // After the maps drawn before it read the caster records it rewrites.
-    barrier(cmd, kDraws, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_READ_BIT,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT);
+    beginShadowCull(cmd);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout_, 0, 1, &slot.set, 0, nullptr);
     const CullPush push{.depth = glm::vec4(centre, reach), .mode = glm::uvec4(1u, map, 0u, 0u)};
     vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
     vkCmdDispatch(cmd, (slot.groupRows + 63) / 64, 1, 1);
-    barrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_WRITE_BIT, kDraws,
-            VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_SHADER_READ_BIT);
+    finishShadowCull(cmd);
     return map;
 }
 
