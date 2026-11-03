@@ -4449,6 +4449,18 @@ void Application::followRendererUpdate(float deltaTime) {
     performanceHUD_->update(deltaTime);
 }
 
+void Application::beginFrameUploads() {
+    if (frameUploads_ || !window) return;
+    frameUploads_ = window->getVkContext();
+    if (frameUploads_) frameUploads_->beginUploadBatch();
+}
+
+void Application::endFrameUploads() {
+    if (!frameUploads_) return;
+    frameUploads_->endUploadBatch();
+    frameUploads_ = nullptr;
+}
+
 void Application::prepareFrame() {
     if (sceneReplay_) sceneReplay_->prepare(*this);
     // Reproduce world entry with real Kalimdor assets without a realm session.

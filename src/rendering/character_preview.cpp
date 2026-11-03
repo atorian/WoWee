@@ -273,8 +273,9 @@ void CharacterPreview::createFBO() {
     // 1b. Transition the color image from UNDEFINED to SHADER_READ_ONLY_OPTIMAL
     // so that ImGui::Image doesn't sample an image in UNDEFINED layout before
     // the first composite request runs.
-    {
-        VkCommandBuffer cmd = vkCtx_->beginSingleTimeCommands();
+    // Through immediateSubmit, so that inside the frame thread's upload batch
+    // it is recorded there rather than submitted and waited for.
+    vkCtx_->immediateSubmit([&](VkCommandBuffer cmd) {
         VkImageMemoryBarrier2 barrier{.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
         barrier.srcStageMask = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
         barrier.dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
@@ -295,8 +296,7 @@ void CharacterPreview::createFBO() {
         barrierDep.imageMemoryBarrierCount = 1;
         barrierDep.pImageMemoryBarriers = &barrier;
         cmdPipelineBarrier2(cmd, barrierDep);
-        vkCtx_->endSingleTimeCommands(cmd);
-    }
+    });
 
     // 2. Create 1x1 dummy depth texture (shadow map placeholder, depth=1.0 = no shadow).
     //    Must be a depth format for sampler2DShadow compatibility.

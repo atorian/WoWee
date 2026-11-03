@@ -81,6 +81,35 @@ void ClientLoop::watchCommittedLogout(float deltaTime) {
                              : WorldTransitionQueue::Destination::Login);
 }
 
+namespace {
+
+/// The frame thread's upload batch (ClientFrontEnd::beginFrameUploads), shut
+/// however the frame ends: an early return or an exception must not leave it
+/// open across the frame's own submit.
+class FrameUploads {
+public:
+    explicit FrameUploads(ClientFrontEnd& frontEnd) : frontEnd_(frontEnd) {}
+    ~FrameUploads() { end(); }
+    FrameUploads(const FrameUploads&) = delete;
+    FrameUploads& operator=(const FrameUploads&) = delete;
+    void begin() {
+        if (open_) return;
+        frontEnd_.beginFrameUploads();
+        open_ = true;
+    }
+    void end() {
+        if (!open_) return;
+        open_ = false;
+        frontEnd_.endFrameUploads();
+    }
+
+private:
+    ClientFrontEnd& frontEnd_;
+    bool open_ = false;
+};
+
+}  // namespace
+
 void ClientLoop::runFrame() {
     const FramePlan plan = framePlan();
     ScopedPhase frameScope(services_.phase, Phase::Idle);
@@ -91,15 +120,25 @@ void ClientLoop::runFrame() {
         if (observer_) observer_->frameBegan();
         services_.input.pump(dt, plan, interfaceInput_);
         if (services_.window.shouldClose()) return;
+        // Batched, the phases that upload and draw nothing: Streaming draws
+        // the loading screen, Render the frame.
+        FrameUploads uploads(services_.frontEnd);
+        uploads.begin();
         beginPhase(Phase::Network);     dispatchNetwork(dt, plan);
         beginPhase(Phase::Game);        services_.frontEnd.prepareFrame();
         if (plan.game) updateGame(dt, plan);
         watchCommittedLogout(dt);
         beginPhase(Phase::Events);      services_.events.dispatchPosted();
+        uploads.end();
         beginPhase(Phase::Streaming);   updateStreaming(dt, plan);
+        uploads.begin();
         beginPhase(Phase::Interface);   updateInterface(dt, plan);
         if (services_.window.shouldClose()) return;
         beginPhase(Phase::Present);     syncPresentation(dt, plan);
+        uploads.end();
+        // After the batch has gone: the load waits for every upload to finish.
+        if (plan.loading && services_.loader)
+            services_.loader->observeReadiness(services_.frontEnd.scenePending());
         beginPhase(Phase::Render);      services_.frontEnd.render(plan);
         beginPhase(Phase::Transitions); processWorldTransitions();
         services_.frontEnd.afterTransitions();
@@ -371,8 +410,6 @@ void ClientLoop::syncPresentation(float deltaTime, const FramePlan& plan) {
     // a client that draws nothing still walks, and still tells the server.
     if (plan.world || plan.loading) services_.playerView.updateControls(deltaTime);
     services_.frontEnd.present(deltaTime, plan);
-    if (plan.loading && services_.loader)
-        services_.loader->observeReadiness(services_.frontEnd.scenePending());
 }
 
 void ClientLoop::leaveWorldInterface() {

@@ -73,6 +73,14 @@ public:
     /// Network, before the world connection is read: the login server and the
     /// realm's patch archives.
     virtual void updateLogin(float deltaTime, const FramePlan& plan) = 0;
+    /// Every GPU upload the frame thread makes between the two - a texture,
+    /// a model's buffers - recorded into one batch and submitted at the end,
+    /// ahead of the frame on the same queue, instead of each submitted and
+    /// waited for on its own. Never around a phase that submits a frame of
+    /// its own (the loading screen's, the frame itself), which would draw
+    /// what the batch had not yet sent.
+    virtual void beginFrameUploads() = 0;
+    virtual void endFrameUploads() = 0;
     /// Game, first: the offline fixtures' own per-frame setup.
     virtual void prepareFrame() = 0;
     /// Game, in the world: everything the client presents of it - the camera's

@@ -115,6 +115,8 @@ class ClientHarness::FrontEnd final : public core::ClientFrontEnd {
 public:
     explicit FrontEnd(ClientHarness& h) : h_(h) {}
     void updateLogin(float, const core::FramePlan&) override {}
+    void beginFrameUploads() override {}
+    void endFrameUploads() override {}
     void prepareFrame() override {}
     void updateWorld(float) override {}
     void streamScene(float, const core::FramePlan&) override {}

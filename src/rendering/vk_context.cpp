@@ -3650,10 +3650,15 @@ void VkContext::endUploadBatchSync() {
     SubmitLane& l = lane();
     if (l.uploadBatchDepth <= 0) return;
     l.uploadBatchDepth--;
-    if (l.uploadBatchDepth > 0) return;
+    // Inside an outer batch - the frame thread's, which spans whole phases of
+    // the frame - this one's caller still needs its data on the GPU before
+    // it returns: everything recorded so far goes now, and the outer batch
+    // carries on with a fresh command buffer.
+    if (l.uploadBatchDepth == 0) l.inUploadBatch = false;
+    submitBatchSync(l);
+}
 
-    l.inUploadBatch = false;
-
+void VkContext::submitBatchSync(SubmitLane& l) {
     // Nothing ever recorded, so there is nothing to end, submit or free.
     if (l.batchCmd == VK_NULL_HANDLE) {
         l.batchStaging.clear();
@@ -3798,6 +3803,9 @@ void VkContext::waitAllUploads() {
         std::lock_guard<std::mutex> lock(lanesMutex_);
         for (auto& l : lanes_) lanes.push_back(l.get());
     }
+    // This thread's open batch too: a caller about to free what was uploaded
+    // must not leave its copies recorded and unsent.
+    if (lane().inUploadBatch) submitBatchSync(lane());
     for (SubmitLane* l : lanes) retireBatches(*l, true);
     if (laneGeneration_ != 0) reclaimFinished(lane());
 }

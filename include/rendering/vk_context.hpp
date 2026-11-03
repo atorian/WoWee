@@ -709,6 +709,8 @@ private:
     /// Retires the lane's batches that have completed (or, with `wait`, all of
     /// them once they have). Any thread.
     void retireBatches(SubmitLane& lane, bool wait);
+    /// Submits what the lane's batch has recorded and waits for it.
+    void submitBatchSync(SubmitLane& lane);
     /// Every lane made so far; the lock guards the list, not the lanes.
     mutable std::mutex lanesMutex_;
     mutable std::vector<std::unique_ptr<SubmitLane>> lanes_;

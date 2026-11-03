@@ -249,6 +249,8 @@ private:
 
     // ---- ClientFrontEnd --------------------------------------------------------
     void updateLogin(float deltaTime, const FramePlan& plan) override;
+    void beginFrameUploads() override;
+    void endFrameUploads() override;
     void prepareFrame() override;
     void updateWorld(float deltaTime) override;
     void streamScene(float deltaTime, const FramePlan& plan) override;
@@ -429,6 +431,8 @@ private:
     std::unique_ptr<rendering::FrameInputs> renderInputs_;
     std::unique_ptr<FrameWorker> renderWorker_;
     std::optional<FrameWorker::Permit> renderPermit_;
+    /// The context the frame thread's upload batch is open on, while it is.
+    rendering::VkContext* frameUploads_ = nullptr;
     std::unique_ptr<ui::UIManager> uiManager;
     std::unique_ptr<ui::MapWindow> mapWindow_;
     /// A failed open is not retried every frame; switching the setting off
