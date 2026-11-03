@@ -466,8 +466,8 @@ to the account that made them: open them signed in to it.
 The renderer and threading plans (2-3 November 2026):
 
 - [WoWee: отрисовка на GPU](https://claude.ai/artifact/VwSfpbrxnLLM5fZCVKnW8j) -
-  stage 3, GPU-driven draws: steps 3.0-3.9 and where each stands. Its
-  table predates 3.4d (092fe8e1).
+  stage 3, GPU-driven draws: steps 3.0-3.9 and where each stands, up to
+  3.5.
 - [WoWee: постоянная сцена на GPU](https://claude.ai/artifact/XW9zTvR7tcrS2jXqnGXRJz) -
   stage 2, the scene kept on the GPU (done).
 - [WoWee: сцена на своём потоке](https://claude.ai/artifact/Bpvo7woYosAhytQfEyNazT) -

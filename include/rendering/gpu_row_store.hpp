@@ -49,6 +49,17 @@ public:
         pendingSerial_[row] = kUncarried;
     }
 
+    /// The row at `row`, a place its owner hands out itself (an instance's
+    /// slot, a block of its own): written as write() writes, the store grown
+    /// to hold it.
+    void writeAt(uint32_t row, const Row& value) {
+        if (row >= data_.size()) {
+            data_.resize(row + 1);
+            pendingSerial_.resize(row + 1, 0);
+        }
+        write(row, value);
+    }
+
     /// The row back once no frame in flight can read it.
     void release(VkContext& context, uint32_t row) {
         if (row == kNoRow) return;

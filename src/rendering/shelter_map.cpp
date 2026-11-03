@@ -220,9 +220,12 @@ bool ShelterMap::wantsDrawing(const glm::vec3& camera, double now, uint64_t worl
     return now - drawnAt_ >= kRefreshSeconds;
 }
 
-void ShelterMap::begin(VkCommandBuffer cmd, const glm::vec3& camera, uint64_t world) {
+void ShelterMap::place(const glm::vec3& camera, uint64_t world) {
     drawing_ = overheadFrameFor(glm::vec2(camera), camera.z + kAbove, kHalfExtent, kRange, kTexels);
     drawingWorld_ = world;
+}
+
+void ShelterMap::begin(VkCommandBuffer cmd) {
     // The precipitation of the frames before read it, and a probe copied it.
     barrier(cmd, map_.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, kReaders | VK_PIPELINE_STAGE_2_TRANSFER_BIT,

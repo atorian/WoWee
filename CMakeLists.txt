@@ -1149,6 +1149,7 @@ set(WOWEE_SOURCES
     src/rendering/character_renderer.cpp
     src/rendering/character_preview.cpp
     src/rendering/wmo_renderer.cpp
+    src/rendering/wmo_draws.cpp
     src/rendering/wmo_model_prep.cpp
     src/rendering/imgui_texture.cpp
     src/rendering/interface_frame.cpp

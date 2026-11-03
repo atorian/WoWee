@@ -729,8 +729,9 @@ void EditorViewport::prepare(VkCommandBuffer cmd) {
         m2Renderer_->prepareViewDraws(cmd, frame);
     }
     if (wmoRenderer_) {
-        wmoRenderer_->useFrame(wmoRenderer_->extract(*camera_, camera_->getPosition(), {}));
-        wmoRenderer_->prepareDraws(cmd, frame);
+        wmoRenderer_->useFrame(wmoRenderer_->extract(*camera_, camera_->getPosition()));
+        // No point lights in the editor.
+        wmoRenderer_->prepareDraws(cmd, frame, VK_NULL_HANDLE, 0);
     }
 }
 
@@ -749,7 +750,7 @@ void EditorViewport::render(VkCommandBuffer cmd) {
     terrainRenderer_->recordView(cmd, perFrameSet, terrain);
 
     if (m2Renderer_) m2Renderer_->render(cmd, perFrameSet, *camera_);
-    if (wmoRenderer_) wmoRenderer_->render(cmd, perFrameSet, *camera_);
+    if (wmoRenderer_) wmoRenderer_->render(cmd, perFrameSet);
 
     waterRenderer_.render(cmd, perFrameSet);
 

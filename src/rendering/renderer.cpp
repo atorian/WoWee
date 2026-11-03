@@ -1636,7 +1636,7 @@ FrameInputs Renderer::extractFrameInputs() {
     extraction.lap("terrain");
     if (wmoRenderer) {
         wmoRenderer->setViewDistance(in.viewDistance);
-        scene->buildings = wmoRenderer->extract(in.camera, in.characterPosition, in.localLights, mirror);
+        scene->buildings = wmoRenderer->extract(in.camera, in.characterPosition, mirror);
     }
     extraction.lap("WMO");
     if (characterRenderer) scene->characters = characterRenderer->extract(in.camera, in.localLights);
@@ -3047,8 +3047,7 @@ void Renderer::renderWorld() {  // NOLINT(readability-function-size)
                 auto t0 = std::chrono::steady_clock::now();
                 VkCommandBuffer cmd = beginSecondary(SEC_WMO);
                 setSecondaryViewportScissor(cmd);
-                wmoRenderer->render(cmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition,
-                                    WMORenderer::Pass::View, WMORenderer::Layer::Opaque);
+                wmoRenderer->render(cmd, perFrameSet, WMORenderer::Pass::View, WMORenderer::Layer::Opaque);
                 vkEndCommandBuffer(cmd);
                 return std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
@@ -3121,8 +3120,7 @@ void Renderer::renderWorld() {  // NOLINT(readability-function-size)
             // The buildings' blended batches, over the sky that shows through
             // them; their opaque batches went ahead of it in SEC_WMO.
             if (wmoRenderer && frameCamera() && !skipWMO) {
-                wmoRenderer->render(cmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition,
-                                    WMORenderer::Pass::View, WMORenderer::Layer::Blended);
+                wmoRenderer->render(cmd, perFrameSet, WMORenderer::Pass::View, WMORenderer::Layer::Blended);
             }
             vkEndCommandBuffer(cmd);
         }
@@ -3331,8 +3329,7 @@ void Renderer::renderWorld() {  // NOLINT(readability-function-size)
             auto wmoStart = std::chrono::steady_clock::now();
             {
                 GpuPass pass(*vkCtx, currentCmd, "wmo");
-                wmoRenderer->render(currentCmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition,
-                                    WMORenderer::Pass::View, WMORenderer::Layer::Opaque);
+                wmoRenderer->render(currentCmd, perFrameSet, WMORenderer::Pass::View, WMORenderer::Layer::Opaque);
             }
             lastWMORenderMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - wmoStart).count();
@@ -3372,8 +3369,7 @@ void Renderer::renderWorld() {  // NOLINT(readability-function-size)
         }
 
         if (wmoRenderer && frameCamera() && !skipWMO) {
-            wmoRenderer->render(currentCmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition,
-                                WMORenderer::Pass::View, WMORenderer::Layer::Blended);
+            wmoRenderer->render(currentCmd, perFrameSet, WMORenderer::Pass::View, WMORenderer::Layer::Blended);
         }
 
         if (overlaySystem_) {
@@ -4610,7 +4606,7 @@ void Renderer::renderReflectionPass() {
             terrainRenderer->recordReflection(currentCmd, reflDescSet, frameInputs_.scene->terrain);
         }
         if (wmoRenderer) {
-            wmoRenderer->render(currentCmd, reflDescSet, *frameCamera(), nullptr, WMORenderer::Pass::Reflection);
+            wmoRenderer->render(currentCmd, reflDescSet, WMORenderer::Pass::Reflection);
         }
     }
 
@@ -4661,6 +4657,18 @@ void Renderer::renderShadowMap(ShadowView view) {
     const VkFramebuffer passFramebuffer = strike ? lightningShadowFramebuffer_[frame] : contact ? contactShadowFramebuffer_[frame] : shadowFramebuffer[frame];
     auto& passLayout = strike ? lightningShadowLayout_[frame] : contact ? contactShadowLayout_[frame] : shadowDepthLayout_[frame];
     const glm::vec3 passCenter = strike ? frameInputs_.scene->lightning.ground : contact ? frameInputs_.characterPosition : shadowCenter;
+    // The units' map takes whatever reaches into its square: out to its
+    // corners, and a few yards past them for a caster standing outside whose
+    // body leans in.
+    const float shadowCullRadius = strike ? 550.0f : contact ? CONTACT_MAP_HALF_EXTENT * 1.415f + 8.0f
+                                           : frameInputs_.shadowDistance * 1.35f;
+    // The buildings that cast into it, culled on the GPU before the pass
+    // begins; not into the units' map.
+    std::optional<uint32_t> wmoMap;
+    if (drawCasters && wmoRenderer && !contact) {
+        CpuStage stage(vkCtx->cpuStages(), "beginFrame/graph/shadow_pass", strike ? "lightning: wmo cull" : "sun: wmo cull");
+        wmoMap = wmoRenderer->cullShadowMap(currentCmd, passCenter, shadowCullRadius);
+    }
 
     // Barrier 1: transition this frame's shadow map into writable depth layout.
     VkImageMemoryBarrier2 b1{};
@@ -4742,21 +4750,15 @@ void Renderer::renderShadowMap(ShadowView view) {
     vkCmdSetScissor(currentCmd, 0, 1, &sc);
 
     // Phase 7/8: render shadow casters
-    // The units' map takes whatever reaches into its square: out to its
-    // corners, and a few yards past them for a caster standing outside whose
-    // body leans in.
-    const float shadowCullRadius = strike ? 550.0f : contact ? CONTACT_MAP_HALF_EXTENT * 1.415f + 8.0f
-                                           : frameInputs_.shadowDistance * 1.35f;
     if (drawCasters) {
     constexpr std::string_view kStageGroup = "beginFrame/graph/shadow_pass";
     if (terrainRenderer && !contact) {
         CpuStage stage(vkCtx->cpuStages(), kStageGroup, "sun: terrain");
         terrainRenderer->recordDepth(currentCmd, passMatrix, passCenter, shadowCullRadius, frameInputs_.scene->terrain);
     }
-    if (wmoRenderer && !contact) {
+    if (wmoMap) {
         CpuStage stage(vkCtx->cpuStages(), kStageGroup, strike ? "lightning: wmo" : "sun: wmo");
-        wmoRenderer->renderShadow(currentCmd, passMatrix, passCenter, shadowCullRadius, !wmoCasterSetsReset_);
-        wmoCasterSetsReset_ = true;
+        wmoRenderer->renderShadow(currentCmd, passMatrix, *wmoMap);
     }
     if (m2Renderer) {
         CpuStage stage(vkCtx->cpuStages(), kStageGroup, strike ? "lightning: m2" : contact ? "units: m2" : "sun: m2");
@@ -4835,8 +4837,14 @@ void Renderer::recordModelCompute(CpuStageTimes& stages) {
         m2Renderer->poseSkeletons(currentCmd, frame,
                                   characterRenderer ? characterRenderer->posedBones(frame) : PosedBones{});
     }
-    // The buildings' material rows, before any pass draws a building.
-    if (wmoRenderer) wmoRenderer->prepareDraws(currentCmd, frame);
+    // The buildings' rows and the cull of their colour lists, before any
+    // pass draws a building; each drawn group's lights from the frame's,
+    // uploaded at the top of beginFrame.
+    if (wmoRenderer) {
+        CpuStage stage(stages, "beginFrame", "WMO cull");
+        wmoRenderer->prepareDraws(currentCmd, frame, localLightBuffers_[frame].buffer,
+                                  static_cast<uint32_t>(currentFrameData.localLightMeta.x));
+    }
     // Their view draws, written on the GPU from the frame's groups.
     if (m2Renderer) {
         CpuStage stage(stages, "beginFrame", "M2 view draws");
@@ -4980,17 +4988,17 @@ void Renderer::renderSeaBedPass() {
     const glm::vec3 centre(frame.centre, frame.ceiling);
     const float reach = SeaBedMap::kHalfExtent * 1.415f;
     // The ground, and the buildings from above and from below: what the
-    // water stands on and against. Not the doodads (SeaBedMap).
+    // water stands on and against. Not the doodads (SeaBedMap). The two
+    // views of the buildings draw the casters of one cull.
+    const std::optional<uint32_t> wmoMap =
+        wmoRenderer ? wmoRenderer->cullShadowMap(currentCmd, centre, reach) : std::nullopt;
     const auto drawView = [&](SeaBedView view) {
         const glm::mat4 matrix = seaBed_->viewMatrix(view);
         seaBed_->beginView(currentCmd, view);
         if (view == SeaBedView::GroundFromAbove) {
             if (terrainRenderer) terrainRenderer->recordDepth(currentCmd, matrix, centre, frame.range, frameInputs_.scene->terrain);
-        } else if (wmoRenderer) {
-            // The sun's pass reset the casters' texture sets this frame if
-            // it drew them; if it did not, this is the first, and resets.
-            wmoRenderer->renderShadow(currentCmd, matrix, centre, reach, !wmoCasterSetsReset_);
-            wmoCasterSetsReset_ = true;
+        } else if (wmoMap) {
+            wmoRenderer->renderShadow(currentCmd, matrix, *wmoMap);
         }
         seaBed_->endView(currentCmd, view);
     };
@@ -5136,19 +5144,20 @@ void Renderer::renderShelterPass() {
     // What is loaded, as a number that moves when any of it streams in or out.
     const uint64_t world = frameInputs_.shelterRevision;
     if (shelter_->wantsDrawing(eye, frameInputs_.time, world)) {
-        shelter_->begin(currentCmd, eye, world);
+        shelter_->place(eye, world);
         const glm::mat4 matrix = shelter_->matrix();
         const glm::vec3 centre(shelter_->drawing().centre, eye.z);
         // The map's corners are its half extent and a half again from its
-        // middle.
+        // middle; the buildings that cast into it are culled before it
+        // begins.
         const float reach = ShelterMap::kHalfExtent * 1.415f;
+        const std::optional<uint32_t> wmoMap =
+            wmoRenderer ? wmoRenderer->cullShadowMap(currentCmd, centre, reach) : std::nullopt;
+        shelter_->begin(currentCmd);
         // The ground, the buildings and the doodads - a tree's crown keeps
         // the rain off as a roof does. Not the characters.
         if (terrainRenderer) terrainRenderer->recordDepth(currentCmd, matrix, centre, reach, frameInputs_.scene->terrain);
-        if (wmoRenderer) {
-            wmoRenderer->renderShadow(currentCmd, matrix, centre, reach, !wmoCasterSetsReset_);
-            wmoCasterSetsReset_ = true;
-        }
+        if (wmoMap) wmoRenderer->renderShadow(currentCmd, matrix, *wmoMap);
         if (m2Renderer) {
             m2Renderer->renderShadow(currentCmd, matrix, frameInputs_.wind, centre, reach, !m2CasterSetsReset_);
             m2CasterSetsReset_ = true;
@@ -5292,7 +5301,7 @@ void Renderer::buildFrameGraph() {
     if (!renderGraph_) return;
 
     renderGraph_->reset();
-    characterCasterSetsReset_ = wmoCasterSetsReset_ = m2CasterSetsReset_ = false;
+    characterCasterSetsReset_ = m2CasterSetsReset_ = false;
 
     auto shadowDepth = renderGraph_->findResource("shadow_depth");
     auto reflTex = renderGraph_->findResource("reflection_texture");
