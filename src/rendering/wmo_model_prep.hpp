@@ -70,5 +70,12 @@ struct WmoModelPrep {
     std::vector<uint32_t> rtTriangleMaterial;
 };
 
+/// That mesh, kept from the preparation until the model's textures are in
+/// and say what its surfaces are (WMORenderer::registerRtModel).
+struct WmoPendingRt {
+    RtScene::MeshSource mesh;
+    std::vector<uint32_t> triangleMaterial;
+};
+
 } // namespace rendering
 } // namespace wowee

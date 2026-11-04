@@ -95,6 +95,36 @@ cover it run on this device before it is merged, and the commit says they did.
   `WarningsAsErrors`. When CI reports one, fix it then. A rule a standard
   tool can check goes there, not into a new sweep in `tools/`.
 
+## Loading in the world never holds a frame
+
+User decision (2026-11-03). Once a character is in the world, the main
+thread and the render thread load nothing: no file read, no parse, no
+decode, no collision build, no blob packing, no staging copy and no wait
+for an upload. A model, a texture, a tile or a piece of equipment that
+arrives while the player plays is made ready on a worker and appears when
+it is ready.
+
+- The frame takes only the finished result, at a cost that does not grow
+  with what was loaded: a pointer handed over, a few rows written, a
+  resource that is now resident. Whatever its size, a model costs the frame
+  the same.
+- A budget checked between items is not a bound: one large model is a whole
+  frame's hitch (49 ms for one WMO doodad in Dalaran). Split the work so no
+  single piece the frame does can take long, or move it off the frame.
+- GPU uploads go out asynchronously, and a resource is used only after its
+  upload has completed; the frame never waits for one. Until then the thing
+  is not drawn, or is drawn as it was - never a stall to have it sooner.
+- What a renderer owns and only the main thread may change (pools, row
+  tables, model maps) is no reason to build there: build on the worker into
+  a result of its own, and let the frame publish it in one bounded step. If
+  the owner cannot take a finished result, that is the work.
+- The loading screen is the exception: there the frame waits on purpose.
+- The frame budget (WOWEE_FRAME_PROFILE, the SLOW lines) names main-thread
+  work over a few milliseconds; a load among them is a bug. The ones known
+  on 2026-11-03: the terrain's finalize steps (M2 model loads, terrain
+  chunks, M2 instances), unit and weapon model uploads, packet handlers that
+  load. New code adds none.
+
 ## Errors are logged, never swallowed
 
 - Every failure is visible in the log at the default level: `LOG_WARNING` or

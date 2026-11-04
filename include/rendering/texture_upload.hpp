@@ -6,6 +6,7 @@
 #include <vulkan/vulkan.h>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 namespace wowee {
@@ -32,6 +33,22 @@ bool giveCachedSampler(VkContext& ctx, VkTexture& texture);
 [[nodiscard]] TextureRef cacheStoredTexture(VkContext& ctx, const std::string& path,
                                             const pipeline::BLPImage& image);
 
+/// A texture made and its copy recorded, not yet in the cache: what goes in
+/// once the copy has run (TextureCache::insert). No texture when it could
+/// not be made, which is said.
+struct PreparedTexture {
+    TextureKey key;
+    std::shared_ptr<VkTexture> texture;
+    uint64_t bytes = 0;
+    TextureInfo info;
+};
+
+/// cacheStoredTexture's making, without the insert: inside an upload batch
+/// the copy is only recorded, and the texture goes in the cache after the
+/// batch has run (TextureLoads).
+[[nodiscard]] PreparedTexture prepareStoredTexture(VkContext& ctx, const std::string& path,
+                                                   const pipeline::BLPImage& image);
+
 /// How this device keeps normal maps: BC7 where it can sample it, RGBA8
 /// where it cannot.
 [[nodiscard]] NormalMapFormat normalMapFormatFor(const VkContext& ctx);
@@ -40,6 +57,8 @@ bool giveCachedSampler(VkContext& ctx, VkTexture& texture);
 /// made, and hand it to the cache under `key` with its height variance.
 /// Empty, said once per key, on failure or refusal.
 [[nodiscard]] TextureRef cacheNormalMap(VkContext& ctx, const TextureKey& key, const EncodedNormalMap& map);
+/// Its making, without the insert (prepareStoredTexture).
+[[nodiscard]] PreparedTexture prepareNormalMap(VkContext& ctx, const TextureKey& key, const EncodedNormalMap& map);
 
 /// Upload RGBA8 pixels with generated mips and hand them to the cache under
 /// `key`. Empty, said once per key, on failure or refusal.

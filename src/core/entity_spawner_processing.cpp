@@ -1073,9 +1073,7 @@ void EntitySpawner::finishM2GameObjectLoad(PreparedGameObjectWMO& result) {
     }
 
     const uint32_t modelId = nextGameObjectModelId_++;
-    m2Renderer->setPredecodedBLPCache(&result.predecodedTextures);
     const bool loaded = m2Renderer->loadModel(*result.m2Model, modelId);
-    m2Renderer->setPredecodedBLPCache(nullptr);
     if (!loaded) {
         LOG_WARNING("Failed to load gameobject model: ", result.modelPath);
         assets_.gameObjectDisplayIdFailedCache_.insert(result.displayId);
@@ -1143,10 +1141,8 @@ void EntitySpawner::processPendingWmoUploads() {
     constexpr float kUploadBudgetMs = 6.0f;
     auto& pending = spawns_->pendingWmoUploads_.front();
 
-    wmoRenderer->setPredecodedBLPCache(&pending.result.predecodedTextures);
     const auto status = wmoRenderer->loadModelIncremental(
         *pending.result.wmoModel, pending.modelId, kUploadBudgetMs);
-    wmoRenderer->setPredecodedBLPCache(nullptr);
 
     if (status == rendering::WMORenderer::ModelLoadResult::InProgress) return;
 
@@ -1231,7 +1227,7 @@ void EntitySpawner::processGameObjectSpawnQueue() {
             PendingGameObjectSpawn captureSpawn = s;
             std::string capturePath = modelPath;
             AsyncGameObjectLoad load;
-            load.future = spawns_->jobs_.submit(s.token, 
+            load.future = spawns_->jobs_.submit(s.token,
                 [am, captureSpawn, capturePath](const JobGroup::Token& jobToken) -> PreparedGameObjectWMO {
                     PreparedGameObjectWMO result{};
                     result.token = jobToken;
@@ -1271,30 +1267,6 @@ void EntitySpawner::processGameObjectSpawnQueue() {
                         }
                     }
 
-                    // Pre-decode WMO textures on background thread
-                    for (const auto& texPath : wmo->textures) {
-                        if (texPath.empty()) continue;
-                        std::string texKey = texPath;
-                        size_t nul = texKey.find('\0');
-                        if (nul != std::string::npos) texKey.resize(nul);
-                        std::replace(texKey.begin(), texKey.end(), '/', '\\');
-                        std::transform(texKey.begin(), texKey.end(), texKey.begin(),
-                                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                        if (texKey.empty()) continue;
-                        // Convert to .blp extension
-                        if (texKey.size() >= 4) {
-                            std::string ext = texKey.substr(texKey.size() - 4);
-                            if (ext == ".tga" || ext == ".dds") {
-                                texKey = texKey.substr(0, texKey.size() - 4) + ".blp";
-                            }
-                        }
-                        if (result.predecodedTextures.find(texKey) != result.predecodedTextures.end()) continue;
-                        auto blp = am->loadTexture(texKey);
-                        if (blp.isValid()) {
-                            blp.analyzeAlpha();
-                            result.predecodedTextures[texKey] = std::move(blp);
-                        }
-                    }
 
                     result.wmoModel = wmo;
                     result.valid = true;
@@ -1327,7 +1299,7 @@ void EntitySpawner::processGameObjectSpawnQueue() {
             PendingGameObjectSpawn captureSpawn = s;
             std::string capturePath = modelPath;
             AsyncGameObjectLoad load;
-            load.future = spawns_->jobs_.submit(s.token, 
+            load.future = spawns_->jobs_.submit(s.token,
                 [am, captureSpawn, capturePath](const JobGroup::Token& jobToken) -> PreparedGameObjectWMO {
                     PreparedGameObjectWMO result{};
                     result.token = jobToken;
@@ -1370,21 +1342,6 @@ void EntitySpawner::processGameObjectSpawnQueue() {
                         LOG_WARNING("GO skin file MISSING for WotLK M2 (no indices/batches): ", skinPath);
                     }
 
-                    // Keyed as M2Renderer::loadModel asks for them.
-                    for (const auto& tex : model->textures) {
-                        std::string texKey = tex.filename;
-                        const size_t nul = texKey.find('\0');
-                        if (nul != std::string::npos) texKey.resize(nul);
-                        if (texKey.empty()) continue;
-                        std::replace(texKey.begin(), texKey.end(), '/', '\\');
-                        std::transform(texKey.begin(), texKey.end(), texKey.begin(),
-                                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                        if (result.predecodedTextures.count(texKey)) continue;
-                        auto blp = am->loadTexture(texKey, true);
-                        if (!blp.isValid()) continue;
-                        blp.analyzeAlpha();
-                        result.predecodedTextures[texKey] = std::move(blp);
-                    }
 
                     result.m2Model = std::move(model);
                     result.valid = true;

@@ -1,5 +1,4 @@
 #include "rendering/character_emitters.hpp"
-#include <chrono>
 #include <stdexcept>
 #include "rendering/character_renderer.hpp"
 #include "rendering/cpu_stage_times.hpp"
@@ -23,7 +22,7 @@ void CharacterEmitters::clearInstances() {
 
 size_t CharacterEmitters::loading() const {
     size_t waiting = 0;
-    for (const auto& [serial, model] : models_) waiting += model.textures.valid() ? 1 : 0;
+    for (const auto& [serial, model] : models_) waiting += model.waiting ? 1 : 0;
     return waiting;
 }
 
@@ -46,15 +45,11 @@ void CharacterEmitters::update() {
             if (model.handle != 0 && !m2_.hasPosedEmitterModel(model.handle)) model.handle = 0;
             if (model.handle == 0) {
                 if (model.failed) return;
-                // Its textures are read on a worker first, as a frame cannot
+                // Its textures are made on a worker first, as a frame cannot
                 // wait for the disk; until then it has no emitters.
-                if (!model.textures.valid()) {
-                    model.textures = m2_.preparePosedEmitterTextures(*source.model);
-                    return;
-                }
-                if (model.textures.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
-                auto prepared = model.textures.get();
-                model.handle = m2_.loadPosedEmitterModel(*source.model, prepared);
+                model.waiting = !m2_.posedEmitterTexturesReady(*source.model);
+                if (model.waiting) return;
+                model.handle = m2_.loadPosedEmitterModel(*source.model);
                 if (model.handle == 0) {
                     LOG_WARNING("Emitters of '", source.model->name, "' (",
                                 source.model->particleEmitters.size(), " particle, ",

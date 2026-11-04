@@ -20,7 +20,7 @@
 
 namespace wowee {
 
-namespace rendering { class Renderer; class LoadingScreen; }
+namespace rendering { class Renderer; class LoadingScreen; class TextureLoads; }
 namespace pipeline { class AssetManager; class DBCLayout; class GameTables; }
 
 namespace core {
@@ -127,8 +127,8 @@ private:
     [[nodiscard]] float secondsSince(std::chrono::steady_clock::time_point start) const;
     void fail(const std::string& reason);
     /// `normalMaps`: how this device keeps building normal maps, which the
-    /// worker encodes them as.
-    static std::shared_ptr<PreparedMap> prepareMap(pipeline::AssetManager& assets,
+    /// texture loads `loads` starts for the instance encode them as.
+    static std::shared_ptr<PreparedMap> prepareMap(pipeline::AssetManager& assets, rendering::TextureLoads& loads,
         const std::string& mapName, rendering::NormalMapFormat normalMaps, const JobGroup::Token& token);
     std::optional<Entry> pendingWorldEntry_;
 

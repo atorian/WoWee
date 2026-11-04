@@ -25,69 +25,74 @@ namespace rendering {
 
 void M2Renderer::setupEmitterResources(M2ModelGPU& gpuModel, const pipeline::M2Model& model,
                                        const std::vector<VkTexture*>& allTextures) {
-    // Copy particle emitter data and resolve textures
     gpuModel.particleEmitters = model.particleEmitters;
-    gpuModel.particleTextures.resize(model.particleEmitters.size(), whiteTexture_.get());
     for (size_t ei = 0; ei < model.particleEmitters.size(); ei++) {
-        uint16_t texIdx = model.particleEmitters[ei].texture;
-        if (texIdx < allTextures.size() && allTextures[texIdx] != nullptr) {
-            gpuModel.particleTextures[ei] = allTextures[texIdx];
-        } else {
+        const uint16_t texIdx = model.particleEmitters[ei].texture;
+        if (texIdx >= allTextures.size() || allTextures[texIdx] == nullptr) {
             LOG_WARNING("M2 '", model.name, "' particle emitter[", ei,
                         "] texture index ", texIdx, " out of range (", allTextures.size(),
                         " textures) - using white fallback");
         }
     }
 
-    // Each emitter's texture set, shared with every emitter of any model that
-    // draws the same texture with the same wrap mode: a set per emitter held
-    // the same image as its neighbours' and competed with the materials for
-    // materialDescPool_.
-    if (!model.particleEmitters.empty()) {
-        gpuModel.particleTexSets.resize(model.particleEmitters.size(), VK_NULL_HANDLE);
-        for (size_t ei = 0; ei < model.particleEmitters.size(); ei++) {
-            // Wrapped as the model's slot says: the image is shared, and
-            // its own sampler is the cache's, not this emitter's.
-            const uint16_t slot = model.particleEmitters[ei].texture;
-            const uint8_t wrap = slot < model.textures.size()
-                ? static_cast<uint8_t>(model.textures[slot].flags & 0x3) : 0;
-            gpuModel.particleTexSets[ei] = acquireEmitterTexSet(gpuModel, gpuModel.particleTextures[ei], wrap);
+    gpuModel.ribbonEmitters = model.ribbonEmitters;
+    gpuModel.ribbonBlendModes.assign(model.ribbonEmitters.size(), 2);
+    for (size_t ri = 0; ri < model.ribbonEmitters.size(); ri++) {
+        // Ribbon textureIndex is a direct index into the model's texture
+        // array (NOT through the textureLookup table).
+        const uint16_t texDirect = model.ribbonEmitters[ri].textureIndex;
+        if (texDirect >= allTextures.size() || allTextures[texDirect] == nullptr) {
+            LOG_WARNING("M2 '", model.name, "' ribbon emitter[", ri,
+                        "] texture ", texDirect, " of ", allTextures.size(),
+                        (texDirect < allTextures.size() ? " did not load" : " is out of range"),
+                        " - ribbon drawn white");
+        }
+        // materialIndex is an index into the model's materials, not its
+        // batches: the batch at that index belongs to some other submesh.
+        const uint16_t matIdx = model.ribbonEmitters[ri].materialIndex;
+        if (matIdx < model.materials.size()) {
+            gpuModel.ribbonBlendModes[ri] = model.materials[matIdx].blendMode;
+        } else {
+            LOG_WARNING("M2 '", model.name, "' ribbon emitter[", ri, "] material ", matIdx,
+                        " of ", model.materials.size(), " is out of range - ribbon alpha-blended");
         }
     }
 
-    // Copy ribbon emitter data and resolve textures
-    gpuModel.ribbonEmitters = model.ribbonEmitters;
-    if (!model.ribbonEmitters.empty()) {
-        gpuModel.ribbonTextures.resize(model.ribbonEmitters.size(), whiteTexture_.get());
-        gpuModel.ribbonTexSets.resize(model.ribbonEmitters.size(), VK_NULL_HANDLE);
-        gpuModel.ribbonBlendModes.resize(model.ribbonEmitters.size(), 2);
-        for (size_t ri = 0; ri < model.ribbonEmitters.size(); ri++) {
-            // Ribbon textureIndex is a direct index into the model's texture
-            // array (NOT through the textureLookup table).
-            uint16_t texDirect = model.ribbonEmitters[ri].textureIndex;
-            if (texDirect < allTextures.size() && allTextures[texDirect] != nullptr) {
-                gpuModel.ribbonTextures[ri] = allTextures[texDirect];
-            } else {
-                LOG_WARNING("M2 '", model.name, "' ribbon emitter[", ri,
-                            "] texture ", texDirect, " of ", allTextures.size(),
-                            (texDirect < allTextures.size() ? " did not load" : " is out of range"),
-                            " - ribbon drawn white");
-            }
-            // materialIndex is an index into the model's materials, not its
-            // batches: the batch at that index belongs to some other submesh.
-            uint16_t matIdx = model.ribbonEmitters[ri].materialIndex;
-            if (matIdx < model.materials.size()) {
-                gpuModel.ribbonBlendModes[ri] = model.materials[matIdx].blendMode;
-            } else {
-                LOG_WARNING("M2 '", model.name, "' ribbon emitter[", ri, "] material ", matIdx,
-                            " of ", model.materials.size(), " is out of range - ribbon alpha-blended");
-            }
-            const uint8_t wrap = texDirect < model.textures.size()
-                ? static_cast<uint8_t>(model.textures[texDirect].flags & 0x3) : 0;
-            gpuModel.ribbonTexSets[ri] = acquireEmitterTexSet(gpuModel, gpuModel.ribbonTextures[ri], wrap);
-        }
-        LOG_DEBUG("  Ribbon emitters loaded: ", model.ribbonEmitters.size());
+    // Wrapped as the model's slot says: the image is shared, and its own
+    // sampler is the cache's, not this emitter's.
+    std::vector<uint8_t> wrap(model.textures.size());
+    for (size_t slot = 0; slot < model.textures.size(); ++slot)
+        wrap[slot] = static_cast<uint8_t>(model.textures[slot].flags & 0x3);
+    bindEmitterTextures(gpuModel, allTextures, wrap);
+}
+
+void M2Renderer::bindEmitterTextures(M2ModelGPU& gpu, const std::vector<VkTexture*>& slotTextures,
+                                     const std::vector<uint8_t>& slotWrap) {
+    const auto textureAt = [&](size_t slot) {
+        return slot < slotTextures.size() && slotTextures[slot] ? slotTextures[slot] : whiteTexture_.get();
+    };
+    const auto wrapAt = [&](size_t slot) -> uint8_t { return slot < slotWrap.size() ? slotWrap[slot] : 0; };
+    // Each emitter's texture set, shared with every emitter of any model that
+    // draws the same texture with the same wrap mode: a set per emitter held
+    // the same image as its neighbours' and competed with the materials for
+    // materialDescPool_. The uses held before are given back after the new
+    // ones are taken, so a set both name is not freed and made again.
+    const std::vector<M2EmitterTexKey> before = std::exchange(gpu.emitterTexKeys, {});
+    gpu.particleTextures.resize(gpu.particleEmitters.size());
+    gpu.particleTexSets.resize(gpu.particleEmitters.size());
+    for (size_t ei = 0; ei < gpu.particleEmitters.size(); ei++) {
+        const uint16_t slot = gpu.particleEmitters[ei].texture;
+        gpu.particleTextures[ei] = textureAt(slot);
+        gpu.particleTexSets[ei] = acquireEmitterTexSet(gpu, gpu.particleTextures[ei], wrapAt(slot));
     }
+    gpu.ribbonTextures.resize(gpu.ribbonEmitters.size());
+    gpu.ribbonTexSets.resize(gpu.ribbonEmitters.size());
+    for (size_t ri = 0; ri < gpu.ribbonEmitters.size(); ri++) {
+        const uint16_t slot = gpu.ribbonEmitters[ri].textureIndex;
+        gpu.ribbonTextures[ri] = textureAt(slot);
+        gpu.ribbonTexSets[ri] = acquireEmitterTexSet(gpu, gpu.ribbonTextures[ri], wrapAt(slot));
+    }
+    releaseEmitterTexKeys(before);
 }
 
 namespace {
@@ -113,30 +118,18 @@ std::vector<std::pair<uint32_t, std::string>> emitterTexturePaths(const pipeline
 
 } // namespace
 
-std::future<M2Renderer::PreparedTextures> M2Renderer::preparePosedEmitterTextures(
-        const pipeline::M2Model& model) const {
-    // Those the shared cache holds are uploaded already: nothing to read.
-    std::vector<std::string> keys;
+bool M2Renderer::posedEmitterTexturesReady(const pipeline::M2Model& model) {
+    // Every one asked for, so they are made side by side.
+    bool ready = true;
     for (const auto& [slot, path] : emitterTexturePaths(model)) {
-        std::string key = normalizeTexturePath(path);
-        if (vkCtx_ && vkCtx_->textures().find({key, TextureForm::Stored, 0})) continue;
-        keys.push_back(std::move(key));
+        bool loading = false;
+        (void)loadTexture(path, &loading);
+        ready = ready && !loading;
     }
-    return core::ThreadPool::ioWorkers().submit("posed emitter textures", [am = assetManager, keys]() {
-        PreparedTextures out;
-        if (!am) return out;
-        for (const std::string& key : keys) {
-            // As loadTexture reads one: M2 skins need no decode.
-            pipeline::BLPImage blp = am->loadTexture(key, true);
-            if (!blp.isValid()) continue;  // loadTexture says so, on the main thread
-            blp.analyzeAlpha();
-            out[key] = std::move(blp);
-        }
-        return out;
-    });
+    return ready;
 }
 
-uint32_t M2Renderer::loadPosedEmitterModel(const pipeline::M2Model& model, PreparedTextures& prepared) {
+uint32_t M2Renderer::loadPosedEmitterModel(const pipeline::M2Model& model) {
     if (model.particleEmitters.empty() && model.ribbonEmitters.empty()) return 0;
     if (!vkCtx_) return 0;
 
@@ -147,18 +140,21 @@ uint32_t M2Renderer::loadPosedEmitterModel(const pipeline::M2Model& model, Prepa
     gpu.boundMax = model.boundMax;
     gpu.globalSequenceDurations = model.globalSequenceDurations;
 
-    // Its textures, decoded on a worker, and its emitters go to the GPU in
-    // one batch, submitted without waiting for it: this runs on the main
+    // Its textures, made on a worker and in the cache by now
+    // (posedEmitterTexturesReady), and its emitters, which go to the GPU in
+    // one batch submitted without waiting for it: this runs on the main
     // thread, in the frame, as a creature comes into view.
     std::vector<VkTexture*> textures(model.textures.size(), nullptr);
     vkCtx_->beginUploadBatch();
-    PreparedTextures* const outerCache = std::exchange(predecodedBLPCache_, &prepared);
     for (const auto& [slot, path] : emitterTexturePaths(model)) {
-        TextureRef texture = loadTexture(path);
+        bool loading = false;
+        TextureRef texture = loadTexture(path, &loading);
+        if (loading)
+            LOG_WARNING("M2 '", model.name, "' emitter texture '", path,
+                        "' left the cache before its emitters were made - they draw it white");
         textures[slot] = texture.get();
         gpu.textureRefs.push_back(std::move(texture));
     }
-    predecodedBLPCache_ = outerCache;
     // m2_particles.comp and m2_ribbons.comp leave an emitter on a bone the
     // skeleton does not have at the model origin.
     for (const auto& em : model.particleEmitters) {
@@ -303,8 +299,15 @@ VkDescriptorSet M2Renderer::acquireEmitterTexSet(M2ModelGPU& gpu, VkTexture* tex
 }
 
 void M2Renderer::releaseEmitterTexSets(M2ModelGPU& gpu) {
+    // The per-emitter set vectors stay as they are: a frame still being
+    // recorded may read them, and the sets they name are freed only after
+    // the frames in flight.
+    releaseEmitterTexKeys(std::exchange(gpu.emitterTexKeys, {}));
+}
+
+void M2Renderer::releaseEmitterTexKeys(const std::vector<M2EmitterTexKey>& keys) {
     std::vector<VkDescriptorSet> unused;
-    for (const M2EmitterTexKey& key : gpu.emitterTexKeys) {
+    for (const M2EmitterTexKey& key : keys) {
         auto it = emitterTexSets_.find(key);
         if (it == emitterTexSets_.end()) continue;
         if (--it->second.users > 0) continue;
@@ -313,10 +316,6 @@ void M2Renderer::releaseEmitterTexSets(M2ModelGPU& gpu) {
         unused.push_back(it->second.set);
         emitterTexSets_.erase(it);
     }
-    // The per-emitter set vectors stay as they are: a frame still being
-    // recorded may read them, and the sets they name are freed only after
-    // the frames in flight.
-    gpu.emitterTexKeys.clear();
     if (unused.empty() || !vkCtx_ || !materialDescPool_) return;
     vkCtx_->deferAfterAllFrameFences([ctx = vkCtx_, pool = materialDescPool_, sets = std::move(unused)]() {
         ctx->freeDescriptorSets(pool, static_cast<uint32_t>(sets.size()), sets.data());

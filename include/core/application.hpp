@@ -405,7 +405,6 @@ private:
     // (barber shop), so the new hair/facial hair shows without a restart.
     void refreshPlayerCharacterModel();
     void buildFactionHostilityMap(uint8_t playerRace);
-    void setupTestTransport();  // Test transport boat for development
 
     static Application* instance;
 

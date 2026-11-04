@@ -1094,6 +1094,7 @@ set(WOWEE_SOURCES
     src/rendering/particle_pool.cpp
     src/rendering/m2_particle_pass.cpp
     src/rendering/texture_upload.cpp
+    src/rendering/texture_loads.cpp
     src/rendering/normal_map_builder.cpp
     src/rendering/normal_map_encoding.cpp
     src/rendering/vk_utils.cpp

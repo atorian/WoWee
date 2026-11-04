@@ -444,22 +444,6 @@ bool SpellVisualSystem::ensureModel(const std::string& path, uint32_t modelId) {
             auto skin = am->readFile(pipeline::skinPathForM2(path));
             if (!skin.empty()) pipeline::M2Loader::loadSkin(skin, *model);
         }
-        // Decoded here, keyed as M2Renderer::loadModel asks for them, so the
-        // upload on the main thread reads nothing from disk.
-        for (const auto& tex : model->textures) {
-            std::string key = tex.filename;
-            const size_t nul = key.find('\0');
-            if (nul != std::string::npos) key.resize(nul);
-            if (key.empty()) continue;
-            std::replace(key.begin(), key.end(), '/', '\\');
-            std::transform(key.begin(), key.end(), key.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            if (out.textures.count(key)) continue;
-            auto blp = am->loadTexture(key, true);
-            if (!blp.isValid()) continue;
-            blp.analyzeAlpha();
-            out.textures[key] = std::move(blp);
-        }
         out.model = std::move(model);
         out.ok = true;
         return out;
@@ -489,9 +473,7 @@ void SpellVisualSystem::finishPendingLoads() {
             spellVisualFailedModels_.insert(modelId);
             continue;
         }
-        m2Renderer_->setPredecodedBLPCache(&prepared.textures);
         const bool loaded = m2Renderer_->loadModel(*prepared.model, modelId);
-        m2Renderer_->setPredecodedBLPCache(nullptr);
         ++uploaded;
         if (!loaded) {
             LOG_WARNING("SpellVisual: failed to load effect model to GPU: ", path);

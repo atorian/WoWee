@@ -29,6 +29,7 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "core/logger.hpp"
+#include <array>
 #include <chrono>
 #include <cctype>
 #include <glm/gtc/matrix_transform.hpp>
@@ -846,9 +847,8 @@ void M2Renderer::shutdown() {
     materialRows_.reset();
 
     // The models gave their textures back with them; the fallbacks go too.
-    failedTextureRetryAt_.clear();
+    pendingModelTextures_.clear();
     loggedTextureLoadFails_.clear();
-    textureLookupSerial_ = 0;
     whiteTexture_.reset();
     glowTexture_.reset();
 
@@ -937,6 +937,9 @@ void M2Renderer::shutdown() {
 
 void M2Renderer::destroyModelGPU(uint32_t modelId, std::shared_ptr<M2ModelGPU> retired) {
     if (!vkCtx_) return;
+    // Nothing more to finish: a model loaded again under this id waits for
+    // its own textures.
+    std::erase_if(pendingModelTextures_, [&](const PendingModelTextures& p) { return p.modelId == modelId; });
     releaseRtModel(modelId, *retired);
     // The shared emitter texture sets it used; the last use frees one.
     releaseEmitterTexSets(*retired);
@@ -1012,40 +1015,104 @@ bool M2Renderer::makeModelWritable(uint32_t modelId) {
     return true;
 }
 
-void M2Renderer::retryPendingBatchTextures() {
-    // loadTexture itself decides when a failed key is worth reading again;
-    // asking before then is a map lookup and returns the white fallback.
-    for (size_t i = 0; i < pendingBatchTextures_.size();) {
-        const PendingBatchTexture pending = pendingBatchTextures_[i];
+void M2Renderer::retryPendingModelTextures() {
+    // The loader decides when a failed key is worth reading again; asking
+    // before then is a map lookup that says it failed.
+    for (size_t i = 0; i < pendingModelTextures_.size();) {
+        PendingModelTextures& pending = pendingModelTextures_[i];
         auto it = models.find(pending.modelId);
-        M2ModelGPU::BatchGPU* batch =
-            (it != models.end() && pending.batchIndex < it->second->batches.size())
-                ? &it->second->batches[pending.batchIndex] : nullptr;
-        if (!batch || batch->pendingTextureKey.empty()) {
-            pendingBatchTextures_[i] = pendingBatchTextures_.back();
-            pendingBatchTextures_.pop_back();
+        if (it == models.end()) {
+            pendingModelTextures_[i] = std::move(pendingModelTextures_.back());
+            pendingModelTextures_.pop_back();
             continue;
         }
-        TextureRef tex = loadTexture(batch->pendingTextureKey);
-        if (!tex || tex == whiteTexture_) {
+        std::vector<std::pair<size_t, TextureRef>> arrived;
+        bool stillLoading = false;
+        bool stillMissing = false;
+        for (size_t slot = 0; slot < pending.slotKeys.size(); ++slot) {
+            if (pending.slotKeys[slot].empty()) continue;
+            bool loading = false;
+            TextureRef tex = loadTexture(pending.slotKeys[slot], &loading);
+            if (tex && tex != whiteTexture_) arrived.emplace_back(slot, std::move(tex));
+            else if (loading) stillLoading = true;
+            else stillMissing = true;
+        }
+        const bool settles = it->second->texturesLoading && !stillLoading;
+        if (!arrived.empty() || settles) showArrivedTextures(pending, arrived, !stillLoading);
+        if (!stillLoading && !stillMissing) {
+            pendingModelTextures_[i] = std::move(pendingModelTextures_.back());
+            pendingModelTextures_.pop_back();
+        } else {
             ++i;
-            continue;
         }
-        if (!makeModelWritable(pending.modelId)) { ++i; continue; }
-        batch = &it->second->batches[pending.batchIndex];
-        M2ModelGPU& model = (*it->second);
-        batch->texture = tex.get();
-        batch->textureHandle = tex.tableHandle();
-        applyBatchTextureProps(*batch, tex.info());
+    }
+}
+
+size_t M2Renderer::modelsAwaitingTextures() const {
+    size_t count = 0;
+    for (const auto& pending : pendingModelTextures_) {
+        const auto it = models.find(pending.modelId);
+        if (it != models.end() && it->second->texturesLoading) ++count;
+    }
+    return count;
+}
+
+void M2Renderer::showArrivedTextures(PendingModelTextures& pending,
+                                     std::vector<std::pair<size_t, TextureRef>>& arrived, bool settled) {
+    makeModelWritable(pending.modelId);
+    M2ModelGPU& model = *models.at(pending.modelId);
+    bool emittersChanged = false;
+    for (auto& [slot, tex] : arrived) {
+        const std::string& key = pending.slotKeys[slot];
+        for (auto& batch : model.batches) {
+            bool changed = false;
+            if (batch.pendingTextureKey == key) {
+                batch.texture = tex.get();
+                batch.textureHandle = tex.tableHandle();
+                applyBatchTextureProps(batch, tex.info());
+                batch.pendingTextureKey.clear();
+                changed = true;
+            }
+            if (batch.pendingSecondTextureKey == key) {
+                batch.secondTexture = tex.get();
+                batch.secondTextureHandle = tex.tableHandle();
+                batch.pendingSecondTextureKey.clear();
+                changed = true;
+            }
+            if (changed) writeBatchMaterial(model, batch);
+        }
+        for (const auto& em : model.particleEmitters) emittersChanged |= em.texture == slot;
+        for (const auto& rib : model.ribbonEmitters) emittersChanged |= rib.textureIndex == slot;
+        pending.slotTextures[slot] = tex.get();
         model.textureRefs.push_back(std::move(tex));
-        writeBatchMaterial(model, *batch);
-        batch->batchOpacity = batch->loadedOpacity;
-        buildDrawList(model);
-        LOG_INFO("M2 batch shown after retry: '", model.name, "' batch ", pending.batchIndex,
-                 " got '", batch->pendingTextureKey, "'");
-        batch->pendingTextureKey.clear();
-        pendingBatchTextures_[i] = pendingBatchTextures_.back();
-        pendingBatchTextures_.pop_back();
+        pending.slotKeys[slot].clear();
+    }
+    if (emittersChanged) bindEmitterTextures(model, pending.slotTextures, pending.slotWrap);
+
+    const bool finishing = settled && model.texturesLoading;
+    if (finishing) model.texturesLoading = false;
+    // Shown whole once nothing is loading; a batch whose own texture failed
+    // stays hidden until a retry finds it.
+    for (size_t bi = 0; bi < model.batches.size(); ++bi) {
+        auto& batch = model.batches[bi];
+        const bool hidden = model.texturesLoading || !batch.pendingTextureKey.empty();
+        batch.batchOpacity = hidden ? 0.0f : batch.loadedOpacity;
+        if (finishing && !batch.pendingTextureKey.empty()) {
+            // Invisible is indistinguishable from absent: a tree missing its
+            // bark, with the top floating over a gap, is one batch of two
+            // drawn at zero opacity, and nothing else names it.
+            static core::LogBudget hiddenBatchBudget(16, "M2 batches hidden because their texture did not load");
+            if (hiddenBatchBudget.take())
+                LOG_WARNING("M2 batch drawn invisible: '", model.name, "' batch ", bi, " wanted '",
+                            batch.pendingTextureKey, "' and did not get it");
+        }
+    }
+    buildDrawList(model);
+    if (finishing && !pending.rtPositions.empty()) {
+        registerRtModel(model, pending.rtPositions, pending.rtIndices);
+        pending.rtPositions = {};
+        pending.rtIndices = {};
+        scene_->slots.modelChanged(pending.modelId);
     }
 }
 
@@ -1194,6 +1261,22 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
     // prompted it had even spawned. Doodads are placed from ADTs and can be
     // enumerated offline; what cannot is anything spawned at runtime, so that
     // gets the larger share and its own allowance.
+    // Where a load's time goes, said for a load that holds the frame: the
+    // terrain finalizes doodads on the main thread a step at a time, and its
+    // budget is checked between models, so one dear model is a frame's hitch
+    // - 49 ms in Dalaran - with nothing in the log to say which or why.
+    using LoadClock = std::chrono::steady_clock;
+    const LoadClock::time_point loadStart = LoadClock::now();
+    LoadClock::time_point lapStart = loadStart;
+    std::array<std::pair<const char*, float>, 12> laps{};
+    size_t lapCount = 0;
+    const auto lap = [&](const char* what) {
+        const LoadClock::time_point now = LoadClock::now();
+        if (lapCount < laps.size())
+            laps[lapCount++] = {what, std::chrono::duration<float, std::milli>(now - lapStart).count()};
+        lapStart = now;
+    };
+
     static const bool kLoadDiag = core::envFlagEnabled("WOWEE_M2_LOAD_DIAG", false);
     if (kLoadDiag) {
         const bool placedDoodad = model.name.rfind("WORLD\\", 0) == 0 ||
@@ -1479,8 +1562,10 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
         }
     }
 
+    lap("classify");
     // The model's collision, from the one place every model's is built.
     if (collision_) gpuModel.collision = collision_->models().offer(model.name, model)->shape;
+    lap("collision");
     if (gpuModel.collision) {
         core::Logger::getInstance().debug("  M2 collision mesh: ", gpuModel.collision->triCount,
             " tris, grid ", gpuModel.collision->gridCellsX, "x", gpuModel.collision->gridCellsY);
@@ -1540,6 +1625,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
         }
     }
 
+    lap("geometry");
     // Load ALL textures from the model into a local vector.
     // textureLoadFailed[i] is true if texture[i] had a named path that failed to load.
     // Such batches are hidden (batchOpacity=0) rather than rendered white.
@@ -1549,6 +1635,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
     std::vector<TextureHandle> allTextureHandles;  ///< their places in the texture table
     std::vector<TextureInfo> allTextureInfo;
     std::vector<bool> textureLoadFailed;
+    std::vector<bool> textureLoading;
     std::vector<std::string> textureKeysLower;
     if (assetManager) {
         for (size_t ti = 0; ti < model.textures.size(); ti++) {
@@ -1565,8 +1652,9 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
                 std::replace(texKey.begin(), texKey.end(), '/', '\\');
                 std::transform(texKey.begin(), texKey.end(), texKey.begin(),
                                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                TextureRef texRef = loadTexture(texPath);
-                bool failed = (texRef == whiteTexture_);
+                bool loading = false;
+                TextureRef texRef = loadTexture(texPath, &loading);
+                const bool failed = texRef == whiteTexture_ && !loading;
                 if (failed) {
                     static uint32_t loggedModelTextureFails = 0;
                     static bool loggedModelTextureFailSuppressed = false;
@@ -1586,7 +1674,9 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
                 allTextureHandles.push_back(texRef.tableHandle());
                 allTextureInfo.push_back(texRef.info());
                 gpuModel.textureRefs.push_back(std::move(texRef));
-                textureLoadFailed.push_back(failed);
+                // Not in, for what samples it: failed, or still loading.
+                textureLoadFailed.push_back(failed || loading);
+                textureLoading.push_back(loading);
                 textureKeysLower.push_back(std::move(texKey));
             } else {
                 if (isInvisibleTrap) {
@@ -1628,6 +1718,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
                 allTextureHandles.push_back(whiteTexture_.tableHandle());
                 allTextureInfo.push_back(whiteTexture_.info());
                 textureLoadFailed.push_back(false);  // Empty filename = intentional white (type!=0)
+                textureLoading.push_back(false);
                 textureKeysLower.emplace_back();
             }
         }
@@ -1644,6 +1735,10 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
         }
     }
 
+    gpuModel.texturesLoading = std::find(textureLoading.begin(), textureLoading.end(), true) != textureLoading.end();
+    // Textures some batch waits for that are no slot of the model's own (the
+    // ground clutter's borrowed one).
+    std::vector<std::string> extraWaitKeys;
     setupEmitterResources(gpuModel, model, allTextures);
 
     // Copy texture transform data for UV animation
@@ -1652,6 +1747,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
     gpuModel.colorAlphaTracks = model.colorAlphaTracks;
     gpuModel.textureWeightTracks = model.textureWeightTracks;
     gpuModel.hasTextureAnimation = false;
+    lap("textures");
 
     // Build per-batch GPU entries
     if (!model.batches.empty()) {
@@ -1703,7 +1799,8 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
             VkTexture* tex = whiteTexture_.get();
             TextureHandle texHandle = whiteTexture_.tableHandle();
             TextureInfo texInfo = whiteTexture_.info();
-            bool texFailed = false;
+            bool texFailed = false;   // not in: failed or loading
+            bool texLoading = false;
             std::string batchTexKeyLower;
             if (batch.textureIndex < model.textureLookup.size()) {
                 uint16_t texIdx = model.textureLookup[batch.textureIndex];
@@ -1712,6 +1809,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
                     texHandle = allTextureHandles[texIdx];
                     texInfo = allTextureInfo[texIdx];
                     texFailed = (texIdx < textureLoadFailed.size()) && textureLoadFailed[texIdx];
+                    texLoading = (texIdx < textureLoading.size()) && textureLoading[texIdx];
                     if (texIdx < textureKeysLower.size()) {
                         batchTexKeyLower = textureKeysLower[texIdx];
                     }
@@ -1727,20 +1825,32 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
                 texHandle = allTextureHandles[0];
                 texInfo = allTextureInfo[0];
                 texFailed = !textureLoadFailed.empty() && textureLoadFailed[0];
+                texLoading = !textureLoading.empty() && textureLoading[0];
                 if (!textureKeysLower.empty()) {
                     batchTexKeyLower = textureKeysLower[0];
                 }
             }
 
-            if (texFailed && groundDetailModel) {
+            // Ground clutter whose texture is missing borrows another; one
+            // whose texture is still loading waits for it like any model.
+            std::string waitKey = batchTexKeyLower;
+            if (texFailed && !texLoading && groundDetailModel) {
                 static const std::string kDetailFallbackTexture = "World\\NoDXT\\Detail\\8des_detaildoodads01.blp";
-                TextureRef fallbackTex = loadTexture(kDetailFallbackTexture);
+                bool fallbackLoading = false;
+                TextureRef fallbackTex = loadTexture(kDetailFallbackTexture, &fallbackLoading);
                 if (fallbackTex && fallbackTex != whiteTexture_) {
                     tex = fallbackTex.get();
                     texHandle = fallbackTex.tableHandle();
                     texInfo = fallbackTex.info();
                     texFailed = false;
                     gpuModel.textureRefs.push_back(std::move(fallbackTex));
+                } else if (fallbackLoading) {
+                    // Waited for as its own texture would be.
+                    waitKey = normalizeTexturePath(kDetailFallbackTexture);
+                    texLoading = true;
+                    if (std::find(extraWaitKeys.begin(), extraWaitKeys.end(), waitKey) == extraWaitKeys.end())
+                        extraWaitKeys.push_back(waitKey);
+                    gpuModel.texturesLoading = true;
                 }
             }
             bgpu.texture = tex;
@@ -1802,6 +1912,10 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
                     if (tex < allTextures.size() && tex < textureLoadFailed.size() && !textureLoadFailed[tex]) {
                         bgpu.secondTexture = allTextures[tex];
                         bgpu.secondTextureHandle = allTextureHandles[tex];
+                    } else if (tex < textureLoading.size() && textureLoading[tex]) {
+                        // Taken when it arrives (retryPendingModelTextures);
+                        // the model is not drawn before then.
+                        bgpu.pendingSecondTextureKey = textureKeysLower[tex];
                     } else {
                         // Drawn with its second stage white: the first alone.
                         static std::unordered_set<std::string> saidMissing;
@@ -1815,17 +1929,12 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
                 }
             }
 
-            // Hide the batch if its texture failed to load, and remember what it
-            // was waiting for: retryPendingBatchTextures shows it if a later
-            // attempt succeeds, rather than leaving a hole until the model is
-            // unloaded.
-            const bool hiddenForTexture = texFailed && !groundDetailModel;
-            if (hiddenForTexture && batch.textureIndex < model.textureLookup.size()) {
-                const uint16_t texIdx = model.textureLookup[batch.textureIndex];
-                if (texIdx < model.textures.size()) {
-                    bgpu.pendingTextureKey = batchTexKeyLower;
-                }
-            }
+            // Hide the batch while its texture is loading or after it failed,
+            // and remember what it is waiting for: retryPendingModelTextures
+            // shows it when the texture arrives, rather than leaving a hole
+            // until the model is unloaded.
+            const bool hiddenForTexture = texFailed && (!groundDetailModel || texLoading);
+            if (hiddenForTexture) bgpu.pendingTextureKey = waitKey;
 
             // And say so, because invisible is indistinguishable from absent.
             //
@@ -1835,8 +1944,9 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
             // The texture loader logs where a file fails, but a batch turned
             // invisible three steps later on the strength of that flag said
             // nothing at all, so the search went to the texture files - which
-            // were all present and correct - instead of to the batch.
-            if (hiddenForTexture) {
+            // were all present and correct - instead of to the batch. One
+            // still loading is said when the model settles, if it fails.
+            if (hiddenForTexture && !texLoading) {
                 static core::LogBudget hiddenBatchBudget(
                     16, "M2 batches hidden because their texture did not load");
                 if (hiddenBatchBudget.take()) {
@@ -1871,7 +1981,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
                 bgpu.blendedByOpacity = bgpu.animatedOpacity || atRest < kM2BatchOpaqueOpacity;
                 if (bgpu.blendedByOpacity) gpuModel.hasTransparentBatches = true;
                 bgpu.loadedOpacity = atRest;
-                bgpu.batchOpacity = hiddenForTexture ? 0.0f : atRest;
+                bgpu.batchOpacity = hiddenForTexture || gpuModel.texturesLoading ? 0.0f : atRest;
             }
 
             // Compute batch center and radius for glow sprite positioning
@@ -2031,6 +2141,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
     // A trap volume or an effect is not there to collide with, whatever mesh
     // it ships.
     if (gpuModel.isInvisibleTrap || gpuModel.isSpellEffect) gpuModel.collision.reset();
+    lap("batches");
 
     // Its skeleton, for the GPU to pose - also when the classifier holds the
     // model still, as marking it a spell effect lets it move again. Without
@@ -2042,8 +2153,10 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
     // And its texture animations, which the view's draws sample on the GPU.
     if (gpuModel.hasTextureAnimation)
         gpuModel.textureAnimations = skeletons_.placeTextureAnimations(model, model.name.c_str());
+    lap("pool blobs");
 
     vkCtx_->endUploadBatch();
+    lap("submit uploads");
 
     // Each batch's material row. A batch whose texture - even the white
     // fallback - has no place in the texture table gets none and is not
@@ -2079,16 +2192,49 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
         }
     }
 
+    // Nothing of it is drawn while a texture is loading (a borrowed one may
+    // have started after earlier batches were set up).
+    if (gpuModel.texturesLoading)
+        for (auto& b : gpuModel.batches) b.batchOpacity = 0.0f;
+
     // Pre-compute available LOD levels to avoid per-instance batch iteration
     gpuModel.availableLODs = 0;
     for (const auto& b : gpuModel.batches) {
         if (b.submeshLevel < 8) gpuModel.availableLODs |= (1u << b.submeshLevel);
     }
     buildDrawList(gpuModel);
+    lap("materials and draw list");
 
-    for (size_t bi = 0; bi < gpuModel.batches.size(); ++bi) {
-        if (!gpuModel.batches[bi].pendingTextureKey.empty())
-            pendingBatchTextures_.push_back({modelId, bi});
+    // What it still waits for, and what finishing it then needs.
+    PendingModelTextures pending;
+    pending.modelId = modelId;
+    {
+        const auto waitedFor = [&](const std::string& key) {
+            return std::any_of(gpuModel.batches.begin(), gpuModel.batches.end(), [&](const auto& b) {
+                return b.pendingTextureKey == key || b.pendingSecondTextureKey == key;
+            });
+        };
+        bool waits = false;
+        pending.slotKeys.resize(textureKeysLower.size());
+        pending.slotTextures = allTextures;
+        pending.slotWrap.resize(textureKeysLower.size(), 0);
+        for (size_t slot = 0; slot < textureKeysLower.size(); ++slot) {
+            if (slot < model.textures.size()) pending.slotWrap[slot] = static_cast<uint8_t>(model.textures[slot].flags & 0x3);
+            if (!textureLoadFailed[slot]) continue;
+            // A slot loading is waited for whoever samples it (its emitters
+            // too); a failed one only for the batches hidden for it.
+            if (textureLoading[slot] || waitedFor(textureKeysLower[slot])) {
+                pending.slotKeys[slot] = textureKeysLower[slot];
+                waits = true;
+            }
+        }
+        for (const std::string& key : extraWaitKeys) {
+            pending.slotKeys.push_back(key);
+            pending.slotTextures.push_back(whiteTexture_.get());
+            pending.slotWrap.push_back(0);
+            waits = true;
+        }
+        if (!waits) pending.slotKeys.clear();
     }
     gpuModel.hasGlowSprites = std::any_of(gpuModel.batches.begin(), gpuModel.batches.end(),
         [&](const M2ModelGPU::BatchGPU& b) { return m2WantsGlowSprite(glowCardOf(gpuModel, b)); });
@@ -2113,7 +2259,21 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
         read.erase(std::unique(read.begin(), read.end()), read.end());
     }
 
-    registerRtModel(gpuModel, model);
+    lap("bones read");
+    // The ray tracer's mesh reads what the textures made of the batches: it
+    // is built once they are all in or failed.
+    if (castsRtShadow(gpuModel, model)) {
+        std::vector<glm::vec3> positions;
+        positions.reserve(model.vertices.size());
+        for (const auto& v : model.vertices) positions.push_back(v.position);
+        if (gpuModel.texturesLoading) {
+            pending.rtPositions = std::move(positions);
+            pending.rtIndices = model.indices;
+        } else {
+            registerRtModel(gpuModel, positions, model.indices);
+        }
+    }
+    lap("ray tracing");
     // No rebuild of the spatial index for this. It used to be marked dirty
     // here, against the map rehashing under the instances' cachedModel
     // pointers - but an unordered_map's rehash moves no elements, so the
@@ -2127,8 +2287,23 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
     LOG_DEBUG("Loaded M2 model: ", model.name, " (", models[modelId]->vertexCount, " vertices, ",
               models[modelId]->indexCount / 3, " triangles, ", models[modelId]->batches.size(), " batches)");
 
-    retryPendingBatchTextures();
+    if (!pending.slotKeys.empty()) pendingModelTextures_.push_back(std::move(pending));
+    lap("index");
 
+    const float loadMs = std::chrono::duration<float, std::milli>(LoadClock::now() - loadStart).count();
+    if (loadMs > 8.0f) {
+        static core::LogBudget slowLoads(200, "slow M2 model loads");
+        if (slowLoads.take()) {
+            std::string parts;
+            for (size_t i = 0; i < lapCount; ++i) {
+                if (laps[i].second < 0.5f) continue;
+                if (!parts.empty()) parts += ", ";
+                parts += std::string(laps[i].first) + " " + std::to_string(laps[i].second).substr(0, 5);
+            }
+            LOG_WARNING("SLOW M2 model load: '", model.name, "' ", loadMs, "ms (", model.vertices.size(),
+                        " verts, ", model.textures.size(), " textures, ", model.bones.size(), " bones) - ", parts);
+        }
+    }
     return true;
 }
 
@@ -2138,20 +2313,23 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
 namespace wowee {
 namespace rendering {
 
-void M2Renderer::registerRtModel(M2ModelGPU& gpuModel, const pipeline::M2Model& model) {
-    if (!rtScene_ || model.vertices.empty() || model.indices.empty()) return;
+bool M2Renderer::castsRtShadow(const M2ModelGPU& gpuModel, const pipeline::M2Model& model) const {
+    if (!rtScene_ || model.vertices.empty() || model.indices.empty()) return false;
     // What the renderer never draws, what is too small and numerous to be
     // worth its triangles (ground clutter), and what moves: an animated model
     // would cast its bind pose, not the pose on screen.
     if (gpuModel.isInvisibleTrap || gpuModel.isSpellEffect ||
         gpuModel.isGroundDetail || gpuModel.isSkyBird || gpuModel.isLightBeam) {
-        return;
+        return false;
     }
-    if (gpuModel.hasAnimation && !gpuModel.disableAnimation && !gpuModel.isTransportDoodad) return;
+    return !(gpuModel.hasAnimation && !gpuModel.disableAnimation && !gpuModel.isTransportDoodad);
+}
 
+void M2Renderer::registerRtModel(M2ModelGPU& gpuModel, const std::vector<glm::vec3>& positions,
+                                 const std::vector<uint16_t>& indices) {
+    if (!rtScene_) return;
     RtScene::MeshSource src;
-    src.positions.reserve(model.vertices.size());
-    for (const auto& v : model.vertices) src.positions.push_back(v.position);
+    src.positions = positions;
     for (const auto& batch : gpuModel.batches) {
         // A layer that fades in and out is drawn blended, and blended layers
         // cast no shadow.
@@ -2170,11 +2348,11 @@ void M2Renderer::registerRtModel(M2ModelGPU& gpuModel, const pipeline::M2Model& 
         }
         const float surface = packRtSurface(albedo, opacity);
         const size_t end = std::min<size_t>(size_t(batch.indexStart) + batch.indexCount,
-                                            model.indices.size());
+                                            indices.size());
         for (size_t i = batch.indexStart; i + 2 < end; i += 3) {
-            src.indices.push_back(model.indices[i]);
-            src.indices.push_back(model.indices[i + 1]);
-            src.indices.push_back(model.indices[i + 2]);
+            src.indices.push_back(indices[i]);
+            src.indices.push_back(indices[i + 1]);
+            src.indices.push_back(indices[i + 2]);
             src.surfaces.push_back(surface);
         }
     }

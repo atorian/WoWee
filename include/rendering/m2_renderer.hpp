@@ -67,6 +67,7 @@ class Frustum;
 class VkContext;
 class VkTexture;
 class RtScene;
+class TextureLoads;
 
 // Ceiling on the bone matrices computed and uploaded for one M2 instance.
 // WoW models run well past a hundred bones - the largest shipped model has
@@ -139,10 +140,14 @@ struct M2ModelGPU {
         /// The client blends such a layer, and in that pass each instance can
         /// be faded or left out on its own.
         bool blendedByOpacity = false;
-        /// The texture this batch is hidden waiting for, when its first load
-        /// failed. Empty once it has it. A hidden batch is never bound, so its
-        /// descriptor and material can be rewritten when a retry succeeds.
+        /// The texture this batch is hidden waiting for: loading on a worker,
+        /// or failed and asked for again now and then. Empty once it has it.
+        /// A hidden batch is never bound, so its descriptor and material can
+        /// be rewritten when the texture arrives.
         std::string pendingTextureKey;
+        /// Its second stage's texture, not in yet; the stage samples white
+        /// until it is.
+        std::string pendingSecondTextureKey;
         float loadedOpacity = 1.0f; ///< what batchOpacity becomes once the texture arrives
         glm::vec3 center = glm::vec3(0.0f); // Center of batch geometry (model space)
         float glowSize = 1.0f;              // Approx radius of batch geometry
@@ -174,6 +179,10 @@ struct M2ModelGPU {
     bool isSmallFoliage = false;    // Small foliage (bushes, grass, plants) - skip during taxi
     bool isInvisibleTrap = false;   // Invisible trap objects (don't render, no collision)
     bool isGroundDetail = false;    // Ground clutter/detail doodads (special fallback render path)
+    /// Some of its textures are still being made on a worker: none of its
+    /// batches or emitters is drawn until every one is in or has failed, so
+    /// it appears whole rather than piece by piece and white in between.
+    bool texturesLoading = false;
     bool isWaterVegetation = false; // Cattails, reeds, kelp etc. near water (insect spawning)
     bool isFireflyEffect = false;   // Firefly/fireflies M2 (exempt from particle dampeners)
     bool isWaterfall = false;       // Waterfall model (ambient sound + splash particles)
@@ -519,17 +528,14 @@ public:
         float globalSequenceTimeMs = 0.0f;
         bool posed = false;
     };
-    /// The textures `model`'s emitters draw with, as loadPosedEmitterModel
-    /// reads them, keyed by their normalized paths.
-    using PreparedTextures = std::unordered_map<std::string, pipeline::BLPImage>;
-    /// Reads and decodes those of them the shared cache does not hold yet,
-    /// on an I/O worker: the frame that uploads them reads nothing from disk.
-    [[nodiscard]] std::future<PreparedTextures> preparePosedEmitterTextures(const pipeline::M2Model& model) const;
-    /// Uploads `model`'s particle and ribbon emitters - their textures and
-    /// descriptor sets, not its geometry - taking the textures from
-    /// `prepared` (preparePosedEmitterTextures). Returns a handle, or 0 when
-    /// the model has no emitters.
-    uint32_t loadPosedEmitterModel(const pipeline::M2Model& model, PreparedTextures& prepared);
+    /// Whether the textures `model`'s emitters draw with are all in the
+    /// shared cache or have failed; asks for those that are not, which are
+    /// made on a worker. Ask each frame until it says yes.
+    [[nodiscard]] bool posedEmitterTexturesReady(const pipeline::M2Model& model);
+    /// Uploads `model`'s particle and ribbon emitters - their descriptor
+    /// sets, not its geometry - with the textures posedEmitterTexturesReady
+    /// found. Returns a handle, or 0 when the model has no emitters.
+    uint32_t loadPosedEmitterModel(const pipeline::M2Model& model);
     void unloadPosedEmitterModel(uint32_t handle);
     [[nodiscard]] bool hasPosedEmitterModel(uint32_t handle) const;
     /// One set of emitters on one skeleton. 0 when the handle is not loaded.
@@ -822,12 +828,28 @@ public:
     TextureHandle batchTextureHandle(const VkTexture* texture, TextureHandle image, uint8_t texFlags) const;
     /// Take what the loaded texture says about itself onto the batch.
     void applyBatchTextureProps(M2ModelGPU::BatchGPU& batch, const TextureInfo& texture) const;
-    /// Ask again for textures that failed to load, and show the batches that
-    /// were hidden waiting for them. A failed MPQ read is often transient.
-    void retryPendingBatchTextures();
+    /// A model whose textures are not all in: some are being made on a worker
+    /// (TextureLoads), or failed and are asked for again now and then -
+    /// a failed MPQ read is often transient. Holds what finishing the model
+    /// needs once they arrive.
+    struct PendingModelTextures {
+        uint32_t modelId = 0;
+        /// Per texture slot, the key still waited for; empty once in, or for
+        /// a slot that names no file.
+        std::vector<std::string> slotKeys;
+        /// Per slot, what its emitters sample (white until it is in) and how
+        /// they wrap it.
+        std::vector<VkTexture*> slotTextures;
+        std::vector<uint8_t> slotWrap;
+        /// The geometry the ray tracer is given once the textures say what
+        /// its surfaces are; empty for a model that casts no RT shadow.
+        std::vector<glm::vec3> rtPositions;
+        std::vector<uint16_t> rtIndices;
+    };
+    std::vector<PendingModelTextures> pendingModelTextures_;
+    void showArrivedTextures(PendingModelTextures& pending, std::vector<std::pair<size_t, TextureRef>>& arrived,
+                             bool settled);
     bool makeModelWritable(uint32_t modelId);
-    struct PendingBatchTexture { uint32_t modelId; size_t batchIndex; };
-    std::vector<PendingBatchTexture> pendingBatchTextures_;
 
     // Stats
     [[nodiscard]] bool isInitialized() const { return initialized_; }
@@ -940,9 +962,16 @@ public:
 
     [[nodiscard]] std::vector<glm::vec3> getWaterVegetationPositions(const glm::vec3& camPos, float maxDist) const;
 
-    // Pre-decoded BLP cache: set by terrain manager before calling loadModel()
-    // so loadTexture() can skip the expensive assetManager->loadTexture() call.
-    void setPredecodedBLPCache(std::unordered_map<std::string, pipeline::BLPImage>* cache) { predecodedBLPCache_ = cache; }
+    /// Where the model textures are made: the renderer's one loader, which
+    /// outlives this.
+    void setTextureLoads(TextureLoads* loads) { textureLoads_ = loads; }
+    /// Asks for the textures models are waiting for; shows the batches and
+    /// rebinds the emitters of those that came in, and finishes a model
+    /// (draws it, gives it to the ray tracer) once none is loading. Once a
+    /// frame, on the main thread, outside update().
+    void retryPendingModelTextures();
+    /// Models waiting for a texture still being made.
+    [[nodiscard]] size_t modelsAwaitingTextures() const;
 
 private:
     bool initialized_ = false;
@@ -1322,7 +1351,12 @@ private:
     const std::vector<LocalLight>* frameLights_ = nullptr;
 
     RtScene* rtScene_ = nullptr;
-    void registerRtModel(M2ModelGPU& gpuModel, const pipeline::M2Model& model);
+    /// Whether the model is given to the ray tracer at all.
+    [[nodiscard]] bool castsRtShadow(const M2ModelGPU& gpuModel, const pipeline::M2Model& model) const;
+    /// Its mesh, from the batches as their textures left them: run once they
+    /// are all in or failed.
+    void registerRtModel(M2ModelGPU& gpuModel, const std::vector<glm::vec3>& positions,
+                         const std::vector<uint16_t>& indices);
     void releaseRtModel(uint32_t modelId, M2ModelGPU& gpuModel);
 
     /// A vertex buffer the CPU fills every frame, one per frame in flight.
@@ -1398,6 +1432,10 @@ private:
     VkDescriptorSet acquireEmitterTexSet(M2ModelGPU& gpu, VkTexture* texture, uint8_t wrap);
     /// Gives back every use `gpu` holds.
     void releaseEmitterTexSets(M2ModelGPU& gpu);
+    void releaseEmitterTexKeys(const std::vector<M2EmitterTexKey>& keys);
+    /// Each emitter's texture and set from the model's slots, as they stand.
+    void bindEmitterTextures(M2ModelGPU& gpu, const std::vector<VkTexture*>& slotTextures,
+                             const std::vector<uint8_t>& slotWrap);
 
     // O(1) dedup: key = (modelId, quantized x, quantized y, quantized z) → instanceId
     struct DedupKey {
@@ -1423,17 +1461,15 @@ private:
     size_t modelCacheLimit_ = 6000;
     uint32_t modelLimitRejectWarnings_ = 0;
 
-    /// A model texture from the shared cache, loading it if it is not there;
-    /// white when it cannot be had. The image is shared with every other
-    /// renderer, so how a batch wraps or biases it is the batch's sampler's
-    /// business (batchSampler), not the texture's.
-    TextureRef loadTexture(const std::string& path);
-    std::unordered_map<std::string, pipeline::BLPImage>* predecodedBLPCache_ = nullptr;
+    /// A model texture from the shared cache, started on a worker if it is
+    /// not there (TextureLoads); white until it is in, with `*loading`
+    /// set, and white when it cannot be had. The image is shared with every
+    /// other renderer, so how a batch wraps or biases it is the batch's
+    /// sampler's business (batchSampler), not the texture's.
+    TextureRef loadTexture(const std::string& path, bool* loading = nullptr);
+    TextureLoads* textureLoads_ = nullptr;
 
-    /// When a key that would not load, or found no room, is next worth a read.
-    std::unordered_map<std::string, uint64_t> failedTextureRetryAt_;
     std::unordered_set<std::string> loggedTextureLoadFails_;
-    uint64_t textureLookupSerial_ = 0;
     TextureRef whiteTexture_;
     TextureRef glowTexture_;
     VkDescriptorSet glowTexDescSet_ = VK_NULL_HANDLE;  // cached glow texture descriptor (allocated once)

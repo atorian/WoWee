@@ -1226,8 +1226,35 @@ bool VkContext::createLogicalDevice() {  // NOLINT(readability-function-size)
     return true;
 }
 
+namespace {
+
+/// vkAllocateMemory, timed: a new block of device memory is the driver's to
+/// find and the system's to clear, 7-30 ms on Windows for 64-256 MB, and the
+/// thread that asked waits for it. Each one that took long is said with its
+/// size and type, so one that lands in the frame can be traced to what asked.
+VKAPI_ATTR VkResult VKAPI_CALL timedAllocateMemory(VkDevice device, const VkMemoryAllocateInfo* info,
+                                                   const VkAllocationCallbacks* callbacks, VkDeviceMemory* memory) {
+    const auto start = std::chrono::steady_clock::now();
+    const VkResult result = vkAllocateMemory(device, info, callbacks, memory);
+    const float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (ms > 2.0f) {
+        static core::LogBudget slow(1000, "slow device memory allocations");
+        if (slow.take()) {
+            LOG_WARNING("Device memory: ", info->allocationSize / (1024 * 1024), " MB of type ",
+                        info->memoryTypeIndex, " took ", ms, " ms to allocate");
+        }
+    }
+    return result;
+}
+
+}  // namespace
+
 bool VkContext::createAllocator() {
     VmaAllocatorCreateInfo allocInfo{};
+    // Only this one replaced; VMA fills the rest as it would.
+    static VmaVulkanFunctions functions{};
+    functions.vkAllocateMemory = timedAllocateMemory;
+    allocInfo.pVulkanFunctions = &functions;
     allocInfo.instance = instance;
     allocInfo.physicalDevice = physicalDevice;
     allocInfo.device = device;

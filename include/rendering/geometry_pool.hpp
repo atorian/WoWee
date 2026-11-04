@@ -10,7 +10,9 @@
 // page of its own size in the same slots (a fitted page). Only when not even
 // that can be made is it refused, said at warning level. A mesh's ranges come
 // back after the frames that may draw them; a page left empty goes when its
-// owner says so (releaseEmptyPages), all but one spare shared page.
+// owner says so (releaseEmptyPages), all but one spare shared page. The next
+// shared page is made ahead on a worker (SparePage), so the frame that fills
+// the last one does not allocate.
 //
 // Main thread; the buffers are read by the recording. The frames are retired
 // on the render thread, which only hands a range back (returned_); the main
@@ -18,6 +20,7 @@
 // go.
 
 #include "rendering/range_allocator.hpp"
+#include "rendering/spare_page.hpp"
 #include "rendering/vk_utils.hpp"
 
 #include <vulkan/vulkan.h>
@@ -68,7 +71,8 @@ public:
     GeometryPool(const GeometryPool&) = delete;
     GeometryPool& operator=(const GeometryPool&) = delete;
 
-    void initialize(VkContext& context) { context_ = &context; }
+    /// Also starts the spare shared page (SparePage).
+    void initialize(VkContext& context);
     /// Every page let go, freed once no frame in flight can draw from it.
     void destroy();
 
@@ -106,7 +110,12 @@ private:
         std::vector<std::pair<std::shared_ptr<Page>, Range>> ranges;
     };
     [[nodiscard]] uint32_t indexBytes() const { return config_.indexType == VK_INDEX_TYPE_UINT16 ? 2u : 4u; }
+    /// A page's buffers; null when there is no memory. Any thread.
+    static std::shared_ptr<Page> makePageBuffers(VmaAllocator allocator, const Config& config, uint32_t vertexRoom,
+                                                 uint32_t indexRoom, bool fitted);
     bool makePage(uint32_t vertexRoom, uint32_t indexRoom, bool fitted, int32_t& slot);
+    /// The page in the first empty slot; its slot.
+    int32_t attach(std::shared_ptr<Page> page);
     /// The returned ranges freed into their pages.
     void takeReturned();
 
@@ -117,6 +126,8 @@ private:
     /// Set, and said once, when a shared page could not be made: none is
     /// tried again until a page is let go.
     bool exhausted_ = false;
+    /// The next shared page, made on a worker. Last: it is stopped first.
+    SparePage<Page> spare_;
 };
 
 } // namespace rendering

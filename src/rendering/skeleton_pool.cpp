@@ -354,7 +354,25 @@ void writePoolPageSet(VkDevice device, VkDescriptorSet set, uint32_t binding, co
 
 SkeletonPool::~SkeletonPool() { destroy(); }
 
+void SkeletonPool::initialize(VkContext& context) {
+    context_ = &context;
+    // A shared page made ahead on a worker, and again each time it is taken:
+    // the frame that fills the last page takes it rather than allocating.
+    spare_.start(
+        [allocator = context.getAllocator()]() -> std::shared_ptr<Page> {
+            auto page = std::make_shared<Page>();
+            page->buffer = createBuffer(allocator, VkDeviceSize(kPageWords) * sizeof(uint32_t),
+                                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                        VMA_MEMORY_USAGE_GPU_ONLY);
+            if (!page->buffer.buffer) return nullptr;
+            page->words = RangeAllocator(kPageWords);
+            return page;
+        },
+        [allocator = context.getAllocator()](Page& page) { destroyBuffer(allocator, page.buffer); });
+}
+
 void SkeletonPool::destroy() {
+    spare_.stop();
     if (!context_ || pages_.empty()) return;
     // A frame in flight may still read them.
     retirePages(*context_, pages_);
@@ -443,18 +461,31 @@ std::optional<std::pair<int32_t, uint32_t>> SkeletonPool::copyWords(const std::v
             }
             return std::nullopt;
         }
-        auto page = std::make_shared<Page>();
         const uint32_t room = fitted ? words : kPageWords;
-        page->buffer = createBuffer(context_->getAllocator(), VkDeviceSize(room) * sizeof(uint32_t),
-                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                    VMA_MEMORY_USAGE_GPU_ONLY);
-        if (!page->buffer.buffer) {
-            LOG_WARNING("Skeleton pool: no memory for a page of ", room, " words - '", name, "' is ", without);
-            return std::nullopt;
+        const bool first = !fitted && !spare_.started();
+        std::shared_ptr<Page> page = fitted ? nullptr : spare_.take();
+        if (page) {
+            LOG_INFO("Skeleton pool: page ", at, " taken from the spare for '", name, "'");
+        } else {
+            page = std::make_shared<Page>();
+            page->buffer = createBuffer(context_->getAllocator(), VkDeviceSize(room) * sizeof(uint32_t),
+                                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                        VMA_MEMORY_USAGE_GPU_ONLY);
+            if (!page->buffer.buffer) {
+                LOG_WARNING("Skeleton pool: no memory for a page of ", room, " words - '", name, "' is ", without);
+                return std::nullopt;
+            }
+            page->words = RangeAllocator(room);
+            page->fitted = fitted;
+            // The frame allocated it: a blob larger than a page, or the spare
+            // still being made.
+            static core::LogBudget onFrame(16, "skeleton pages made on the frame");
+            if (first)
+                LOG_INFO("Skeleton pool: first page made for '", name, "'; the next is made ahead on a worker");
+            else if (onFrame.take())
+                LOG_WARNING("Skeleton pool: page ", at, " (", room, " words) made on the frame for '", name, "' - ",
+                            fitted ? "it is larger than a page" : "the spare was not ready");
         }
-        page->words = RangeAllocator(room);
-        page->fitted = fitted;
-        LOG_INFO("Skeleton pool: page ", at, " made (", room, " words) for '", name, "'");
         if (empty == pages_.end()) pages_.push_back(std::move(page));
         else *empty = std::move(page);
         slot = static_cast<int32_t>(at);

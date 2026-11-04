@@ -3725,6 +3725,13 @@ void Application::applyServerMovementState(float deltaTime) {  // NOLINT(readabi
 // stop.
 void Application::syncRenderInstancesToEntities(float deltaTime) {  // NOLINT(readability-function-size)
     auto creatureSyncStart = std::chrono::steady_clock::now();
+    // What a slow sync spent its time on, said with it.
+    float weaponRetryMs = 0.0f;
+    float floorMs = 0.0f;
+    int floorQueries = 0;
+    const auto msSince = [](std::chrono::steady_clock::time_point start) {
+        return std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
+    };
     if (renderer && gameHandler && renderer->getCharacterRenderer()) {
         auto* charRenderer = renderer->getCharacterRenderer();
         static float npcWeaponRetryTimer = 0.0f;
@@ -3766,9 +3773,11 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {  // NOLINT(re
 
             if (npcWeaponRetryTick &&
                 weaponAttachesThisTick < EntitySpawner::MAX_WEAPON_ATTACHES_PER_TICK) {
+                const auto retryStart = std::chrono::steady_clock::now();
                 if (entitySpawner_->retryCreatureVirtualWeapons(guid, instanceId, 30)) {
                     weaponAttachesThisTick++;
                 }
+                weaponRetryMs += msSince(retryStart);
             }
 
             // Distance check uses getLatestX/Y/Z (server-authoritative destination) to
@@ -3800,10 +3809,13 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {  // NOLINT(re
             const bool groundCreature = !_creatureFlyingState.count(guid) &&
                                         !_creatureSwimmingState.count(guid);
             if (entity->isEntityMoving() && groundCreature) {
+                const auto floorStart = std::chrono::steady_clock::now();
                 if (auto floorZ = movingEntityFloor(renderer.get(), playerReach(getCameraController()),
                                                     renderPos, previousRenderPos)) {
                     renderPos.z = *floorZ;
                 }
+                floorMs += msSince(floorStart);
+                ++floorQueries;
             }
 
             // No visual collision guard here any more.
@@ -3919,7 +3931,8 @@ void Application::syncRenderInstancesToEntities(float deltaTime) {  // NOLINT(re
             std::chrono::steady_clock::now() - creatureSyncStart).count();
         if (csMs > 5.0f) {
             LOG_WARNING("SLOW update stage 'creature render sync': ", csMs, "ms (",
-                        entitySpawner_->getCreatureInstances().size(), " creatures)");
+                        entitySpawner_->getCreatureInstances().size(), " creatures) - floor ", floorMs, "ms for ",
+                        floorQueries, " moving, weapon retries ", weaponRetryMs, "ms");
         }
     }
 
@@ -6566,150 +6579,6 @@ void Application::updateQuestMarkers() {
         firstRun = false;
     }
 }
-
-void Application::setupTestTransport() {
-    if (!entitySpawner_) return;
-    if (entitySpawner_->isTestTransportSetup()) return;
-    if (!gameHandler || !renderer || !assetManager) return;
-
-    auto* transportManager = gameHandler->getTransportManager();
-    auto* wmoRenderer = renderer->getWMORenderer();
-    if (!transportManager || !wmoRenderer) return;
-
-    LOG_INFO("========================================");
-    LOG_INFO("   SETTING UP TEST TRANSPORT");
-    LOG_INFO("========================================");
-
-    // Connect WMORenderer to M2Renderer (for hierarchical transforms: doodads following WMO parents)
-    if (renderer->getM2Renderer()) {
-        wmoRenderer->setM2Renderer(renderer->getM2Renderer());
-        LOG_INFO("WMORenderer connected to M2Renderer for test transport doodad transforms");
-    }
-
-    // Define a simple circular path around Stormwind harbor (canonical coordinates)
-    // These coordinates are approximate - adjust based on actual harbor layout
-    std::vector<glm::vec3> harborPath = {
-        {-8833.0f, 628.0f, 94.0f},   // Start point (Stormwind harbor)
-        {-8900.0f, 650.0f, 94.0f},   // Move west
-        {-8950.0f, 700.0f, 94.0f},   // Northwest
-        {-8950.0f, 780.0f, 94.0f},   // North
-        {-8900.0f, 830.0f, 94.0f},   // Northeast
-        {-8833.0f, 850.0f, 94.0f},   // East
-        {-8766.0f, 830.0f, 94.0f},   // Southeast
-        {-8716.0f, 780.0f, 94.0f},   // South
-        {-8716.0f, 700.0f, 94.0f},   // Southwest
-        {-8766.0f, 650.0f, 94.0f},   // Back to start direction
-    };
-
-    // Register the path with transport manager
-    uint32_t pathId = 1;
-    float speed = 12.0f;  // 12 units/sec (slower than taxi for a leisurely boat ride)
-    transportManager->loadPathFromNodes(pathId, harborPath, true, speed);
-    LOG_INFO("Registered transport path ", pathId, " with ", harborPath.size(), " waypoints, speed=", speed);
-
-    // Try transport WMOs in manifest-backed paths first.
-    std::vector<std::string> transportCandidates = {
-        "World\\wmo\\transports\\transport_ship\\transportship.wmo",
-        "World\\wmo\\transports\\transport_zeppelin\\transport_zeppelin.wmo",
-        "World\\wmo\\transports\\transport_horde_zeppelin\\Transport_Horde_Zeppelin.wmo",
-        "World\\wmo\\transports\\icebreaker\\Transport_Icebreaker_ship.wmo",
-        // Legacy fallbacks
-        "Transports\\Transportship\\Transportship.wmo",
-        "Transports\\Boat\\Boat.wmo",
-    };
-
-    std::string transportWmoPath;
-    std::vector<uint8_t> wmoData;
-    for (const auto& candidate : transportCandidates) {
-        wmoData = assetManager->readFile(candidate);
-        if (!wmoData.empty()) {
-            transportWmoPath = candidate;
-            break;
-        }
-    }
-
-    if (wmoData.empty()) {
-        LOG_WARNING("No transport WMO found - test transport disabled");
-        LOG_INFO("Expected under World\\wmo\\transports\\...");
-        return;
-    }
-
-    LOG_INFO("Using transport WMO: ", transportWmoPath);
-
-    // Load WMO model
-    pipeline::WMOModel wmoModel = pipeline::WMOLoader::load(wmoData);
-    wmoModel.sourcePath = transportWmoPath;
-    LOG_INFO("Transport WMO root loaded: ", transportWmoPath, " nGroups=", wmoModel.nGroups);
-
-    // Load WMO groups
-    int loadedGroups = 0;
-    if (wmoModel.nGroups > 0) {
-        for (uint32_t gi = 0; gi < wmoModel.nGroups; gi++) {
-            bool loaded = false;
-            for (const std::string& groupPath :
-                 pipeline::wmoGroupCandidates(transportWmoPath, gi)) {
-                std::vector<uint8_t> groupData = assetManager->readFile(groupPath);
-                if (groupData.empty()) continue;
-                pipeline::WMOLoader::loadGroup(groupData, wmoModel, gi);
-                loadedGroups++;
-                loaded = true;
-                break;
-            }
-            if (!loaded) {
-                LOG_WARNING("  Failed to load WMO group ", gi, " for: ", transportWmoPath);
-            }
-        }
-    }
-
-    if (loadedGroups == 0 && wmoModel.nGroups > 0) {
-        LOG_WARNING("Failed to load any WMO groups for transport");
-        return;
-    }
-
-    // Load WMO into renderer
-    uint32_t wmoModelId = 99999;  // Use high ID to avoid conflicts
-    if (!wmoRenderer->loadModel(wmoModel, wmoModelId)) {
-        LOG_WARNING("Failed to load transport WMO model into renderer");
-        return;
-    }
-
-    // Create WMO instance at first waypoint (convert canonical to render coords)
-    glm::vec3 startCanonical = harborPath[0];
-    glm::vec3 startRender = core::coords::canonicalToRender(startCanonical);
-
-    uint32_t wmoInstanceId = renderer->scene().worldModels().createInstance(wmoModelId, startRender,
-                                                          glm::vec3(0.0f, 0.0f, 0.0f), 1.0f);
-
-    if (wmoInstanceId == 0) {
-        LOG_WARNING("Failed to create transport WMO instance");
-        return;
-    }
-
-    // Register transport with transport manager
-    uint64_t transportGuid = 0x1000000000000001ULL;  // Fake GUID for test
-    transportManager->registerTransport(transportGuid, wmoInstanceId, pathId, startCanonical);
-
-    // Optional: Set deck bounds (rough estimate for a ship deck)
-    transportManager->setDeckBounds(transportGuid,
-                                    glm::vec3(-15.0f, -30.0f, 0.0f),
-                                    glm::vec3(15.0f, 30.0f, 10.0f));
-
-    entitySpawner_->setTestTransportSetup(true);
-    LOG_INFO("========================================");
-    LOG_INFO("Test transport registered:");
-    LOG_INFO("  GUID: 0x", std::hex, transportGuid, std::dec);
-    LOG_INFO("  WMO Instance: ", wmoInstanceId);
-    LOG_INFO("  Path: ", pathId, " (", harborPath.size(), " waypoints)");
-    LOG_INFO("  Speed: ", speed, " units/sec");
-    LOG_INFO("========================================");
-    LOG_INFO("");
-    LOG_INFO("To board the transport, use console command:");
-    LOG_INFO("  /transport board");
-    LOG_INFO("To disembark:");
-    LOG_INFO("  /transport leave");
-    LOG_INFO("========================================");
-}
-
 
 void Application::startRealmPatchSync(const std::vector<game::EzWowPatch>& patches) {
     if (!authHandler) return;

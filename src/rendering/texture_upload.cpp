@@ -35,6 +35,12 @@ bool giveCachedSampler(VkContext& ctx, VkTexture& texture) {
 }
 
 TextureRef cacheStoredTexture(VkContext& ctx, const std::string& path, const pipeline::BLPImage& image) {
+    PreparedTexture prepared = prepareStoredTexture(ctx, path, image);
+    if (!prepared.texture) return {};
+    return ctx.textures().insert(prepared.key, std::move(prepared.texture), prepared.bytes, prepared.info);
+}
+
+PreparedTexture prepareStoredTexture(VkContext& ctx, const std::string& path, const pipeline::BLPImage& image) {
     TextureCache& cache = ctx.textures();
     const TextureKey key{normalizeTexturePath(path), TextureForm::Stored, 0};
     const TextureInfo info{.hasAlpha = image.hasTransparency(),
@@ -59,7 +65,7 @@ TextureRef cacheStoredTexture(VkContext& ctx, const std::string& path, const pip
             LOG_WARNING("Texture cache: '", key.path, "' (", image.width, "x", image.height,
                         ") did not upload to the GPU; drawn with its fallback");
         }
-        return {};
+        return {.key = key};
     }
     if (skip > 0 && firstFailure("skip:" + key.path)) {
         LOG_WARNING("Texture cache: no room for '", key.path, "' at ", image.width, "x", image.height,
@@ -67,7 +73,7 @@ TextureRef cacheStoredTexture(VkContext& ctx, const std::string& path, const pip
                     " while the budget is full");
     }
     const uint64_t bytes = texture->allocatedBytes();
-    return cache.insert(key, std::move(texture), bytes, info);
+    return {.key = key, .texture = std::move(texture), .bytes = bytes, .info = info};
 }
 
 NormalMapFormat normalMapFormatFor(const VkContext& ctx) {
@@ -84,7 +90,13 @@ NormalMapFormat normalMapFormatFor(const VkContext& ctx) {
 }
 
 TextureRef cacheNormalMap(VkContext& ctx, const TextureKey& key, const EncodedNormalMap& map) {
-    if (!map.valid()) return {};
+    PreparedTexture prepared = prepareNormalMap(ctx, key, map);
+    if (!prepared.texture) return {};
+    return ctx.textures().insert(prepared.key, std::move(prepared.texture), prepared.bytes, prepared.info);
+}
+
+PreparedTexture prepareNormalMap(VkContext& ctx, const TextureKey& key, const EncodedNormalMap& map) {
+    if (!map.valid()) return {.key = key};
     std::vector<const uint8_t*> levels;
     std::vector<uint32_t> sizes;
     for (const auto& level : map.levels) {
@@ -101,12 +113,11 @@ TextureRef cacheNormalMap(VkContext& ctx, const TextureKey& key, const EncodedNo
             LOG_WARNING("Texture cache: the normal map of '", key.path, "' (", map.width, "x", map.height,
                         ") did not upload to the GPU; drawn without one");
         }
-        return {};
+        return {.key = key};
     }
     const uint64_t bytes = texture->allocatedBytes();
-    return ctx.textures().insert(key, std::move(texture), bytes,
-                                 {.hasAlpha = false, .alphaIsSilhouette = false,
-                                  .heightVariance = map.heightVariance});
+    return {.key = key, .texture = std::move(texture), .bytes = bytes,
+            .info = {.hasAlpha = false, .alphaIsSilhouette = false, .heightVariance = map.heightVariance}};
 }
 
 TextureRef cachePixels(VkContext& ctx, const TextureKey& key, const uint8_t* rgba, uint32_t width,

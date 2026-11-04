@@ -133,7 +133,6 @@ private:
     struct PreparedModel {
         bool ok = false;
         std::shared_ptr<pipeline::M2Model> model;
-        std::unordered_map<std::string, pipeline::BLPImage> textures;
     };
     struct PendingLoad {
         std::string path;

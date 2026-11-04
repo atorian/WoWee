@@ -1939,7 +1939,8 @@ void M2Renderer::cullView(const Camera& camera, Frame& frame) {
             if (!faded) {
                 out.opaque.push_back(visible);
                 // On its bones as last read back; at rest until the first.
-                if (instance.cachedModel && instance.cachedModel->hasGlowSprites) {
+                if (instance.cachedModel && instance.cachedModel->hasGlowSprites &&
+                    !instance.cachedModel->texturesLoading) {
                     const M2ModelGPU& model = *instance.cachedModel;
                     appendGlowSprites(instance, model, m2LodFor(model, distSq), camPos, out.glows, frame.time);
                 }

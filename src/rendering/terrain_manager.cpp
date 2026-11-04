@@ -9,6 +9,7 @@
 #include "pipeline/adt_alpha.hpp"
 #include "pipeline/m2_asset_loader.hpp"
 #include "rendering/terrain_renderer.hpp"
+#include "rendering/texture_loads.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/liquid_scene.hpp"
 #include "rendering/m2_renderer.hpp"
@@ -113,6 +114,18 @@ TerrainManager::~TerrainManager() {
 void TerrainManager::setWMORenderer(WMORenderer* renderer) {
     wmoRenderer = renderer;
     if (renderer) wmoNormalMapFormat_ = renderer->normalMapFormat();
+}
+
+void TerrainManager::requestModelTextures(const pipeline::M2Model& model) const {
+    for (const auto& tex : model.textures) {
+        // As M2Renderer::loadModel names them: cut at a stray NUL, then
+        // normalized as the loader keys them.
+        std::string path = tex.filename;
+        if (const size_t nul = path.find('\0'); nul != std::string::npos) path.resize(nul);
+        if (path.empty()) continue;
+        TextureRef started;
+        (void)textureLoads_->requestStored(normalizeTexturePath(path), started);
+    }
 }
 
 bool TerrainManager::initialize(pipeline::AssetManager* assets, TerrainRenderer* renderer,
@@ -564,20 +577,8 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
             return false;
         }
 
-        // Pre-decode M2 model textures on background thread
-        for (const auto& tex : m2Model.textures) {
-            if (tex.filename.empty()) continue;
-            std::string texKey = tex.filename;
-            std::replace(texKey.begin(), texKey.end(), '/', '\\');
-            std::transform(texKey.begin(), texKey.end(), texKey.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            if (pending->preloadedM2Textures.find(texKey) != pending->preloadedM2Textures.end()) continue;
-            auto blp = assetManager->loadTexture(texKey, true);
-            if (blp.isValid()) {
-                blp.analyzeAlpha();
-                pending->preloadedM2Textures[texKey] = std::move(blp);
-            }
-        }
+        // Its textures started now, so the finalize finds them made.
+        requestModelTextures(m2Model);
 
         PendingTile::M2Ready ready;
         ready.modelId = modelId;
@@ -794,20 +795,8 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
                             if (!m2Model.isValid()) continue;
                             wmoPreparedModelIds.insert(doodadModelId);
 
-                            // Pre-decode doodad M2 textures on background thread
-                            for (const auto& tex : m2Model.textures) {
-                                if (tex.filename.empty()) continue;
-                                std::string texKey = tex.filename;
-                                std::replace(texKey.begin(), texKey.end(), '/', '\\');
-                                std::transform(texKey.begin(), texKey.end(), texKey.begin(),
-                                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                                if (pending->preloadedM2Textures.find(texKey) != pending->preloadedM2Textures.end()) continue;
-                                auto blp = assetManager->loadTexture(texKey, true);
-                                if (blp.isValid()) {
-                                    blp.analyzeAlpha();
-                                    pending->preloadedM2Textures[texKey] = std::move(blp);
-                                }
-                            }
+                            // Its textures started now, so the finalize finds them made.
+                            requestModelTextures(m2Model);
                         }
 
                         // Build doodad's local transform (WoW coordinates)
@@ -864,46 +853,11 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
                     }
                 }
 
-                // Pre-decode WMO textures on background thread
+                // Its textures and their normal/height maps started now, so
+                // the finalize finds them made.
                 for (const auto& texPath : wmoModel.textures) {
-                    if (texPath.empty()) continue;
-                    std::string texKey = texPath;
-                    // Truncate at NUL (WMO paths can have stray bytes)
-                    size_t nul = texKey.find('\0');
-                    if (nul != std::string::npos) texKey.resize(nul);
-                    std::replace(texKey.begin(), texKey.end(), '/', '\\');
-                    std::transform(texKey.begin(), texKey.end(), texKey.begin(),
-                                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                    if (texKey.empty()) continue;
-                    if (pending->preloadedWMOTextures.find(texKey) != pending->preloadedWMOTextures.end()) continue;
-                    // Try .blp variant
-                    std::string blpKey = texKey;
-                    if (blpKey.size() >= 4) {
-                        std::string ext = blpKey.substr(blpKey.size() - 4);
-                        if (ext == ".tga" || ext == ".dds") {
-                            blpKey = blpKey.substr(0, blpKey.size() - 4) + ".blp";
-                        }
-                    }
-                    // Blocks for the upload; the normal map decodes a copy
-                    // here on the worker thread and lets it go, which is where
-                    // that cost already was.
-                    auto blp = assetManager->loadTexture(blpKey, true);
-                    if (blp.isValid()) {
-                        const std::vector<uint8_t> decoded =
-                            blp.isBlockCompressed()
-                                ? pipeline::BLPLoader::decodeBaseLevel(blp)
-                                : blp.data;
-                        auto normals = decoded.empty()
-                            ? EncodedNormalMap{}
-                            : WMORenderer::prepareNormalHeightMap(
-                                  decoded.data(), static_cast<uint32_t>(blp.width),
-                                  static_cast<uint32_t>(blp.height), wmoNormalMapFormat_);
-                        if (normals.valid()) {
-                            pending->preloadedWMONormalMaps[blpKey] = std::move(normals);
-                        }
-                        blp.analyzeAlpha();
-                        pending->preloadedWMOTextures[blpKey] = std::move(blp);
-                    }
+                    TextureRef started;
+                    (void)WMORenderer::requestTexture(*textureLoads_, texPath, wmoNormalMapFormat_, started);
                 }
 
                 PendingTile::WMOReady ready;
@@ -1086,8 +1040,6 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {  // NOLINT(readab
         // per-frame budget so idle workers don't waste time waiting for the
         // main thread to trickle-upload models.
         if (m2Renderer && ft.m2ModelIndex < pending->m2Models.size()) {
-            // Set pre-decoded BLP cache so loadTexture() skips main-thread BLP decode
-            m2Renderer->setPredecodedBLPCache(&pending->preloadedM2Textures);
             bool workersIdle;
             {
                 std::lock_guard<std::mutex> lk(queueMutex);
@@ -1115,7 +1067,6 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {  // NOLINT(readab
                 ft.m2ModelIndex++;
                 uploaded++;
             }
-            m2Renderer->setPredecodedBLPCache(nullptr);
             // Stay in this phase until all models uploaded
             if (ft.m2ModelIndex < pending->m2Models.size()) {
                 return false;
@@ -1187,11 +1138,8 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {  // NOLINT(readab
         if (wmoRenderer && assetManager) {
             if (!wmoRenderer->initialize(nullptr, VK_NULL_HANDLE, assetManager))
                 LOG_WARNING("WMORenderer terrain re-init failed");
-            // Diffuse decode and normal/height generation were completed by the
-            // terrain worker. The main thread only uploads those prepared pixels.
-            wmoRenderer->setPredecodedBLPCache(&pending->preloadedWMOTextures);
-            wmoRenderer->setPredecodedNormalMapCache(&pending->preloadedWMONormalMaps);
-            wmoRenderer->setDeferNormalMaps(true);
+            // Its textures were started by the tile's worker; a model whose
+            // textures are not all made yet is in progress until they are.
 
             // One model per step, and a large model spread across several
             // steps: a 286-group WMO took 131ms to upload in one go, against
@@ -1213,9 +1161,6 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {  // NOLINT(readab
                 ft.wmoModelIndex++;  // Complete or Failed - either way, move on
                 break;               // one model per step
             }
-            wmoRenderer->setDeferNormalMaps(false);
-            wmoRenderer->setPredecodedBLPCache(nullptr);
-            wmoRenderer->setPredecodedNormalMapCache(nullptr);
             if (ft.wmoModelIndex < pending->wmoModels.size()) return false;
         }
         ft.phase = FinalizationPhase::WMO_INSTANCES;
@@ -1325,8 +1270,6 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {  // NOLINT(readab
     case FinalizationPhase::WMO_DOODADS: {
         // Upload multiple WMO doodad M2s per call (batched GPU uploads)
         if (m2Renderer && ft.wmoDoodadIndex < pending->wmoDoodads.size()) {
-            // Set pre-decoded BLP cache for doodad M2 textures
-            m2Renderer->setPredecodedBLPCache(&pending->preloadedM2Textures);
             constexpr size_t kDoodadsPerStep = 4;
             const auto stepStart = std::chrono::steady_clock::now();
             size_t uploaded = 0;
@@ -1370,7 +1313,6 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {  // NOLINT(readab
                 ft.wmoDoodadIndex++;
                 uploaded++;
             }
-            m2Renderer->setPredecodedBLPCache(nullptr);
             if (ft.wmoDoodadIndex < pending->wmoDoodads.size()) return false;
         }
         ft.phase = FinalizationPhase::WATER;

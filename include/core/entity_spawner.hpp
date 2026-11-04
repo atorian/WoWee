@@ -260,8 +260,6 @@ public:
                                       float x, float y, float z, float orientation);
 
     // Test transport setup flag
-    bool isTestTransportSetup() const { return spawns_ && spawns_->testTransportSetup_; }
-    void setTestTransportSetup(bool v) { if (spawns_) spawns_->testTransportSetup_ = v; }
 
     // Creature animation state accessors (for movement sync in Application::update)
     std::unordered_map<uint64_t, uint32_t>& getCreatureInstances() { return spawns_->creatureInstances_; }
@@ -662,10 +660,10 @@ private:
         float x, y, z, orientation;
         float scale = 1.0f;
         std::shared_ptr<pipeline::WMOModel> wmoModel;
-        /// An M2 game object read, parsed and skinned on a worker, its
-        /// textures decoded beside it. The main thread only uploads it.
+        /// An M2 game object read, parsed and skinned on a worker. The main
+        /// thread only uploads it; its textures are made on workers
+        /// (TextureLoads) and it is drawn once they are in.
         std::shared_ptr<pipeline::M2Model> m2Model;
-        std::unordered_map<std::string, pipeline::BLPImage> predecodedTextures;
         bool valid = false;
         bool isWmo = false;
         std::string modelPath;
@@ -889,7 +887,6 @@ public:
     std::unordered_map<uint64_t, uint8_t> gameObjectPendingState_;
     std::unordered_map<uint64_t, PendingTransportMove> pendingTransportMoves_;
     std::deque<PendingTransportRegistration> pendingTransportRegistrations_;
-    bool testTransportSetup_ = false;
     std::deque<PendingGameObjectSpawn> pendingGameObjectSpawns_;
     std::unordered_set<uint32_t> asyncGameObjectM2Displays_;
     std::unordered_set<uint64_t> asyncGameObjectGuids_;

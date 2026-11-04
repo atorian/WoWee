@@ -71,6 +71,7 @@ class ChargeEffect;
 class CharacterRenderer;
 class SceneCommands;
 class CharacterEmitters;
+class TextureLoads;
 class CpuStageTimes;
 class WMORenderer;
 class M2Renderer;
@@ -232,6 +233,12 @@ public:
     void applySceneCommands();
     CharacterRenderer* getCharacterRenderer() const { return characterRenderer.get(); }
     CharacterEmitters* getCharacterEmitters() const { return characterEmitters_.get(); }
+    /// Where the world's model textures are made, off the frame.
+    TextureLoads* getTextureLoads() const { return textureLoads_.get(); }
+    /// No model placed, and no creature's emitters, wait for a texture: what
+    /// a wait for a settled scene (the loading screen, scene_render) waits
+    /// for.
+    [[nodiscard]] bool texturesSettled() const;
     WMORenderer* getWMORenderer() const { return wmoRenderer.get(); }
     M2Renderer* getM2Renderer() const { return m2Renderer.get(); }
     DetailDoodadRenderer* getDetailDoodadRenderer() const { return detailDoodads_.get(); }
@@ -511,6 +518,9 @@ private:
     /// The particle and ribbon emitters of what characterRenderer draws, run
     /// by m2Renderer. Holds both; goes before either does.
     std::unique_ptr<CharacterEmitters> characterEmitters_;
+    /// Where the world's models' textures are made, off the frame: one for
+    /// every renderer that samples them, outliving each.
+    std::unique_ptr<TextureLoads> textureLoads_;
     std::unique_ptr<WMORenderer> wmoRenderer;
     std::unique_ptr<M2Renderer> m2Renderer;
     std::unique_ptr<M2Renderer> skyboxModelRenderer_;

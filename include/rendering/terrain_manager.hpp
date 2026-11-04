@@ -36,7 +36,7 @@ namespace wowee {
 
 namespace pipeline { class AssetManager; class GameTables; }
 namespace collision { class CollisionWorld; }
-namespace rendering { class TerrainRenderer; class Camera; class LiquidScene; class M2Renderer; class WMORenderer; struct WmoModelPrep; }
+namespace rendering { class TerrainRenderer; class Camera; class LiquidScene; class M2Renderer; class WMORenderer; struct WmoModelPrep; class TextureLoads; }
 
 namespace rendering {
 
@@ -168,16 +168,6 @@ struct PendingTile {
     // Their relief (TerrainRenderer::deriveNormalMap), keyed alike; none for
     // a texture whose relief was already in the cache.
     std::unordered_map<std::string, EncodedNormalMap> preloadedTerrainNormalMaps;
-
-    // Pre-decoded M2 model textures (decoded on background thread)
-    std::unordered_map<std::string, pipeline::BLPImage> preloadedM2Textures;
-
-    // Pre-decoded WMO textures (decoded on background thread)
-    std::unordered_map<std::string, pipeline::BLPImage> preloadedWMOTextures;
-    // Normal/height maps for those WMO textures, derived and encoded with
-    // their mips. Keeping this work on terrain workers avoids multi-second
-    // main-thread backfill stalls.
-    std::unordered_map<std::string, EncodedNormalMap> preloadedWMONormalMaps;
 };
 
 /**
@@ -317,6 +307,9 @@ public:
     /// unloaded - and every tile still loaded when this manager goes.
     void setCollisionWorld(collision::CollisionWorld* world) { collision_ = world; }
     void setM2Renderer(M2Renderer* renderer) { m2Renderer = renderer; }
+    /// Where the workers start a tile's model textures, ahead of its
+    /// finalize: the renderer's one loader. Set before a tile is loaded.
+    void setTextureLoads(TextureLoads* loads) { textureLoads_ = loads; }
     /// Also fixes how the workers encode the normal maps they prepare for it.
     void setWMORenderer(WMORenderer* renderer);
     /// Where a committed tile's sound emitters go - fires, torches, fountains,
@@ -421,6 +414,10 @@ private:
     LiquidScene* liquidScene = nullptr;
     M2Renderer* m2Renderer = nullptr;
     WMORenderer* wmoRenderer = nullptr;
+    TextureLoads* textureLoads_ = nullptr;
+    /// Starts the textures a model's batches will ask for (M2Renderer
+    /// loadTexture's names), on a worker thread.
+    void requestModelTextures(const pipeline::M2Model& model) const;
     collision::CollisionWorld* collision_ = nullptr;
     /// How the workers encode WMO normal maps: the device's, read once when
     /// the renderer is set rather than from the workers.

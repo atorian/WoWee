@@ -4,6 +4,7 @@
 #include "rendering/rt_scene.hpp"
 #include "rendering/m2_renderer_internal.h"
 #include "pipeline/m2_model_classifier.hpp"
+#include "rendering/texture_loads.hpp"
 #include "rendering/texture_upload.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_buffer.hpp"
@@ -749,11 +750,7 @@ void M2Renderer::clear() {
 
     // The models' textures went back to the shared cache with the models,
     // where nothing references them and eviction makes room from them first.
-    // The retry timers go too, so the next character or map reads what failed
-    // here afresh instead of waiting them out.
-    failedTextureRetryAt_.clear();
     loggedTextureLoadFails_.clear();
-    textureLookupSerial_ = 0;
 }
 
 void M2Renderer::clearInstances() {
@@ -844,62 +841,38 @@ void M2Renderer::unloadModel(uint32_t modelId) {
     reapedModelIds_.push_back(modelId);
 }
 
-TextureRef M2Renderer::loadTexture(const std::string& path) {
-    constexpr uint64_t kFailedTextureRetryLookups = 512;
+TextureRef M2Renderer::loadTexture(const std::string& path, bool* loading) {
+    if (loading) *loading = false;
     const std::string key = normalizeTexturePath(path);
-    const uint64_t lookupSerial = ++textureLookupSerial_;
 
-    // The shared cache: a texture a building or the ground loaded is the same
-    // image here.
-    if (TextureRef cached = vkCtx_->textures().find({key, TextureForm::Stored, 0})) return cached;
-    auto failIt = failedTextureRetryAt_.find(key);
-    if (failIt != failedTextureRetryAt_.end() && lookupSerial < failIt->second) {
-        return whiteTexture_;
-    }
-
-    // Check pre-decoded BLP cache first (populated by background worker threads)
-    pipeline::BLPImage blp;
-    if (predecodedBLPCache_) {
-        auto pit = predecodedBLPCache_->find(key);
-        if (pit != predecodedBLPCache_->end()) {
-            blp = std::move(pit->second);
-            predecodedBLPCache_->erase(pit);
-        }
-    }
-    if (!blp.isValid()) {
-        // M2 skins are sampled and their transparency is read from the
-        // blocks, so they need no decode.
-        blp = assetManager->loadTexture(key, true);
-    }
-    if (!blp.isValid()) {
-        // Cache misses briefly to avoid repeated expensive MPQ/disk probes.
-        failedTextureRetryAt_[key] = lookupSerial + kFailedTextureRetryLookups;
-        if (loggedTextureLoadFails_.insert(key).second) {
-            LOG_WARNING("M2: Failed to load texture: ", path, " - its batches stay hidden until a retry finds it");
-        }
-        return whiteTexture_;
-    }
-
-    // Into the shared cache, with whether the texture actually uses alpha and
-    // whether that alpha is a silhouette, read from the blocks once
-    // (cacheStoredTexture). No black key from the texture's name: every
-    // texture whose file name held "lamp", "fire", "glow", "candle" and the
-    // like had its dark pixels discarded - 975 batches, the client keying
-    // none of them.
+    // The shared cache, or a worker that reads, uploads and puts it there
+    // (TextureLoads): a texture a building or the ground loaded is the
+    // same image here, and the frame never reads or uploads one. Whether the
+    // texture actually uses alpha, and whether that alpha is a silhouette, is
+    // read from its blocks there once (cacheStoredTexture). No black key from
+    // the texture's name: every texture whose file name held "lamp", "fire",
+    // "glow", "candle" and the like had its dark pixels discarded - 975
+    // batches, the client keying none of them.
     //
     // The image's own sampler is the cache's. A batch samples it through a
     // sampler built from its own wrap flags and the sky's mip bias
     // (batchSampler), since other models and renderers share the image.
-    TextureRef uploaded = cacheStoredTexture(*vkCtx_, key, blp);
-    if (!uploaded) {
-        // Refused or failed, as the cache has said; asked for again after the
-        // retry interval rather than decoded every frame meanwhile.
-        failedTextureRetryAt_[key] = lookupSerial + kFailedTextureRetryLookups;
+    if (!textureLoads_) {
+        LOG_FATAL("M2Renderer asked for texture '", path, "' with no TextureLoads to make it: the "
+                  "renderer that owns it must set one before it loads a model");
+        std::abort();
+    }
+    TextureRef out;
+    const TextureLoads::State state = textureLoads_->requestStored(key, out);
+    if (state == TextureLoads::State::Resident) return out;
+    if (state == TextureLoads::State::Loading) {
+        if (loading) *loading = true;
         return whiteTexture_;
     }
-    failedTextureRetryAt_.erase(key);
-    LOG_DEBUG("M2: Loaded texture: ", path, " (", blp.width, "x", blp.height, ")");
-    return uploaded;
+    if (loggedTextureLoadFails_.insert(key).second) {
+        LOG_WARNING("M2: Failed to load texture: ", path, " - its batches stay hidden until a retry finds it");
+    }
+    return whiteTexture_;
 }
 
 uint64_t M2Renderer::modelDataBytes() const {

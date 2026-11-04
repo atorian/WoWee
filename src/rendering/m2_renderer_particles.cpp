@@ -233,6 +233,9 @@ size_t M2Renderer::gatherM2Particles(Frame& frame, const glm::vec3& eye, const P
     const auto addRows = [&](const M2Instance& inst, bool posedSet, bool emits, std::optional<size_t> index,
                              std::optional<PosedSkeletons::Pose> pose) {
         const M2ModelGPU& model = *inst.cachedModel;
+        // Shown with the rest of the model once its textures are in, not
+        // white before them.
+        if (model.texturesLoading) return;
         const bool particles = !kNoParticles && !inst.particleRanges.empty();
         const bool ribbons = !kNoRibbons && !inst.ribbonRanges.empty();
         if (!model.emitters.placed() || (!particles && !ribbons)) return;

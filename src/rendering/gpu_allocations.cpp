@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -102,7 +103,19 @@ VkResult createCounted(VmaAllocator allocator, const VmaAllocationCreateInfo* al
     VmaAllocationCreateInfo tagged = *allocationInfo;
     tagged.pUserData = tagFor(counted, use);
     VmaAllocationInfo info{};
+    // Timed: an allocation is a lookup in a block, unless the block had to be
+    // made or another thread was making one under the same lock - and either
+    // holds whoever asked, the frame among them.
+    const auto start = std::chrono::steady_clock::now();
     const VkResult r = create(&tagged, &info);
+    const float ms = std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (ms > 4.0f) {
+        static core::LogBudget slow(200, "slow buffer and image allocations");
+        if (slow.take()) {
+            LOG_WARNING("Allocation of ", info.size / 1024, " KB (memory type ", info.memoryType, ") took ", ms,
+                        " ms");
+        }
+    }
     if (r == VK_SUCCESS) add(counted, use, info, true);
     if (allocationOut) *allocationOut = info;
     return r;

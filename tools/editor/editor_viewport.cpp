@@ -34,7 +34,10 @@ bool EditorViewport::initialize(rendering::VkContext* ctx, pipeline::AssetManage
     }
     terrainRenderer_->setFogEnabled(false);
 
+    // Where the models' and buildings' textures are made, off the frame.
+    textureLoads_ = std::make_unique<rendering::TextureLoads>(*ctx, *am);
     m2Renderer_ = std::make_unique<rendering::M2Renderer>();
+    m2Renderer_->setTextureLoads(textureLoads_.get());
     if (!m2Renderer_->initialize(ctx, perFrameSetLayout_, am)) {
         LOG_WARNING("M2 renderer init failed - object rendering disabled");
         m2Renderer_.reset();
@@ -43,6 +46,7 @@ bool EditorViewport::initialize(rendering::VkContext* ctx, pipeline::AssetManage
     }
 
     wmoRenderer_ = std::make_unique<rendering::WMORenderer>();
+    wmoRenderer_->setTextureLoads(textureLoads_.get());
     if (!wmoRenderer_->initialize(ctx, perFrameSetLayout_, am)) {
         LOG_WARNING("WMO renderer init failed - building rendering disabled");
         wmoRenderer_.reset();
@@ -68,6 +72,8 @@ void EditorViewport::shutdown() {
 
     if (wmoRenderer_) { wmoRenderer_->shutdown(); wmoRenderer_.reset(); }
     if (m2Renderer_) { m2Renderer_->shutdown(); m2Renderer_.reset(); }
+    // Its last loads finish into the texture cache, which outlives it.
+    textureLoads_.reset();
     if (terrainRenderer_) { terrainRenderer_->shutdown(); terrainRenderer_.reset(); }
 
     destroyPerFrameResources();
@@ -646,6 +652,11 @@ void EditorViewport::updateNpcMarkers(const std::vector<CreatureSpawn>& npcs) {
 }
 
 void EditorViewport::update(float deltaTime) {
+    // Textures whose copies have run go in the cache, and the models waiting
+    // for them are shown whole.
+    if (textureLoads_) textureLoads_->publish();
+    if (m2Renderer_) m2Renderer_->retryPendingModelTextures();
+    if (wmoRenderer_) wmoRenderer_->retryPendingTextures();
     if (m2Renderer_)
         m2Renderer_->update(deltaTime, camera_->getViewMatrix(), camera_->getProjectionMatrix());
 }

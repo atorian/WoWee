@@ -11,7 +11,22 @@ namespace rendering {
 
 GeometryPool::~GeometryPool() { destroy(); }
 
+void GeometryPool::initialize(VkContext& context) {
+    context_ = &context;
+    // A shared page made ahead on a worker, and again each time it is taken:
+    // the frame that fills the last page takes it rather than allocating.
+    spare_.start(
+        [allocator = context.getAllocator(), config = config_] {
+            return makePageBuffers(allocator, config, config.pageVertices, config.pageIndices, false);
+        },
+        [allocator = context.getAllocator()](Page& page) {
+            destroyBuffer(allocator, page.vertices);
+            destroyBuffer(allocator, page.indices);
+        });
+}
+
 void GeometryPool::destroy() {
+    spare_.stop();
     if (!context_ || pages_.empty()) return;
     // A frame in flight may still draw from them.
     context_->deferAfterAllFrameFences([allocator = context_->getAllocator(), pages = std::move(pages_)] {
@@ -25,32 +40,43 @@ void GeometryPool::destroy() {
     exhausted_ = false;
 }
 
-bool GeometryPool::makePage(uint32_t vertexRoom, uint32_t indexRoom, bool fitted, int32_t& slot) {
+std::shared_ptr<GeometryPool::Page> GeometryPool::makePageBuffers(VmaAllocator allocator, const Config& config,
+                                                                  uint32_t vertexRoom, uint32_t indexRoom,
+                                                                  bool fitted) {
     auto page = std::make_shared<Page>();
-    VmaAllocator allocator = context_->getAllocator();
-    page->vertices = createBuffer(allocator, VkDeviceSize(vertexRoom) * config_.vertexStride,
+    const uint32_t indexBytes = config.indexType == VK_INDEX_TYPE_UINT16 ? 2u : 4u;
+    page->vertices = createBuffer(allocator, VkDeviceSize(vertexRoom) * config.vertexStride,
                                   VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                   VMA_MEMORY_USAGE_GPU_ONLY);
-    page->indices = createBuffer(allocator, VkDeviceSize(indexRoom) * indexBytes(),
+    page->indices = createBuffer(allocator, VkDeviceSize(indexRoom) * indexBytes,
                                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                  VMA_MEMORY_USAGE_GPU_ONLY);
     if (!page->vertices.buffer || !page->indices.buffer) {
         if (page->vertices.buffer) destroyBuffer(allocator, page->vertices);
         if (page->indices.buffer) destroyBuffer(allocator, page->indices);
-        return false;
+        return nullptr;
     }
     page->vertexRanges = RangeAllocator(vertexRoom);
     page->indexRanges = RangeAllocator(indexRoom);
     page->fitted = fitted;
+    return page;
+}
+
+bool GeometryPool::makePage(uint32_t vertexRoom, uint32_t indexRoom, bool fitted, int32_t& slot) {
+    std::shared_ptr<Page> page = makePageBuffers(context_->getAllocator(), config_, vertexRoom, indexRoom, fitted);
+    if (!page) return false;
+    slot = attach(std::move(page));
+    return true;
+}
+
+int32_t GeometryPool::attach(std::shared_ptr<Page> page) {
     auto empty = std::find(pages_.begin(), pages_.end(), nullptr);
     if (empty == pages_.end()) {
         pages_.push_back(std::move(page));
-        slot = static_cast<int32_t>(pages_.size() - 1);
-    } else {
-        *empty = std::move(page);
-        slot = static_cast<int32_t>(empty - pages_.begin());
+        return static_cast<int32_t>(pages_.size() - 1);
     }
-    return true;
+    *empty = std::move(page);
+    return static_cast<int32_t>(empty - pages_.begin());
 }
 
 GeometryPool::Range GeometryPool::place(const void* vertices, uint32_t vertexCount, const void* indices,
@@ -72,8 +98,21 @@ GeometryPool::Range GeometryPool::place(const void* vertices, uint32_t vertexCou
         break;
     }
     if (slot < 0 && shareable && !exhausted_) {
-        if (makePage(config_.pageVertices, config_.pageIndices, false, slot)) {
-            LOG_INFO(config_.what, ": geometry page ", slot, " made (", stats().pages, " resident)");
+        const bool first = !spare_.started();
+        if (std::shared_ptr<Page> spare = spare_.take()) {
+            slot = attach(std::move(spare));
+            LOG_INFO(config_.what, ": geometry page ", slot, " taken from the spare (", stats().pages, " resident)");
+        } else if (makePage(config_.pageVertices, config_.pageIndices, false, slot)) {
+            if (first) {
+                LOG_INFO(config_.what, ": first geometry page made; the next is made ahead on a worker");
+            } else {
+                // The frame allocated it: the spare was still being made, or
+                // could not be.
+                static core::LogBudget onFrame(16, "geometry pages made on the frame");
+                if (onFrame.take())
+                    LOG_WARNING(config_.what, ": geometry page ", slot, " made on the frame - its spare was not ready (",
+                                stats().pages, " resident)");
+            }
         } else {
             exhausted_ = true;
             LOG_WARNING(config_.what, ": no geometry page could be allocated (", stats().pages,

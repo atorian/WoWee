@@ -4,6 +4,7 @@
 #include "rendering/terrain_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/wmo_renderer.hpp"
+#include "rendering/texture_loads.hpp"
 #include "rendering/camera.hpp"
 #include "editor_water.hpp"
 #include "editor_markers.hpp"
@@ -107,6 +108,7 @@ private:
     rendering::Camera* camera_ = nullptr;
 
     std::unique_ptr<rendering::TerrainRenderer> terrainRenderer_;
+    std::unique_ptr<rendering::TextureLoads> textureLoads_;
     std::unique_ptr<rendering::M2Renderer> m2Renderer_;
     std::unique_ptr<rendering::WMORenderer> wmoRenderer_;
     EditorWater waterRenderer_;

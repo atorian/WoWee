@@ -16,6 +16,7 @@
 #include "rendering/wmo_lighting.hpp"
 #include <cstdlib>
 #include "rendering/normal_map.hpp"
+#include "rendering/texture_loads.hpp"
 #include "rendering/texture_upload.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/vk_context.hpp"
@@ -375,9 +376,7 @@ void WMORenderer::shutdown() {
     scene_->loadingModels_.clear();
     preparedHere_.clear();
 
-    failedTextureRetryAt_.clear();
     loggedTextureLoadFails_.clear();
-    textureLookupSerial_ = 0;
 
     // Give back the fallbacks; the models' own textures go with the models.
     whiteTexture_.reset();
@@ -420,7 +419,8 @@ void WMORenderer::shutdown() {
 
 bool WMORenderer::loadModel(const pipeline::WMOModel& model, uint32_t id) {
     // No budget: run to completion, which is what callers outside terrain
-    // streaming expect.
+    // streaming expect. Its textures are not waited for: the model is drawn
+    // once they are in.
     for (;;) {
         const ModelLoadResult r = loadModelIncremental(model, id, 0.0f);
         if (r == ModelLoadResult::InProgress) continue;
@@ -555,25 +555,21 @@ WMORenderer::ModelLoadResult WMORenderer::loadPreparedIncremental(WmoModelPrep& 
         modelData.materialFlags = prep.materialFlags;
         modelData.materialSidnColors = prep.materialSidnColors;
 
-        // Load textures for this model
-        if (assetManager && !prep.texturePaths.empty()) {
-            const auto texStart = std::chrono::steady_clock::now();
-            for (size_t i = modelData.nextTextureIndex; i < prep.texturePaths.size(); i++) {
-                if (budgetMs > 0.0f && i > modelData.nextTextureIndex) {
-                    const float spent = std::chrono::duration<float, std::milli>(
-                        std::chrono::steady_clock::now() - texStart).count();
-                    if (spent >= budgetMs) {
-                        modelData.nextTextureIndex = i;
-                        vkCtx_->endUploadBatch();
-                        return ModelLoadResult::InProgress;  // resume at this texture
-                    }
-                }
-                LoadedTexture loaded = loadTexture(prep.texturePaths[i]);
-                modelData.textures.push_back(std::move(loaded.diffuse));
-                modelData.normalMaps.push_back(std::move(loaded.normalHeight));
-            }
+        // Its textures, made on workers: every one asked for now, so they are
+        // made side by side. Nothing is read, made or uploaded here, and the
+        // load does not wait for them: the model is not drawn until each is
+        // in or has failed (retryPendingTextures), and then it is drawn whole.
+        modelData.textures.resize(prep.texturePaths.size());
+        modelData.normalMaps.resize(prep.texturePaths.size());
+        modelData.loadingSlots.clear();
+        for (size_t i = 0; i < prep.texturePaths.size(); i++) {
+            bool loading = false;
+            LoadedTexture loaded = loadTexture(prep.texturePaths[i], &loading);
+            if (loading) modelData.loadingSlots.push_back(static_cast<uint32_t>(i));
+            modelData.textures[i] = std::move(loaded.diffuse);
+            modelData.normalMaps[i] = std::move(loaded.normalHeight);
         }
-        modelData.nextTextureIndex = prep.texturePaths.size();
+        modelData.texturesLoading = !modelData.loadingSlots.empty();
         modelData.setupDone = true;
     }
 
@@ -680,8 +676,15 @@ WMORenderer::ModelLoadResult WMORenderer::loadPreparedIncremental(WmoModelPrep& 
     // modelData no longer owns it afterwards.
     const uint32_t loadedGroupCount = modelData.loadedGroups;
     loadParts.to("ray tracing and commit");
-    registerRtModel(id, modelData, prep);
-    if (!modelData.pendingTextureBatches.empty()) modelsWithPendingTextures_.push_back(id);
+    // The ray tracer's mesh takes each material's colour from its texture:
+    // made once the textures are all in or failed.
+    if (rtScene_) {
+        WmoPendingRt source{std::move(prep.rtMesh), std::move(prep.rtTriangleMaterial)};
+        if (modelData.texturesLoading) modelData.pendingRt = std::make_shared<WmoPendingRt>(std::move(source));
+        else registerRtModel(id, modelData, source);
+    }
+    if (!modelData.pendingTextureBatches.empty() || modelData.texturesLoading)
+        modelsWithPendingTextures_.push_back(id);
     {
         auto shape = std::make_shared<collision::WmoShape>();
         shape->modelId = id;
@@ -704,7 +707,6 @@ WMORenderer::ModelLoadResult WMORenderer::loadPreparedIncremental(WmoModelPrep& 
     layout_.setModel(id, describeDraws(loadedModels[id]));
     scene_->slots.modelChanged(id);
     markContentChanged();
-    retryPendingTextures();
     core::Logger::getInstance().debug("WMO model ", id, " loaded successfully (", loadedGroupCount, " groups)");
     return ModelLoadResult::Complete;
 }
@@ -1095,9 +1097,7 @@ void WMORenderer::clearAll() {
     for (const auto& [id, model] : loadedModels) layout_.removeModel(id);
     loadedModels.clear();
     markContentChanged();
-    failedTextureRetryAt_.clear();
     loggedTextureLoadFails_.clear();
-    textureLookupSerial_ = 0;
 
     LOG_INFO("Cleared all WMO models, instances, and texture cache");
 }
@@ -1191,7 +1191,10 @@ std::vector<WmoGroupDraws> WMORenderer::describeDraws(const ModelData& model) co
         draws.swayReach = group.swayReach;
         draws.shell = group.isLOD;
         draws.antiportal = (group.groupFlags & kAntiportal) != 0;
+        // Nothing of a model whose textures are still being made: it is drawn
+        // whole once they are in (retryPendingTextures).
         for (const auto& mb : group.mergedBatches) {
+            if (model.texturesLoading) break;
             const uint32_t kind = wmoColourKind(mb.isTransparent, mb.alphaTest, mb.twoSided);
             const bool drawn = mb.materialRow != GpuRowStore<WmoMaterialGPU>::kNoRow;
             // An alpha-keyed material casts what it draws: Dalaran's lattice
@@ -1612,6 +1615,15 @@ void WMORenderer::rewriteMaterialRows() {
         if (layout_.setModel(id, describeDraws(model))) scene_->slots.modelChanged(id);
 }
 
+size_t WMORenderer::modelsAwaitingTextures() const {
+    size_t count = 0;
+    for (const uint32_t id : modelsWithPendingTextures_) {
+        const auto it = loadedModels.find(id);
+        if (it != loadedModels.end() && it->second.texturesLoading) ++count;
+    }
+    return count;
+}
+
 void WMORenderer::retryPendingTextures() {
     for (size_t m = 0; m < modelsWithPendingTextures_.size();) {
         auto it = loadedModels.find(modelsWithPendingTextures_[m]);
@@ -1621,6 +1633,23 @@ void WMORenderer::retryPendingTextures() {
             continue;
         }
         ModelData& model = it->second;
+        // The slots still being made: each taken as it is in, or as white
+        // once it has failed.
+        for (size_t s = 0; s < model.loadingSlots.size();) {
+            const uint32_t slot = model.loadingSlots[s];
+            bool loading = false;
+            LoadedTexture loaded = slot < model.textureNames.size()
+                                       ? loadTexture(model.textureNames[slot], &loading)
+                                       : LoadedTexture{whiteTexture_, {}};
+            if (loading) {
+                ++s;
+                continue;
+            }
+            if (slot < model.textures.size()) model.textures[slot] = std::move(loaded.diffuse);
+            if (slot < model.normalMaps.size()) model.normalMaps[slot] = std::move(loaded.normalHeight);
+            model.loadingSlots[s] = model.loadingSlots.back();
+            model.loadingSlots.pop_back();
+        }
         auto& pending = model.pendingTextureBatches;
         const size_t pendingBefore = pending.size();
         for (size_t p = 0; p < pending.size();) {
@@ -1639,9 +1668,9 @@ void WMORenderer::retryPendingTextures() {
                 pending.pop_back();
                 continue;
             }
-            // loadTexture decides when a failed path is worth reading again;
+            // The loader decides when a failed path is worth reading again;
             // asking before then is a lookup that hands back white.
-            LoadedTexture loaded = loadTexture(model.textureNames[texIndex]);
+            LoadedTexture loaded = loadTexture(model.textureNames[texIndex], nullptr);
             if (!loaded.diffuse || loaded.diffuse == whiteTexture_) {
                 ++p;
                 continue;
@@ -1658,15 +1687,20 @@ void WMORenderer::retryPendingTextures() {
             attachNormalHeightMap(model, texIndex, mb);
             createMergedBatchMaterial(model, group, mb);
             group.allUntextured = false;
-            core::Logger::getInstance().info("WMO ", model.id, " got texture '",
-                                             model.textureNames[texIndex], "' on a retry");
             pending[p] = pending.back();
             pending.pop_back();
         }
+        // Every texture in or failed: the model is drawn, whole, and the ray
+        // tracer is given its mesh with the colours they give it.
+        const bool settles = model.texturesLoading && model.loadingSlots.empty();
+        if (settles) {
+            model.texturesLoading = false;
+            if (model.pendingRt) registerRtModel(model.id, model, *std::exchange(model.pendingRt, nullptr));
+        }
         // The batches given their texture draw and cast with it.
-        if (pending.size() != pendingBefore && layout_.setModel(model.id, describeDraws(model)))
+        if ((settles || pending.size() != pendingBefore) && layout_.setModel(model.id, describeDraws(model)))
             scene_->slots.modelChanged(model.id);
-        if (pending.empty()) {
+        if (pending.empty() && !model.texturesLoading) {
             modelsWithPendingTextures_[m] = modelsWithPendingTextures_.back();
             modelsWithPendingTextures_.pop_back();
         } else {
@@ -1932,52 +1966,131 @@ NormalMapFormat WMORenderer::normalMapFormat() const {
     return vkCtx_ ? normalMapFormatFor(*vkCtx_) : NormalMapFormat::Rgba8;
 }
 
-TextureRef WMORenderer::loadNormalHeightMap(const std::string& resolvedPath,
-                                            const pipeline::BLPImage* decoded) {
-    if (!normalMappingEnabled_ && !pomEnabled_) return {};
-    TextureCache& cache = vkCtx_->textures();
-    const TextureKey key{resolvedPath, TextureForm::NormalHeight, kWmoNormalMapStrengthKey};
-    if (TextureRef cached = cache.find(key)) return cached;
+namespace {
 
-    // Prefer what the terrain workers made alongside the decoded diffuse: the
-    // Sobel/blur pass then never runs on the render thread.
-    if (predecodedNormalMapCache_) {
-        auto normalIt = predecodedNormalMapCache_->find(resolvedPath);
-        if (normalIt != predecodedNormalMapCache_->end()) {
-            const EncodedNormalMap prepared = std::move(normalIt->second);
-            predecodedNormalMapCache_->erase(normalIt);
-            if (prepared.valid()) return cacheNormalMap(*vkCtx_, key, prepared);
-        }
+// A building texture's normal/height map, made from the file's pixels, its
+// copy recorded, for the cache under `key`. On a worker. Says what it could
+// not make.
+PreparedTexture makeWmoNormalMap(VkContext& ctx, const TextureKey& key, const pipeline::BLPImage& file,
+                                 NormalMapFormat format) {
+    const std::vector<uint8_t> pixels = !file.isValid()            ? std::vector<uint8_t>{}
+                                        : file.isBlockCompressed() ? pipeline::BLPLoader::decodeBaseLevel(file)
+                                                                   : file.data;
+    const EncodedNormalMap prepared =
+        pixels.empty() ? EncodedNormalMap{}
+                       : WMORenderer::prepareNormalHeightMap(pixels.data(), static_cast<uint32_t>(file.width),
+                                                             static_cast<uint32_t>(file.height), format);
+    if (!prepared.valid()) {
+        static core::LogBudget budget(32, "WMO normal/height maps that could not be made");
+        if (budget.take())
+            LOG_WARNING("WMO normal/height map of '", key.path,
+                        "' could not be made from its pixels - the building is drawn flat there");
+        return {.key = key};
     }
-    // Streaming defers what the workers did not prepare: the building draws
-    // flat until its textures are next loaded, rather than stall the frame.
-    if (deferNormalMaps_) return {};
-
-    // Made here, from the file decoded and thrown away rather than kept. The
-    // diffuse may have come from the cache - another renderer's load - in
-    // which case the file is read again for its pixels.
-    pipeline::BLPImage file;
-    if (!decoded) {
-        file = assetManager->loadTexture(resolvedPath, true);
-        if (!file.isValid()) return {};
-        decoded = &file;
-    }
-    const std::vector<uint8_t> pixels =
-        decoded->isBlockCompressed() ? pipeline::BLPLoader::decodeBaseLevel(*decoded) : decoded->data;
-    if (pixels.empty()) return {};
-    const EncodedNormalMap prepared = prepareNormalHeightMap(
-        pixels.data(), static_cast<uint32_t>(decoded->width), static_cast<uint32_t>(decoded->height),
-        normalMapFormat());
-    if (!prepared.valid()) return {};
-    return cacheNormalMap(*vkCtx_, key, prepared);
+    return prepareNormalMap(ctx, key, prepared);
 }
 
-WMORenderer::LoadedTexture WMORenderer::loadTexture(const std::string& path) {
-    constexpr uint64_t kFailedTextureRetryLookups = 512;
+}  // namespace
+
+TextureRef WMORenderer::loadNormalHeightMap(const std::string& resolvedPath, bool* loading) {
+    if (!normalMappingEnabled_ && !pomEnabled_) return {};
+    // Made with the diffuse where it was wanted then (requestTexture); else,
+    // switched on since, from the file read again.
+    const TextureKey key{resolvedPath, TextureForm::NormalHeight, kWmoNormalMapStrengthKey};
+    TextureRef out;
+    const auto state = textureLoads_->request(key, out, [&]() -> TextureLoads::Make {
+        return [ctx = vkCtx_, assets = assetManager, key, format = normalMapFormat()]() {
+            return std::vector<PreparedTexture>{
+                makeWmoNormalMap(*ctx, key, assets->loadTexture(key.path, true), format)};
+        };
+    });
+    if (state == TextureLoads::State::Loading && loading) *loading = true;
+    return state == TextureLoads::State::Resident ? out : TextureRef{};
+}
+
+TextureLoads::State WMORenderer::requestTexture(TextureLoads& loads, const std::string& path,
+                                                std::optional<NormalMapFormat> normals, TextureRef& out) {
+    const std::vector<std::string> names = textureNames(path);
+    if (names.empty()) return TextureLoads::State::Failed;
+    // The shared cache first, under every name: a texture a doodad or the
+    // ground already loaded is the same image here.
+    for (const auto& name : names) {
+        if (TextureRef cached = loads.context().textures().find({name, TextureForm::Stored, 0})) {
+            out = std::move(cached);
+            return TextureLoads::State::Resident;
+        }
+    }
+    // Else made on a worker, asked for by the first name: the worker tries
+    // the names in order and caches the file under the one it was found by,
+    // with its normal/height map from the same read.
+    return loads.request({names.front(), TextureForm::Stored, 0}, out, [&]() -> TextureLoads::Make {
+        return [&loads, names, normals]() -> std::vector<PreparedTexture> {
+            pipeline::BLPImage file;
+            std::string fileName;
+            for (size_t i = 0; i < names.size() && !file.isValid(); ++i) {
+                // Blocks: the diffuse is only ever sampled.
+                file = loads.assets().loadTexture(names[i], true);
+                fileName = names[i];
+            }
+            if (!file.isValid()) {
+                static core::LogBudget unread(64, "WMO textures found under none of their names");
+                if (unread.take())
+                    LOG_WARNING("WMO texture '", names.front(), "' could not be read under any of its ", names.size(),
+                                " names; drawn white until a retry finds it");
+                return {};
+            }
+            // The diffuse first: it is what was asked for.
+            file.analyzeAlpha();
+            std::vector<PreparedTexture> made{prepareStoredTexture(loads.context(), fileName, file)};
+            if (normals && made.front().texture)
+                made.push_back(makeWmoNormalMap(loads.context(),
+                                                {fileName, TextureForm::NormalHeight, kWmoNormalMapStrengthKey},
+                                                file, *normals));
+            return made;
+        };
+    });
+}
+
+WMORenderer::LoadedTexture WMORenderer::loadTexture(const std::string& path, bool* loading) {
+    if (loading) *loading = false;
     if (!assetManager || !vkCtx_) {
         return {whiteTexture_, {}};
     }
+    if (!textureLoads_) {
+        LOG_FATAL("WMORenderer asked for texture '", path, "' with no TextureLoads to make it: the "
+                  "renderer that owns it must set one before it loads a model");
+        std::abort();
+    }
+    // A slot that names nothing is drawn white, and says nothing.
+    if (textureNames(path).empty()) return {whiteTexture_, {}};
 
+    const bool wantNormals = normalMappingEnabled_ || pomEnabled_;
+    TextureRef diffuse;
+    const TextureLoads::State state = requestTexture(
+        *textureLoads_, path, wantNormals ? std::optional(normalMapFormat()) : std::nullopt, diffuse);
+    if (state == TextureLoads::State::Loading) {
+        if (loading) *loading = true;
+        return {whiteTexture_, {}};
+    }
+    if (state == TextureLoads::State::Failed) {
+        if (loggedTextureLoadFails_.insert(path).second) {
+            core::Logger::getInstance().warning("WMO: Failed to load texture: ", path,
+                                                " - drawn white until a retry finds it");
+        }
+        return {whiteTexture_, {}};
+    }
+    // Its normal/height map comes with it, or the texture counts as loading
+    // until it does.
+    bool normalsLoading = false;
+    TextureRef normalHeight = loadNormalHeightMap(diffuse.key().path, &normalsLoading);
+    if (normalsLoading) {
+        if (loading) *loading = true;
+        return {whiteTexture_, {}};
+    }
+    return {std::move(diffuse), std::move(normalHeight)};
+}
+
+std::vector<std::string> WMORenderer::textureNames(const std::string& path) {
     auto normalizeKey = [](std::string key) {
         std::replace(key.begin(), key.end(), '/', '\\');
         std::transform(key.begin(), key.end(), key.begin(),
@@ -1991,7 +2104,7 @@ WMORenderer::LoadedTexture WMORenderer::loadTexture(const std::string& path) {
     key = normalizeKey(key);
     if (key.rfind(".\\", 0) == 0) key = key.substr(2);
     while (!key.empty() && key.front() == '\\') key.erase(key.begin());
-    if (key.empty()) return {whiteTexture_, {}};
+    if (key.empty()) return {};
 
     auto hasKnownExt = [](const std::string& p) {
         if (p.size() < 4) return false;
@@ -2039,85 +2152,7 @@ WMORenderer::LoadedTexture WMORenderer::loadTexture(const std::string& path) {
     for (const auto& c : candidates) {
         if (seen.insert(c).second) uniqueCandidates.push_back(c);
     }
-
-    // Cache lookup across all candidate keys: the shared cache, so a texture
-    // a doodad or the ground already loaded is the same image here.
-    TextureCache& cache = vkCtx_->textures();
-    for (const auto& c : uniqueCandidates) {
-        if (TextureRef cached = cache.find({c, TextureForm::Stored, 0})) {
-            return {std::move(cached), loadNormalHeightMap(c, nullptr)};
-        }
-    }
-
-    const uint64_t lookupSerial = ++textureLookupSerial_;
-    std::vector<std::string> attemptedCandidates;
-    attemptedCandidates.reserve(uniqueCandidates.size());
-    for (const auto& c : uniqueCandidates) {
-        auto fit = failedTextureRetryAt_.find(c);
-        if (fit != failedTextureRetryAt_.end() && lookupSerial < fit->second) {
-            continue;
-        }
-        attemptedCandidates.push_back(c);
-    }
-    if (attemptedCandidates.empty()) {
-        return {whiteTexture_, {}};
-    }
-
-    // Try loading all candidates until one succeeds
-    // Check pre-decoded BLP cache first (populated by background worker threads)
-    pipeline::BLPImage blp;
-    std::string resolvedKey;
-    if (predecodedBLPCache_) {
-        for (const auto& c : uniqueCandidates) {
-            auto pit = predecodedBLPCache_->find(c);
-            if (pit != predecodedBLPCache_->end()) {
-                blp = std::move(pit->second);
-                predecodedBLPCache_->erase(pit);
-                resolvedKey = c;
-                break;
-            }
-        }
-    }
-    if (!blp.isValid()) {
-        for (const auto& c : attemptedCandidates) {
-            // Blocks. The diffuse is only ever sampled; the normal map
-            // below needs pixels and decodes them from these when it runs.
-            blp = assetManager->loadTexture(c, true);
-            if (blp.isValid()) {
-                resolvedKey = c;
-                break;
-            }
-        }
-    }
-    if (!blp.isValid()) {
-        for (const auto& c : attemptedCandidates) {
-            failedTextureRetryAt_[c] = lookupSerial + kFailedTextureRetryLookups;
-        }
-        if (loggedTextureLoadFails_.insert(key).second) {
-            core::Logger::getInstance().warning("WMO: Failed to load texture: ", path,
-                                                " - drawn white until a retry finds it");
-        }
-        // Do not cache failures as white. MPQ reads can fail transiently
-        // during streaming/contention, and caching white here permanently
-        // poisons the texture for this session.
-        return {whiteTexture_, {}};
-    }
-
-    core::Logger::getInstance().debug("WMO texture: ", path, " size=", blp.width, "x", blp.height);
-
-    // Into the shared cache. Refused when everything resident is in use (the
-    // cache says so): asked for again after the retry interval, like a failed
-    // read, by retryPendingTextures.
-    TextureRef diffuse = cacheStoredTexture(*vkCtx_, resolvedKey, blp);
-    if (!diffuse) {
-        for (const auto& c : attemptedCandidates) {
-            failedTextureRetryAt_[c] = lookupSerial + kFailedTextureRetryLookups;
-        }
-        return {whiteTexture_, {}};
-    }
-    failedTextureRetryAt_.erase(resolvedKey);
-    core::Logger::getInstance().debug("WMO: Loaded texture: ", path, " (", blp.width, "x", blp.height, ")");
-    return {std::move(diffuse), loadNormalHeightMap(resolvedKey, &blp)};
+    return uniqueCandidates;
 }
 
 void WMORenderer::recreatePipelines() {
@@ -2152,7 +2187,7 @@ void WMORenderer::recreatePipelines() {
 namespace wowee {
 namespace rendering {
 
-void WMORenderer::registerRtModel(uint32_t modelId, const ModelData& model, WmoModelPrep& prep) {
+void WMORenderer::registerRtModel(uint32_t modelId, const ModelData& model, WmoPendingRt& source) {
     if (!rtScene_ || rtModelMeshes_.count(modelId)) return;
     // Each material's colour from the texture it has now, then each triangle
     // the preparation kept takes its material's.
@@ -2172,10 +2207,10 @@ void WMORenderer::registerRtModel(uint32_t modelId, const ModelData& model, WmoM
     std::vector<float> materialSurface(model.materialBlendModes.size());
     for (uint32_t m = 0; m < materialSurface.size(); ++m) materialSurface[m] = surfaceOf(m);
     const float unknownSurface = surfaceOf(UINT32_MAX);
-    RtScene::MeshSource src = std::move(prep.rtMesh);
-    src.surfaces.resize(prep.rtTriangleMaterial.size());
-    for (size_t t = 0; t < prep.rtTriangleMaterial.size(); ++t) {
-        const uint32_t m = prep.rtTriangleMaterial[t];
+    RtScene::MeshSource src = std::move(source.mesh);
+    src.surfaces.resize(source.triangleMaterial.size());
+    for (size_t t = 0; t < source.triangleMaterial.size(); ++t) {
+        const uint32_t m = source.triangleMaterial[t];
         src.surfaces[t] = m < materialSurface.size() ? materialSurface[m] : unknownSurface;
     }
     const RtScene::MeshId mesh = rtScene_->addMesh(std::move(src));

@@ -1000,16 +1000,14 @@ int render(const json& scene, const std::string& outPath, pipeline::AssetManager
         renderer.setWorldEnvironment(environment);
         if (!streamTerrainIn(renderer, *terrain)) return 1;
     }
-    // The creatures' emitters read their textures on a worker: they start
-    // with the scene, not whenever the disk gives them up, or a creature's
-    // flames would differ from one run of it to the next. Updates with no
-    // time pass for the wait, so nothing moves.
-    if (auto* emitters = renderer.getCharacterEmitters()) {
+    // The models' textures, the creatures' emitters' among them, are made on
+    // a worker: the scene starts with them in, not whenever the disk gives
+    // them up, or a model would differ from one run of it to the next.
+    // Updates with no time pass for the wait, so nothing moves.
+    renderer.update(0.0f);
+    while (!renderer.texturesSettled()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
         renderer.update(0.0f);
-        while (emitters->loading() > 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            renderer.update(0.0f);
-        }
     }
     int frame = 0;
     SceneCapture capture(renderer, frame, frames - 1);

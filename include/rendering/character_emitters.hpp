@@ -1,9 +1,6 @@
 #pragma once
 
-#include "pipeline/blp_loader.hpp"
-
 #include <cstdint>
-#include <future>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -60,9 +57,9 @@ private:
     struct Model {
         uint32_t handle = 0;  // M2Renderer posed-emitter model; 0 while not loaded
         uint32_t users = 0;
-        /// Its emitters' textures being read on a worker; its instances get
+        /// Its emitters' textures being made on a worker; its instances get
         /// their emitters once they are in.
-        std::future<std::unordered_map<std::string, pipeline::BLPImage>> textures;
+        bool waiting = false;
         /// It did not load; not asked for again, as it would fail the same
         /// way every frame.
         bool failed = false;

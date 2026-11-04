@@ -58,6 +58,7 @@
 // loaded under, and it goes when the last of them is let go.
 
 #include "rendering/range_allocator.hpp"
+#include "rendering/spare_page.hpp"
 #include "rendering/vk_utils.hpp"
 
 #include <vulkan/vulkan.h>
@@ -164,7 +165,8 @@ public:
     SkeletonPool(const SkeletonPool&) = delete;
     SkeletonPool& operator=(const SkeletonPool&) = delete;
 
-    void initialize(VkContext& context) { context_ = &context; }
+    /// Also starts the spare shared page (SparePage).
+    void initialize(VkContext& context);
     /// Every page let go, freed once no frame in flight reads it.
     void destroy();
 
@@ -248,6 +250,8 @@ private:
     std::shared_ptr<Returned> returned_ = std::make_shared<Returned>();
     uint32_t version_ = 1;
     bool fullSaid_ = false;
+    /// The next shared page, made on a worker. Last: it is stopped first.
+    SparePage<Page> spare_;
 };
 
 } // namespace rendering

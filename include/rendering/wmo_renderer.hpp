@@ -9,6 +9,7 @@
 
 #include "rendering/normal_map_encoding.hpp"
 #include "rendering/texture_cache.hpp"
+#include "rendering/texture_loads.hpp"
 #include "rendering/interior_light.hpp"
 #include "rendering/local_lights.hpp"
 #include "rendering/vk_shader.hpp"
@@ -57,6 +58,8 @@ class VkTexture;
 struct WMOVertex;
 /// A WMO model's CPU-side work, done before its upload (WMORenderer::prepareModel).
 struct WmoModelPrep;
+/// Its ray-traced mesh, waiting for its textures.
+struct WmoPendingRt;
 
 /**
  * WMO (World Model Object) Renderer (Vulkan)
@@ -414,15 +417,13 @@ public:
     /// model finished loading or unloaded.
     [[nodiscard]] uint64_t contentRevision() const { return contentRevision_; }
 
-    // Pre-decoded BLP cache: set before calling loadModel() to skip main-thread BLP decode
-    void setPredecodedBLPCache(std::unordered_map<std::string, pipeline::BLPImage>* cache) { predecodedBLPCache_ = cache; }
-
-    // Normal/height maps may be made and encoded by terrain workers alongside
-    // the decoded diffuse textures. loadTexture() then only performs the
-    // bounded GPU upload while building the WMO model on the main thread.
-    void setPredecodedNormalMapCache(std::unordered_map<std::string, EncodedNormalMap>* cache) {
-        predecodedNormalMapCache_ = cache;
-    }
+    /// A building texture by the name a model gives it: from the shared
+    /// cache, or started on a worker of `loads`, which tries the names it may
+    /// be filed under and, given `normals`, makes its normal/height map in
+    /// that format from the same read. Any thread: a terrain worker asks for
+    /// a tile's ahead of the tile's finalize, which then finds them made.
+    static TextureLoads::State requestTexture(TextureLoads& loads, const std::string& path,
+                                              std::optional<NormalMapFormat> normals, TextureRef& out);
     /// A building texture's normal/height map from its RGBA8 pixels, encoded
     /// as `format` with its mip chain: what a worker prepares for the upload.
     static EncodedNormalMap prepareNormalHeightMap(const uint8_t* pixels, uint32_t width, uint32_t height,
@@ -430,8 +431,16 @@ public:
     /// How this device keeps them (normalMapFormatFor).
     [[nodiscard]] NormalMapFormat normalMapFormat() const;
 
-    // Defer normal/height map generation during streaming to avoid CPU stalls
-    void setDeferNormalMaps(bool defer) { deferNormalMaps_ = defer; }
+    /// Where the building textures and their normal/height maps are made:
+    /// the renderer's one loader, which outlives this.
+    void setTextureLoads(TextureLoads* loads) { textureLoads_ = loads; }
+    /// Asks again for the textures buildings are drawn without - failed, or
+    /// still being made - and gives the batches theirs. Once a frame, on the
+    /// main thread.
+    void retryPendingTextures();
+    /// Models placed and not drawn yet, waiting for a texture still being
+    /// made.
+    [[nodiscard]] size_t modelsAwaitingTextures() const;
 
 private:
     // Holds a model's group resources before their upload.
@@ -608,18 +617,21 @@ private:
         std::vector<std::pair<uint16_t, uint16_t>> groupPortalRefs;
 
         /// Merged batches drawn white because their texture failed to load,
-        /// as (group, merged batch) indices.
+        /// or lost its place in the cache, as (group, merged batch) indices.
         std::vector<std::pair<uint32_t, uint32_t>> pendingTextureBatches;
 
         // Set once the textures and materials below have been populated, so a
         // resumed load skips straight to the groups it has left.
         bool setupDone = false;
+        /// Texture slots still being made on a worker. Until none is, the
+        /// model is not drawn (describeDraws), so it appears whole rather
+        /// than white and then textured, and its ray-traced mesh waits in
+        /// pendingRt for the colours its textures give it.
+        std::vector<uint32_t> loadingSlots;
+        bool texturesLoading = false;
+        std::shared_ptr<WmoPendingRt> pendingRt;
         // Next group to upload. A large model's groups are spread across several
         // calls under a time budget rather than uploaded in one stall.
-        // Next texture to upload. Uploading them all at once cost 40ms on a
-        // transport - the images are large, and the expense is the GPU upload
-        // rather than the decode, which the worker already did.
-        size_t nextTextureIndex = 0;
         size_t nextGroupIndex = 0;
         uint32_t loadedGroups = 0;
 
@@ -726,13 +738,17 @@ private:
         /// nor made here.
         TextureRef normalHeight;
     };
-    /// From the shared cache, loading what is not there.
-    LoadedTexture loadTexture(const std::string& path);
-    /// The normal/height map of a loaded texture, from the cache, the terrain
-    /// workers' prepared pixels, or - outside streaming - made here.
-    TextureRef loadNormalHeightMap(const std::string& resolvedPath, const pipeline::BLPImage* decoded);
-    std::unordered_map<std::string, pipeline::BLPImage>* predecodedBLPCache_ = nullptr;
-    std::unordered_map<std::string, EncodedNormalMap>* predecodedNormalMapCache_ = nullptr;
+    /// From the shared cache, or started on a worker (TextureLoads): white,
+    /// with `*loading` set, while it or its normal/height map is being made.
+    LoadedTexture loadTexture(const std::string& path, bool* loading);
+    /// The normal/height map of a resident texture, from the cache or made on
+    /// a worker. Empty while loading (`*loading` set), and where none is
+    /// wanted or it could not be made.
+    TextureRef loadNormalHeightMap(const std::string& resolvedPath, bool* loading);
+    /// The names a model's texture path may be filed under, most likely
+    /// first; none for a path that names nothing.
+    static std::vector<std::string> textureNames(const std::string& path);
+    TextureLoads* textureLoads_ = nullptr;
 
     /// A merged batch's material row written from it as it is, and the
     /// rendering settings; placed when it has none.
@@ -741,10 +757,6 @@ private:
     /// Point a batch at the normal/height map made from its texture, if any.
     void attachNormalHeightMap(const ModelData& model, uint32_t texIndex,
                                GroupResources::MergedBatch& mb) const;
-    /// Ask again for textures that failed to load and give the batches drawn
-    /// white for want of them their texture. A failed MPQ read is often
-    /// transient.
-    void retryPendingTextures();
     std::vector<uint32_t> modelsWithPendingTextures_;
 
     /// A group's geometry and material rows given back, after the frames in
@@ -769,7 +781,7 @@ private:
     std::unordered_map<uint32_t, uint32_t> rtModelMeshes_;  // modelId -> RtScene mesh
     /// Adds the mesh the preparation built to the ray-traced scene, its
     /// triangles coloured by the textures the model now has.
-    void registerRtModel(uint32_t modelId, const ModelData& model, WmoModelPrep& prep);
+    void registerRtModel(uint32_t modelId, const ModelData& model, WmoPendingRt& source);
     void releaseRtModel(uint32_t modelId);
 
     collision::CollisionWorld* collision_ = nullptr;
@@ -834,9 +846,7 @@ private:
 
     /// When a path that would not load, or found no room, is worth asking for
     /// again: a failed MPQ read is often transient.
-    std::unordered_map<std::string, uint64_t> failedTextureRetryAt_;
     std::unordered_set<std::string> loggedTextureLoadFails_;
-    uint64_t textureLookupSerial_ = 0;
 
     // Default white texture, held in the shared cache.
     TextureRef whiteTexture_;
@@ -858,7 +868,6 @@ private:
 
     // Normal mapping / POM settings
     bool normalMappingEnabled_ = true;   // on by default
-    bool deferNormalMaps_ = false;       // skip normal map gen during streaming
     float normalMapStrength_ = 0.8f;     // 0.0 = flat, 1.0 = full, 2.0 = exaggerated
     bool pomEnabled_ = true;             // on by default
     int pomQuality_ = 1;                 // 0=Low(16), 1=Medium(32), 2=High(64)
