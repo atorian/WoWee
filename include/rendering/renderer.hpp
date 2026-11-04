@@ -236,9 +236,13 @@ public:
     /// Where the world's model textures are made, off the frame.
     TextureLoads* getTextureLoads() const { return textureLoads_.get(); }
     /// No model placed, and no creature's emitters, wait for a texture: what
-    /// a wait for a settled scene (the loading screen, scene_render) waits
-    /// for.
+    /// a wait for a settled scene (scene_render) waits for.
     [[nodiscard]] bool texturesSettled() const;
+    /// The textures the buildings placed wait for, the first `limit` of them
+    /// ("model <id>: <texture>"); none when every building is drawn. What
+    /// entering the world waits for: the buildings and the character, which
+    /// do not change, and nothing else (user decision, 2026-11-04).
+    [[nodiscard]] std::vector<std::string> buildingTexturesAwaited(size_t limit) const;
     WMORenderer* getWMORenderer() const { return wmoRenderer.get(); }
     M2Renderer* getM2Renderer() const { return m2Renderer.get(); }
     DetailDoodadRenderer* getDetailDoodadRenderer() const { return detailDoodads_.get(); }

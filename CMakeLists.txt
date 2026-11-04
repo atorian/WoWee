@@ -1344,6 +1344,7 @@ set(WOWEE_SOURCES
 # fails the build's check if anything in wowee_render reaches for the client.
 set(WOWEE_BASE_SOURCES
     src/core/logger.cpp
+    src/core/thread_priority.cpp
     src/core/memory_monitor.cpp
     src/core/app_clock.cpp
     src/core/frame_budget.cpp

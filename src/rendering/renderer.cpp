@@ -2266,6 +2266,10 @@ bool Renderer::updateSkyboxLayers() {
     return !skyLayers_.empty();
 }
 
+std::vector<std::string> Renderer::buildingTexturesAwaited(size_t limit) const {
+    return wmoRenderer ? wmoRenderer->awaitedTextures(limit) : std::vector<std::string>{};
+}
+
 bool Renderer::texturesSettled() const {
     // What is placed, not what is loading: textures started ahead for a tile
     // still streaming are that tile's to wait for, not the scene's.

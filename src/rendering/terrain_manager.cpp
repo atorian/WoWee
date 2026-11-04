@@ -80,12 +80,12 @@ int computeTerrainWorkerCount() {
 
     unsigned hc = std::thread::hardware_concurrency();
     if (hc > 0) {
-        // Keep terrain workers conservative by default. Over-subscribing loader
-        // threads can starve main-thread networking/render updates on large-core CPUs.
-        const unsigned reserved = (hc >= 16u) ? 4u : ((hc >= 8u) ? 2u : 1u);
-        const unsigned maxDefaultWorkers = 8u;
-        const unsigned targetWorkers = std::max(4u, std::min(maxDefaultWorkers, hc - reserved));
-        return static_cast<int>(targetWorkers);
+        // A third of the hardware threads, two to four. Loading shares the
+        // CPU with the texture loads' and I/O workers and the frame's own
+        // threads: eight of these beside them made sixteen loading threads on
+        // a twelve-thread Ryzen 5 5600, which held the whole CPU busy while
+        // Dalaran loaded.
+        return static_cast<int>(std::clamp(hc / 3u, 2u, 4u));
     }
     return 4;  // Fallback
 }
@@ -1422,7 +1422,9 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {  // NOLINT(readab
 void TerrainManager::workerLoop() {
     // Leave placement to the OS scheduler. Artificially reserving CPU 0 made
     // this worker policy depend on the old main-thread pin and reduced the
-    // scheduler's ability to balance streaming with render workers.
+    // scheduler's ability to balance streaming with render workers. Below the
+    // frame's threads, so a tile being read never takes the frame's cores.
+    core::runBelowFrameThreads();
     LOG_INFO("Terrain worker thread started");
 
     while (workerRunning.load()) {

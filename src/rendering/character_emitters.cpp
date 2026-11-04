@@ -25,7 +25,6 @@ size_t CharacterEmitters::loading() const {
     for (const auto& [serial, model] : models_) waiting += model.waiting ? 1 : 0;
     return waiting;
 }
-
 void CharacterEmitters::update() {
     CpuStageLaps laps(stages_, "rendererUpdate/character emitters");
     ++frame_;
@@ -42,6 +41,7 @@ void CharacterEmitters::update() {
 
         if (binding.emitters == 0) {
             Model& model = models_[source.modelSerial];
+            model.seenFrame = frame_;
             if (model.handle != 0 && !m2_.hasPosedEmitterModel(model.handle)) model.handle = 0;
             if (model.handle == 0) {
                 if (model.failed) return;
@@ -86,6 +86,12 @@ void CharacterEmitters::update() {
         }
     }
 
+    // Models no instance asked for this update and none holds: one still
+    // waiting for its textures would otherwise be waited for for good.
+    std::erase_if(models_, [&](const auto& entry) {
+        const Model& model = entry.second;
+        return model.users == 0 && model.handle == 0 && model.seenFrame != frame_;
+    });
     laps.lap("gone");
     m2_.updatePosedEmitters();
     laps.lap("posed sets");

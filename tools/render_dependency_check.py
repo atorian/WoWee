@@ -42,6 +42,7 @@ FORBIDDEN = ("game/", "ui/", "audio/", "addons/", "network/", "auth/", "platform
 # compiled into wowee_base.
 CORE_ALLOWED = {
     "core/logger.hpp", "core/profiler.hpp", "core/env_flag.hpp", "core/thread_pool.hpp",
+    "core/thread_priority.hpp",
     "core/coordinates.hpp", "core/local_time.hpp", "core/data_paths.hpp",
     "core/memory_monitor.hpp", "core/geoset_rules.hpp",
     # Header-only: the struct a cache's owner reports its size in.

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/thread_priority.hpp"
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -30,10 +32,22 @@ namespace core {
 // so the queue always drains and such waits always complete.
 class ThreadPool {
 public:
-    explicit ThreadPool(size_t threadCount) {
+    /// Whose turn comes first when the cores are all busy.
+    enum class Runs {
+        /// Part of making the frame: the frame waits for it.
+        WithFrame,
+        /// Loading and other work no frame waits for: below the frame's
+        /// threads (runBelowFrameThreads).
+        BelowFrame,
+    };
+
+    explicit ThreadPool(size_t threadCount, Runs runs = Runs::WithFrame) {
         workers_.reserve(threadCount);
         for (size_t i = 0; i < threadCount; ++i) {
-            workers_.emplace_back([this]() { workerLoop(); });
+            workers_.emplace_back([this, runs]() {
+                if (runs == Runs::BelowFrame) runBelowFrameThreads();
+                workerLoop();
+            });
         }
     }
 
@@ -60,7 +74,7 @@ public:
     // Small, separate pool for blocking filesystem work. Keeping it distinct from
     // frameWorkers prevents a slow disk read from occupying render/update workers.
     static ThreadPool& ioWorkers() {
-        static ThreadPool pool(2);
+        static ThreadPool pool(2, Runs::BelowFrame);
         return pool;
     }
 
@@ -69,7 +83,7 @@ public:
     // cache (releaseInBackground below). On the main thread, freeing what a
     // city tile carried was 50 ms of one frame.
     static ThreadPool& background() {
-        static ThreadPool pool(1);
+        static ThreadPool pool(1, Runs::BelowFrame);
         return pool;
     }
 

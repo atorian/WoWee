@@ -67,6 +67,9 @@ struct WorldLoader::Load {
     WorldWarmupProgress warmup;
     bool rootPlaced = false;
     size_t doodad = 0;
+    /// What the warmup has said it entered without, or still waits for.
+    bool buildingWaitSaid = false;
+    bool uploadWaitSaid = false;
 };
 
 WorldLoader::WorldLoader(const Phase& phase, rendering::Renderer* renderer,
@@ -424,9 +427,30 @@ void WorldLoader::observeReadiness(bool spawnsPending) {
     auto* terrain = renderer_ ? renderer_->getTerrainManager() : nullptr;
     if (ctx) ctx->pollUploadBatches();
     const bool wasReady = load.status.result == WorldLoadResult::Ready;
-    // The models' textures are made on workers; the world opens with them in,
-    // not with its models appearing one by one after the loading screen.
-    const bool uploaded = (!ctx || ctx->uploadsComplete()) && (!renderer_ || renderer_->texturesSettled());
+    // Entering the world waits for what does not change - the buildings, and
+    // the character the spawn queues bring - and nothing else: doodads,
+    // creatures and their effects come in after (user decision, 2026-11-04).
+    // Buildings whose textures are still being made by the warmup's cap are
+    // said by name and come in after too, rather than hold the screen.
+    constexpr float kWarmupCapSeconds = 25.0f;
+    bool buildingsDrawn = true;
+    if (renderer_) {
+        const std::vector<std::string> awaited = renderer_->buildingTexturesAwaited(8);
+        buildingsDrawn = awaited.empty();
+        if (!buildingsDrawn && secondsSince(load.stageStarted) >= kWarmupCapSeconds) {
+            if (!std::exchange(load.buildingWaitSaid, true)) {
+                std::string names;
+                for (const auto& name : awaited) names += "\n  " + name;
+                LOG_WARNING("World load: buildings still wait for their textures after ", kWarmupCapSeconds,
+                            " s; entering the world, they appear when the textures are in:", names);
+            }
+            buildingsDrawn = true;
+        }
+    }
+    const bool uploadsDone = !ctx || ctx->uploadsComplete();
+    if (!uploadsDone && secondsSince(load.stageStarted) >= kWarmupCapSeconds && !std::exchange(load.uploadWaitSaid, true))
+        LOG_WARNING("World load: GPU uploads still in flight after ", kWarmupCapSeconds, " s; the loading screen waits for them");
+    const bool uploaded = uploadsDone && buildingsDrawn;
     load.status = load.warmup.observe(secondsSince(load.stageStarted), !spawnsPending, ground,
                                      terrain ? terrain->getLoadedTileCount() : 0, uploaded);
     if (!wasReady && load.status.result == WorldLoadResult::Ready && load.status.reason != "World ready")

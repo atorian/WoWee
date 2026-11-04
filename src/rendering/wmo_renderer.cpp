@@ -438,7 +438,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
     // for a model that is resident already, which is most calls.
     auto prepIt = preparedHere_.find(id);
     if (prepIt == preparedHere_.end()) {
-        if (const auto admitted = admitModel(id, !model.textures.empty())) return *admitted;
+        if (const auto admitted = admitModel(id)) return *admitted;
         prepIt = preparedHere_.emplace(id, prepareModel(model)).first;
     }
     const std::shared_ptr<WmoModelPrep> prep = prepIt->second;
@@ -447,47 +447,14 @@ WMORenderer::ModelLoadResult WMORenderer::loadModelIncremental(
     return result;
 }
 
-std::optional<WMORenderer::ModelLoadResult> WMORenderer::admitModel(uint32_t id, bool hasTexturePaths) {
+std::optional<WMORenderer::ModelLoadResult> WMORenderer::admitModel(uint32_t id) {
     // Check if already loaded
-    auto existingIt = loadedModels.find(id);
-    if (existingIt != loadedModels.end()) {
-        // If a model was first loaded while texture resolution failed (or before
-        // assets were fully available), it can remain permanently white because
-        // merged batches cache texture pointers at load time. Do a one-time reload for
-        // models that have texture paths but no resolved non-white textures.
-        if (assetManager && hasTexturePaths) {
-            bool hasResolvedTexture = false;
-            for (const TextureRef& tex : existingIt->second.textures) {
-                if (tex && tex != whiteTexture_) {
-                    hasResolvedTexture = true;
-                    break;
-                }
-            }
-            // Track which WMO models have been force-reloaded after resolving only to
-            // fallback textures. Cap the set to avoid unbounded memory growth in worlds
-            // with many unique WMO groups (e.g. Dalaran has 2000+).
-            static constexpr size_t kMaxRetryTracked = 8192;
-            static std::unordered_set<uint32_t> retryReloadedModels;
-            static bool retryReloadedModelsCapped = false;
-            if (retryReloadedModels.size() > kMaxRetryTracked) {
-                retryReloadedModels.clear();
-                if (!retryReloadedModelsCapped) {
-                    core::Logger::getInstance().warning("WMO fallback-retry set exceeded ", kMaxRetryTracked, " entries; reset");
-                    retryReloadedModelsCapped = true;
-                }
-            }
-            if (!hasResolvedTexture && retryReloadedModels.insert(id).second) {
-                core::Logger::getInstance().warning(
-                    "WMO model ", id,
-                    " has only fallback textures; forcing one-time reload");
-                unloadModel(id);
-            } else {
-                return ModelLoadResult::Complete;
-            }
-        } else {
-            return ModelLoadResult::Complete;
-        }
-    }
+    // Resident already. A texture it is still waiting for, or one that failed
+    // and is read again, reaches its batches when it is in
+    // (retryPendingTextures): reloading the model for white textures only
+    // made it again, and with textures made on workers every model starts
+    // white.
+    if (loadedModels.contains(id)) return ModelLoadResult::Complete;
     if (loadedModels.size() >= modelCacheLimit_) {
         if (modelLimitRejectWarnings_ < 3) {
             core::Logger::getInstance().warning("WMO model cache full (",
@@ -505,7 +472,7 @@ WMORenderer::ModelLoadResult WMORenderer::loadPreparedIncremental(WmoModelPrep& 
     // A load not yet begun may have nothing to do: the model may be resident
     // already, or the cache full.
     if (scene_->loadingModels_.find(id) == scene_->loadingModels_.end()) {
-        if (const auto admitted = admitModel(id, !prep.texturePaths.empty())) return *admitted;
+        if (const auto admitted = admitModel(id)) return *admitted;
         if (prep.groups.empty()) {
             core::Logger::getInstance().warning("No valid groups loaded for WMO ", id,
                                                 " - it has nothing to draw and is not placed");
@@ -1622,6 +1589,21 @@ size_t WMORenderer::modelsAwaitingTextures() const {
         if (it != loadedModels.end() && it->second.texturesLoading) ++count;
     }
     return count;
+}
+
+std::vector<std::string> WMORenderer::awaitedTextures(size_t limit) const {
+    std::vector<std::string> awaited;
+    for (const uint32_t id : modelsWithPendingTextures_) {
+        const auto it = loadedModels.find(id);
+        if (it == loadedModels.end() || !it->second.texturesLoading) continue;
+        for (const uint32_t slot : it->second.loadingSlots) {
+            if (awaited.size() >= limit) return awaited;
+            const std::string& name =
+                slot < it->second.textureNames.size() ? it->second.textureNames[slot] : std::string("?");
+            awaited.push_back("model " + std::to_string(id) + ": " + name);
+        }
+    }
+    return awaited;
 }
 
 void WMORenderer::retryPendingTextures() {

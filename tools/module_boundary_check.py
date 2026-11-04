@@ -105,6 +105,7 @@ BASE_HEADERS = {
     "core/memory_monitor.hpp",
     "core/profiler.hpp",
     "core/thread_pool.hpp",
+    "core/thread_priority.hpp",
 }
 BASE_SOURCES = {
     "src/core/app_clock.cpp",
@@ -113,6 +114,7 @@ BASE_SOURCES = {
     "src/core/frame_budget.cpp",
     "src/core/logger.cpp",
     "src/core/memory_monitor.cpp",
+    "src/core/thread_priority.cpp",
 }
 
 SOURCE_SUFFIXES = {".cpp", ".hpp", ".h", ".mm"}

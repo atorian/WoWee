@@ -118,7 +118,11 @@ it is ready.
   tables, model maps) is no reason to build there: build on the worker into
   a result of its own, and let the frame publish it in one bounded step. If
   the owner cannot take a finished result, that is the work.
-- The loading screen is the exception: there the frame waits on purpose.
+- The loading screen is the exception: there the frame waits on purpose -
+  but only for what does not change, the buildings (with their textures)
+  and the player's character (user decision, 2026-11-04). Doodads,
+  creatures, their effects and the sky come in after it, as they would
+  while walking.
 - The frame budget (WOWEE_FRAME_PROFILE, the SLOW lines) names main-thread
   work over a few milliseconds; a load among them is a bug. The ones known
   on 2026-11-03: the terrain's finalize steps (M2 model loads, terrain

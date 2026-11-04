@@ -63,6 +63,10 @@ private:
         /// It did not load; not asked for again, as it would fail the same
         /// way every frame.
         bool failed = false;
+        /// The last update an instance asked for it: one waiting that none
+        /// asks for any more (the creature went, or took another model) is
+        /// dropped rather than waited for.
+        uint64_t seenFrame = 0;
     };
     struct Binding {
         uint64_t modelSerial = 0;

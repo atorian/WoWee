@@ -441,6 +441,9 @@ public:
     /// Models placed and not drawn yet, waiting for a texture still being
     /// made.
     [[nodiscard]] size_t modelsAwaitingTextures() const;
+    /// The textures those models wait for, as "model <id>: <texture>", the
+    /// first `limit` of them: what a wait for them says.
+    [[nodiscard]] std::vector<std::string> awaitedTextures(size_t limit) const;
 
 private:
     // Holds a model's group resources before their upload.
@@ -691,7 +694,7 @@ private:
 
     /// Whether a model may start loading now: Complete when it is resident
     /// already, Failed when the cache is full, nothing when it may load.
-    std::optional<ModelLoadResult> admitModel(uint32_t id, bool hasTexturePaths);
+    std::optional<ModelLoadResult> admitModel(uint32_t id);
     /// Preparations loadModelIncremental made itself, for models whose loads
     /// are still in progress.
     std::unordered_map<uint32_t, std::shared_ptr<WmoModelPrep>> preparedHere_;

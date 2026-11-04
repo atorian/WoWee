@@ -1,6 +1,7 @@
 #include "rendering/texture_loads.hpp"
 
 #include "core/logger.hpp"
+#include "core/thread_priority.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
 
@@ -15,19 +16,23 @@ namespace {
 /// waiting long for the last to be read.
 constexpr size_t kJobsPerBatch = 32;
 
-size_t workerCount() {
-    // Reading a file is decompressing it: half the cores, at least two.
-    const unsigned cores = std::max(1u, std::thread::hardware_concurrency());
-    return std::clamp<size_t>(cores / 2, 2, 6);
-}
+/// Two: a worker no longer waits for the GPU, so two keep a city's textures
+/// moving, and more only took cores from the frame and the tile workers.
+constexpr size_t kWorkers = 2;
 
 }  // namespace
 
 TextureLoads::TextureLoads(VkContext& context, pipeline::AssetManager& assets)
     : context_(context), assets_(assets) {
-    const size_t count = workerCount();
-    workers_.reserve(count);
-    for (size_t i = 0; i < count; ++i) workers_.emplace_back([this] { work(); });
+    workers_.reserve(kWorkers);
+    // Below the frame's threads: a texture being read never takes the
+    // frame's cores.
+    for (size_t i = 0; i < kWorkers; ++i) {
+        workers_.emplace_back([this] {
+            core::runBelowFrameThreads();
+            work();
+        });
+    }
 }
 
 TextureLoads::~TextureLoads() {

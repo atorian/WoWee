@@ -37,6 +37,7 @@ FORBIDDEN = ("rendering/", "audio/", "ui/", "addons/")
 # core/ headers that are infrastructure the game may use.
 CORE_ALLOWED = {
     "core/logger.hpp", "core/profiler.hpp", "core/env_flag.hpp", "core/thread_pool.hpp",
+    "core/thread_priority.hpp",
     "core/coordinates.hpp", "core/local_time.hpp", "core/data_paths.hpp",
     "core/memory_monitor.hpp", "core/event_bus.hpp", "core/app_clock.hpp",
     "core/config_paths.hpp", "core/https_get.hpp", "core/cvar_store.hpp",
