@@ -97,8 +97,14 @@ void WidgetRenderer::initialize(pipeline::AssetManager* assets, rendering::VkCon
             std::string resolved;
             const auto bytes = readTextureFile(path, resolved);
             if (bytes.empty()) return {.failure = "BLP file not found or empty"};
-            auto image = pipeline::BLPLoader::load(bytes);
+            // As the file keeps it: a DXT file's blocks go to the GPU as they
+            // are, a quarter to an eighth of the RGBA8 every image was decoded
+            // to. An additive image is decoded, since its alpha is remade from
+            // its colour; so are the files with nothing to keep (palette,
+            // ARGB8888). One level, as the interface has always drawn them.
+            auto image = pipeline::BLPLoader::load(bytes, /*keepCompressed=*/!add);
             if (!image.isValid()) return {.failure = "BLP decoding failed"};
+            if (image.isBlockCompressed()) image.mipmaps.resize(1);
             if (add) for (size_t i = 0; i + 3 < image.data.size(); i += 4) {
                 const auto luminance = std::max({image.data[i], image.data[i+1], image.data[i+2]});
                 image.data[i+3] = static_cast<uint8_t>((image.data[i+3] * luminance) / 255);
@@ -107,8 +113,9 @@ void WidgetRenderer::initialize(pipeline::AssetManager* assets, rendering::VkCon
             const rendering::TextureKey key{prefix + path, rendering::TextureForm::Interface,
                                             static_cast<uint8_t>(add)};
             if (auto existing = cache.find(key)) return {std::move(existing), image.width, image.height, {}};
-            if (!cache.reserve(static_cast<uint64_t>(image.width) * image.height * 4))
-                return {.failure = "no room in the shared GPU texture budget"};
+            const uint64_t cost = image.isBlockCompressed() ? image.mipmaps[0].size()
+                                                            : static_cast<uint64_t>(image.width) * image.height * 4;
+            if (!cache.reserve(cost)) return {.failure = "no room in the shared GPU texture budget"};
             auto texture = std::make_shared<rendering::VkTexture>();
             auto completion = std::make_shared<std::atomic<int>>(0);
             PreparedUiTexture result;
@@ -117,8 +124,22 @@ void WidgetRenderer::initialize(pipeline::AssetManager* assets, rendering::VkCon
             result.uploaded = completion;
             vkCtx_->beginUploadBatch();
             try {
-                const bool uploaded = texture->upload(*vkCtx_, image.data.data(), image.width, image.height,
-                                                      VK_FORMAT_R8G8B8A8_UNORM, false);
+                bool uploaded = false;
+                if (image.isBlockCompressed()) {
+                    uploaded = texture->uploadBLP(*vkCtx_, image, 0);
+                    // A device that cannot sample the block format says so
+                    // before an image is made: the file goes up decoded.
+                    if (!uploaded) {
+                        static core::LogBudget said(16, "interface textures that went up decoded");
+                        if (said.take())
+                            LOG_WARNING("Interface texture '", path, "' did not go up as blocks; it goes up "
+                                        "decoded to RGBA8, at four to eight times the memory");
+                        image = pipeline::BLPLoader::load(bytes);
+                    }
+                }
+                if (!image.isBlockCompressed())
+                    uploaded = texture->upload(*vkCtx_, image.data.data(), image.width, image.height,
+                                               VK_FORMAT_R8G8B8A8_UNORM, false);
                 const bool sampled = uploaded && texture->createSampler(vkCtx_->getDevice(), VK_FILTER_LINEAR,
                     VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 1.0f);
                 if (sampled) { result.width = image.width; result.height = image.height; }

@@ -57,8 +57,12 @@ private:
     /// WOWEE_GPU_MEMORY_CHECK: the counts against the allocator's own map.
     void checkCountsAgainstMap(const rendering::VkContext& vk,
                                const rendering::GpuMemoryByUse& counted);
+    /// With the frame profile, once a minute: what the texture cache holds,
+    /// by form and folder and the largest files.
+    void reportTextures(const rendering::VkContext& vk);
 
     bool loud_;
+    std::optional<double> lastTextureReportAt_;
     /// Where WOWEE_GPU_MEMORY_DUMP asks for the allocator's detailed map to be
     /// written every few seconds; empty when it does not.
     std::string gpuMemoryDumpPath_;

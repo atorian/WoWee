@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace wowee {
 namespace rendering {
@@ -241,6 +242,18 @@ public:
 
     [[nodiscard]] TextureCacheStats stats() const;
     [[nodiscard]] uint64_t budgetBytes() const;
+
+    /// One resident texture, as largestEntries reports it.
+    struct EntryReport {
+        TextureKey key;
+        uint64_t bytes = 0;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint32_t refs = 0;
+    };
+    /// The `count` largest resident textures, the largest first: what the
+    /// budget is spent on, for the frame profile to name.
+    [[nodiscard]] std::vector<EntryReport> largestEntries(size_t count) const;
 
 private:
     friend class TextureRef;

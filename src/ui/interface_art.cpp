@@ -42,9 +42,13 @@ std::vector<InterfaceArt> interfaceArtReferences(const std::string& source,
         const bool exact = prefix.ends_with(".blp");
         if (exact) found.emplace(prefix, false);
         else {
+            // The files beside the prefix, not those in folders whose names
+            // start with it: "...\\Glues\\Models\\UI_".. a race's name took in
+            // every UI_ folder - 1.5 GB of login screens.
             for (auto it = std::lower_bound(texturePaths.begin(), texturePaths.end(), prefix);
-                 it != texturePaths.end() && it->starts_with(prefix); ++it)
-                found.emplace(*it, false);
+                 it != texturePaths.end() && it->starts_with(prefix); ++it) {
+                if (it->find('\\', prefix.size()) == std::string::npos) found.emplace(*it, false);
+            }
         }
     }
     // Keep additive images distinct. XML declares them even on hidden

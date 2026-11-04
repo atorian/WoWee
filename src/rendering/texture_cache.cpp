@@ -1,6 +1,7 @@
 #include "rendering/texture_cache.hpp"
 
 #include "core/logger.hpp"
+#include "rendering/vk_texture.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -433,6 +434,28 @@ TextureCacheStats TextureCache::stats() const {
     out.retiringBytes = retiringBytes_->load();
     out.budgetBytes = effectiveBudgetLocked();
     out.refusals = refusals_;
+    return out;
+}
+
+std::vector<TextureCache::EntryReport> TextureCache::largestEntries(size_t count) const {
+    std::vector<EntryReport> out;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        out.reserve(named_.size() + owned_.size());
+        const auto report = [&](const TextureEntry& e) {
+            out.push_back({.key = e.key,
+                           .bytes = e.bytes,
+                           .width = e.texture ? e.texture->getWidth() : 0,
+                           .height = e.texture ? e.texture->getHeight() : 0,
+                           .refs = e.refs});
+        };
+        for (const auto& [key, entry] : named_) report(*entry);
+        for (const auto& [ptr, entry] : owned_) report(*entry);
+    }
+    const size_t keep = std::min(count, out.size());
+    std::partial_sort(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(keep), out.end(),
+                      [](const EntryReport& a, const EntryReport& b) { return a.bytes > b.bytes; });
+    out.resize(keep);
     return out;
 }
 

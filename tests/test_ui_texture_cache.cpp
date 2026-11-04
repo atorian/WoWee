@@ -99,6 +99,23 @@ local icon = "Interface\\Icons\\Spell_Fire"
     CHECK_FALSE(has("interface\\icons\\spell_fire.blp"));
     CHECK_FALSE(has("interface\\test\\unrelated.blp"));
 }
+TEST_CASE("a filename prefix is not expanded into the folders that start with it", "[ui][resources]") {
+    // GlueParent.lua builds a glue model's path from a race's name:
+    // "Interface\\Glues\\Models\\UI_"..name.."\\UI_"..name..".m2". Read as a
+    // filename prefix, "...\\Models\\UI_" took in every file of every UI_
+    // folder - the login screens of every expansion and race, 1895 images
+    // and 1.5 GB held for the whole session. A prefix names files beside it.
+    const std::vector<std::string> paths{
+        "interface\\glues\\models\\ui_human\\ui_human_sky.blp",
+        "interface\\glues\\models\\ui_mainmenu_dragonflight\\ui_dragonisles_bg_skya.blp",
+        "interface\\test\\panel-left.blp"};
+    const auto art = interfaceArtReferences(R"(
+local path = "Interface\\Glues\\Models\\UI_"..name.."\\UI_"..name..".m2"
+local panel = "Interface\\Test\\Panel-"
+)", paths);
+    REQUIRE(art.size() == 1);
+    CHECK(art[0].path == "interface\\test\\panel-left.blp");
+}
 TEST_CASE("hidden additive art is prefetched without enumerating the icon picker", "[ui][resources]") {
     const std::vector<std::string> paths{"interface\\buttons\\glow.blp", "interface\\icons\\spell_fire.blp"};
     const auto art = interfaceArtReferences(R"(<Ui><Texture hidden="true" file="Interface\Buttons\Glow.tga" alphaMode="ADD"/><Texture file="Interface\Icons\Spell_Fire"/></Ui>)", paths);

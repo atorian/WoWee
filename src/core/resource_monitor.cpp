@@ -14,7 +14,9 @@
 #include "rendering/wmo_renderer.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdlib>
+#include <map>
 
 namespace wowee::core {
 
@@ -26,6 +28,8 @@ constexpr double kSampleIntervalSeconds = 1.0;
 constexpr double kVideoMapIntervalSeconds = 10.0;
 /// How often the client's own memory is counted by owner.
 constexpr double kMemoryIntervalSeconds = 10.0;
+/// How often the frame profile names what the texture cache holds.
+constexpr double kTextureReportIntervalSeconds = 60.0;
 
 ResourceTelemetry::Config telemetryConfig(bool frameProfile) {
     ResourceTelemetry::Config config;
@@ -152,6 +156,49 @@ void ResourceMonitor::sampleVideoMemory(const rendering::Renderer& renderer, dou
     out.videoMemory->parts.push_back({"cache: unreferenced", textures.idleBytes});
     out.videoMemory->parts.push_back({"cache: waiting for frames", textures.retiringBytes});
     if (textures.refusals > 0) out.counts.push_back({"textures refused", textures.refusals});
+
+    if (loud_ && (!lastTextureReportAt_ || now - *lastTextureReportAt_ >= kTextureReportIntervalSeconds)) {
+        lastTextureReportAt_ = now;
+        reportTextures(*vk);
+    }
+}
+
+void ResourceMonitor::reportTextures(const rendering::VkContext& vk) {
+    // What the cache's budget is spent on: by form and folder - the first two
+    // parts of the path, "interface\\icons" - then the largest one by one.
+    // The resource line says how much each form holds; this says which files.
+    const auto entries = vk.textures().largestEntries(SIZE_MAX);
+    struct Folder {
+        uint64_t bytes = 0;
+        size_t count = 0;
+        uint64_t idleBytes = 0;
+    };
+    std::map<std::pair<std::string, std::string>, Folder> folders;  // form, folder
+    for (const auto& e : entries) {
+        std::string folder = e.key.path.empty() ? std::string("(owned)") : e.key.path;
+        size_t cut = folder.find('\\');
+        if (cut != std::string::npos) cut = folder.find('\\', cut + 1);
+        if (cut != std::string::npos) folder.resize(cut);
+        Folder& f = folders[{rendering::textureFormName(e.key.form), folder}];
+        f.bytes += e.bytes;
+        ++f.count;
+        if (e.refs == 0) f.idleBytes += e.bytes;
+    }
+    std::vector<std::pair<std::pair<std::string, std::string>, Folder>> byBytes(folders.begin(), folders.end());
+    std::sort(byBytes.begin(), byBytes.end(),
+              [](const auto& a, const auto& b) { return a.second.bytes > b.second.bytes; });
+    LOG_WARNING("Texture cache by folder (", entries.size(), " textures):");
+    for (size_t i = 0; i < byBytes.size() && i < 25; ++i) {
+        const auto& [where, f] = byBytes[i];
+        LOG_WARNING("  ", where.first, " ", where.second, ": ", f.bytes >> 20, " MB in ", f.count,
+                    " textures, ", f.idleBytes >> 20, " MB of it unreferenced");
+    }
+    LOG_WARNING("Texture cache, largest:");
+    for (size_t i = 0; i < entries.size() && i < 30; ++i) {
+        const auto& e = entries[i];
+        LOG_WARNING("  ", e.bytes >> 10, " KB ", e.width, "x", e.height, " ", rendering::textureFormName(e.key.form),
+                    " '", e.key.path.empty() ? std::string("(owned)") : e.key.path, "' ", e.refs, " refs");
+    }
 }
 
 ResourceSample ResourceMonitor::sample(const rendering::Renderer* renderer,
