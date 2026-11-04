@@ -20,6 +20,7 @@
 #include "pipeline/m2_asset_loader.hpp"
 #include "pipeline/m2_model_cache.hpp"
 #include "core/logger.hpp"
+#include "core/thread_pool.hpp"
 #include "core/application.hpp"
 #include <imgui.h>
 #include <backends/imgui_impl_vulkan.h>
@@ -245,6 +246,10 @@ bool CharacterPreview::initialize(pipeline::AssetManager* am, const pipeline::Ga
 }
 
 void CharacterPreview::shutdown() {
+    // A model being prepared holds staging made from the context.
+    if (preparing_.valid()) preparing_.wait();
+    preparing_ = {};
+    preparingFor_.reset();
     if (charRenderer_) {
         charRenderer_->shutdown();
         charRenderer_.reset();
@@ -542,6 +547,10 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
         if (!waiting_) LOG_WARNING("CharacterPreview: failed to read M2: ", m2Path);
         return false;
     }
+    // Made ready to place before anything of the view changes: while it is
+    // made, the view keeps what it has.
+    const std::shared_ptr<PreparedCharacterModel> prepared = preparePreviewModel(parsed);
+    if (!prepared) return false;
     const pipeline::M2Model& model = *parsed;
 
     // Remove existing instance.
@@ -649,7 +658,7 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
     // used to be written into a copy of it, which the renderer never reads -
     // it loads only type 0 by name - and so the skin-extra slot, a night
     // elf's ears or a draenei's horns, was never bound here at all.
-    if (!charRenderer_->loadModel(parsed, PREVIEW_MODEL_ID)) {
+    if (!charRenderer_->loadPrepared(*prepared, PREVIEW_MODEL_ID)) {
         LOG_WARNING("CharacterPreview: failed to load model to GPU");
         return false;
     }
@@ -1039,6 +1048,10 @@ bool CharacterPreview::loadCreature(
         if (!waiting_) LOG_WARNING("CharacterPreview: could not read creature model: ", m2Path);
         return false;
     }
+    // Made ready to place before anything of the view changes: while it is
+    // made, the view keeps what it has.
+    const std::shared_ptr<PreparedCharacterModel> prepared = preparePreviewModel(parsed);
+    if (!prepared) return false;
     const pipeline::M2Model& model = *parsed;
 
     if (instanceId_ > 0) {
@@ -1092,7 +1105,7 @@ bool CharacterPreview::loadCreature(
         break;
     }
 
-    if (!charRenderer_->loadModel(parsed, PREVIEW_MODEL_ID)) {
+    if (!charRenderer_->loadPrepared(*prepared, PREVIEW_MODEL_ID)) {
         LOG_WARNING("CharacterPreview: failed to upload creature model");
         return false;
     }
@@ -1127,6 +1140,25 @@ bool CharacterPreview::loadCreature(
     charRenderer_->playAnimation(instanceId_, rendering::anim::STAND, true);
     modelLoaded_ = true;
     return true;
+}
+
+std::shared_ptr<PreparedCharacterModel> CharacterPreview::preparePreviewModel(
+    const std::shared_ptr<const pipeline::M2Model>& parsed) {
+    // Outside the world nothing is drawn while it is made: made here.
+    if (!modelsInBackground_) return CharacterRenderer::prepareModel(*vkCtx_, parsed);
+    // In the world the frame does not make it: a worker does, and the
+    // preview waits for it as it waits for the parse.
+    if (preparingFor_ != parsed) {
+        preparingFor_ = parsed;
+        preparing_ = core::ThreadPool::ioWorkers().submit(
+            "portrait model", [ctx = vkCtx_, parsed] { return CharacterRenderer::prepareModel(*ctx, parsed); });
+    }
+    if (preparing_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+        waiting_ = true;
+        return nullptr;
+    }
+    preparingFor_.reset();
+    return preparing_.get();
 }
 
 std::shared_ptr<const pipeline::M2Model> CharacterPreview::loadPreviewM2(const std::string& m2Path) {

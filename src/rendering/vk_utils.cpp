@@ -4,6 +4,7 @@
 #include "rendering/vk_context.hpp"
 #include "core/logger.hpp"
 #include <cstring>
+#include <utility>
 #include <vector>
 
 namespace wowee {
@@ -456,26 +457,57 @@ bool recordBufferUpload(VkContext& ctx, VkCommandBuffer cmd, ::VkBuffer target,
 bool uploadIntoBuffer(VkContext& ctx, const void* data, VkDeviceSize size,
                       VkBuffer target, VkDeviceSize targetOffset) {
     if (target == VK_NULL_HANDLE || size == 0) return false;
+    return copyStaged(ctx, stageBytes(ctx.getAllocator(), data, size), target, targetOffset);
+}
 
-    AllocatedBuffer staging = createBuffer(ctx.getAllocator(), size,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
-    if (staging.buffer == VK_NULL_HANDLE) return false;
+StagedBytes::~StagedBytes() {
+    if (buffer_.buffer) destroyBuffer(allocator_, buffer_);
+}
 
+StagedBytes::StagedBytes(StagedBytes&& other) noexcept
+    : allocator_(other.allocator_), buffer_(std::exchange(other.buffer_, {})), size_(std::exchange(other.size_, 0)) {}
+
+StagedBytes& StagedBytes::operator=(StagedBytes&& other) noexcept {
+    if (this != &other) {
+        if (buffer_.buffer) destroyBuffer(allocator_, buffer_);
+        allocator_ = other.allocator_;
+        buffer_ = std::exchange(other.buffer_, {});
+        size_ = std::exchange(other.size_, 0);
+    }
+    return *this;
+}
+
+AllocatedBuffer StagedBytes::release() {
+    size_ = 0;
+    return std::exchange(buffer_, {});
+}
+
+StagedBytes stageBytes(VmaAllocator allocator, const void* data, VkDeviceSize size) {
+    if (size == 0) return {};
+    AllocatedBuffer staging = createBuffer(allocator, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+    if (staging.buffer == VK_NULL_HANDLE) return {};
     void* mapped = nullptr;
-    if (vmaMapMemory(ctx.getAllocator(), staging.allocation, &mapped) != VK_SUCCESS) {
-        destroyBuffer(ctx.getAllocator(), staging);
-        return false;
+    if (vmaMapMemory(allocator, staging.allocation, &mapped) != VK_SUCCESS) {
+        destroyBuffer(allocator, staging);
+        return {};
     }
     std::memcpy(mapped, data, size);
-    vmaUnmapMemory(ctx.getAllocator(), staging.allocation);
+    vmaUnmapMemory(allocator, staging.allocation);
+    return {allocator, staging, size};
+}
 
+bool copyStaged(VkContext& ctx, StagedBytes&& staged, VkBuffer target, VkDeviceSize targetOffset) {
+    if (target == VK_NULL_HANDLE || !staged.valid()) return false;
+    const VkDeviceSize size = staged.size();
+    AllocatedBuffer staging = staged.release();
     // See the header: inside a batch the copy is only recorded, and the
     // staging buffer goes with the batch, which frees it once the copy has run.
+    const ::VkBuffer source = staging.buffer;
     ctx.submitUpload(staging, [&](VkCommandBuffer cmd) {
         VkBufferCopy region{};
         region.dstOffset = targetOffset;
         region.size = size;
-        vkCmdCopyBuffer(cmd, staging.buffer, target, 1, &region);
+        vkCmdCopyBuffer(cmd, source, target, 1, &region);
     });
     return true;
 }

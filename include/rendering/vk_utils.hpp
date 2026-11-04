@@ -245,6 +245,40 @@ AllocatedBuffer uploadBuffer(VkContext& ctx, const void* data, VkDeviceSize size
 bool uploadIntoBuffer(VkContext& ctx, const void* data, VkDeviceSize size,
     VkBuffer target, VkDeviceSize targetOffset = 0);
 
+/// Bytes put in a staging buffer of their own ahead of their copy - on a
+/// worker, so the frame that copies them only records the copy
+/// (copyStaged). Gives its buffer back if dropped unused. Move only.
+class StagedBytes {
+public:
+    StagedBytes() = default;
+    StagedBytes(VmaAllocator allocator, AllocatedBuffer buffer, VkDeviceSize size)
+        : allocator_(allocator), buffer_(buffer), size_(size) {}
+    ~StagedBytes();
+    StagedBytes(StagedBytes&& other) noexcept;
+    StagedBytes& operator=(StagedBytes&& other) noexcept;
+    StagedBytes(const StagedBytes&) = delete;
+    StagedBytes& operator=(const StagedBytes&) = delete;
+    [[nodiscard]] bool valid() const { return buffer_.buffer != VK_NULL_HANDLE; }
+    [[nodiscard]] VkDeviceSize size() const { return size_; }
+    /// The buffer, its ownership with it.
+    [[nodiscard]] AllocatedBuffer release();
+
+private:
+    VmaAllocator allocator_ = VK_NULL_HANDLE;
+    AllocatedBuffer buffer_;
+    VkDeviceSize size_ = 0;
+};
+
+/// `size` bytes of `data` in a staging buffer of their own; invalid, with
+/// nothing allocated, when the buffer could not be made or mapped. Any thread.
+[[nodiscard]] StagedBytes stageBytes(VmaAllocator allocator, const void* data, VkDeviceSize size);
+
+/// The copy of `staged` into `target` at `targetOffset`, through
+/// VkContext::submitUpload as uploadIntoBuffer's: inside an upload batch only
+/// recorded, the staging buffer freed with the batch. False, the target
+/// untouched, for staging that is not valid.
+bool copyStaged(VkContext& ctx, StagedBytes&& staged, VkBuffer target, VkDeviceSize targetOffset = 0);
+
 /// Stage a copy into the frame command buffer, retaining staging until that
 /// frame completes. No queue submission or CPU wait during recording.
 bool recordBufferUpload(VkContext& ctx, VkCommandBuffer cmd, ::VkBuffer target,

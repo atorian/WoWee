@@ -1556,6 +1556,81 @@ bool CharacterRenderer::loadModel(std::shared_ptr<const pipeline::M2Model> model
 
 bool CharacterRenderer::uploadModel(std::shared_ptr<const pipeline::M2Model> data, pipeline::M2Model* ownMesh,
                                     uint32_t id) {
+    // Made here for a caller that loads in place (a portrait, the player);
+    // a loader worker prepares it ahead and calls loadPrepared.
+    const std::shared_ptr<PreparedCharacterModel> prepared = prepareModel(*vkCtx_, std::move(data));
+    return publishModel(*prepared, ownMesh, id);
+}
+
+bool CharacterRenderer::loadPrepared(PreparedCharacterModel& prepared, uint32_t id) {
+    return publishModel(prepared, nullptr, id);
+}
+
+std::shared_ptr<PreparedCharacterModel> CharacterRenderer::prepareModel(
+    VkContext& context, std::shared_ptr<const pipeline::M2Model> data) {
+    auto prepared = std::make_shared<PreparedCharacterModel>();
+    prepared->model = data;
+    if (!data) return prepared;
+    const pipeline::M2Model& model = *data;
+    if (!model.vertices.empty()) {
+        prepared->visualBoundMin = glm::vec3(std::numeric_limits<float>::max());
+        prepared->visualBoundMax = glm::vec3(-std::numeric_limits<float>::max());
+        for (const auto& vertex : model.vertices) {
+            prepared->visualBoundMin = glm::min(prepared->visualBoundMin, vertex.position);
+            prepared->visualBoundMax = glm::max(prepared->visualBoundMax, vertex.position);
+        }
+        prepared->visualBoundRadius = glm::length(prepared->visualBoundMax - prepared->visualBoundMin) * 0.5f;
+    }
+    prepared->isSkyBird = pipeline::classifyM2Model(model.name, model.boundMin, model.boundMax,
+                                                    model.vertices.size(), model.particleEmitters.size())
+                              .isSkyBird;
+    // Its vertices with tangents and its indices, staged for the geometry
+    // pool (CharVertexGPU, 64 bytes a vertex; 16-bit indices).
+    std::vector<std::byte> vertices;
+    uint32_t vertexCount = 0;
+    prepareVertices(model, vertices, vertexCount);
+    if (vertexCount > 0)
+        prepared->mesh = GeometryPool::stage(context, vertices.data(), vertexCount,
+                                             static_cast<uint32_t>(vertices.size() / vertexCount), model.indices.data(),
+                                             static_cast<uint32_t>(model.indices.size()), sizeof(uint16_t));
+    // Its bones and keys, which it is posed from on the GPU, and its
+    // batches' animated alpha and texture animations, which the cull samples.
+    if (!model.bones.empty()) {
+        const PackedSkeleton packed = packSkeleton(model, MAX_BONES);
+        prepared->skeleton = SkeletonPool::stage(context, packed.words, packed.boneCount);
+    }
+    prepared->animations = SkeletonPool::stage(context, packCharacterAnimations(model), 0);
+    // The inverse rest pose: each bone's rest position is T(pivot), composed
+    // with its parent chain.
+    const size_t numBones = model.bones.size();
+    prepared->bindPose.resize(numBones);
+    std::vector<glm::mat4> restPose(numBones);
+    for (size_t i = 0; i < numBones; i++) {
+        const glm::mat4 local = glm::translate(glm::mat4(1.0f), model.bones[i].pivot);
+        const int parent = model.bones[i].parentBone;
+        restPose[i] = parent >= 0 && static_cast<size_t>(parent) < numBones ? restPose[parent] * local : local;
+        prepared->bindPose[i] = glm::inverse(restPose[i]);
+    }
+    // Batch render order (priorityPlane, materialLayer): it depends only on
+    // the model, so it is not sorted per instance per frame.
+    prepared->sortedBatchIndices.resize(model.batches.size());
+    std::iota(prepared->sortedBatchIndices.begin(), prepared->sortedBatchIndices.end(), 0);
+    std::stable_sort(prepared->sortedBatchIndices.begin(), prepared->sortedBatchIndices.end(),
+                     [&batches = model.batches](size_t a, size_t b) {
+                         if (batches[a].priorityPlane != batches[b].priorityPlane)
+                             return batches[a].priorityPlane < batches[b].priorityPlane;
+                         return batches[a].materialLayer < batches[b].materialLayer;
+                     });
+    return prepared;
+}
+
+bool CharacterRenderer::publishModel(PreparedCharacterModel& prepared, pipeline::M2Model* ownMesh,
+                                     uint32_t id) {
+    if (!prepared.model) {
+        LOG_ERROR("CharacterRenderer: no model given for id ", id, "; not loaded");
+        return false;
+    }
+    const std::shared_ptr<const pipeline::M2Model>& data = prepared.model;
     const pipeline::M2Model& model = *data;
     // A mesh, emitters, or both. A model of emitters alone - nearly every
     // enchant glow, and some creatures - has no batches to draw here and is
@@ -1576,23 +1651,13 @@ bool CharacterRenderer::uploadModel(std::shared_ptr<const pipeline::M2Model> dat
     }
 
     // Frozen when the model is published below.
-    const size_t vertexCount = model.vertices.size();
+    const size_t vertexCount = prepared.mesh.vertexCount;
     M2ModelGPU gpuModel;
     gpuModel.data = data;
-    if (!model.vertices.empty()) {
-        gpuModel.visualBoundMin = glm::vec3(std::numeric_limits<float>::max());
-        gpuModel.visualBoundMax = glm::vec3(-std::numeric_limits<float>::max());
-        for (const auto& vertex : model.vertices) {
-            gpuModel.visualBoundMin = glm::min(gpuModel.visualBoundMin, vertex.position);
-            gpuModel.visualBoundMax = glm::max(gpuModel.visualBoundMax, vertex.position);
-        }
-        gpuModel.visualBoundRadius =
-            glm::length(gpuModel.visualBoundMax - gpuModel.visualBoundMin) * 0.5f;
-    }
-    const auto classification = pipeline::classifyM2Model(
-        model.name, model.boundMin, model.boundMax,
-        model.vertices.size(), model.particleEmitters.size());
-    gpuModel.isSkyBird = classification.isSkyBird;
+    gpuModel.visualBoundMin = prepared.visualBoundMin;
+    gpuModel.visualBoundMax = prepared.visualBoundMax;
+    gpuModel.visualBoundRadius = prepared.visualBoundRadius;
+    gpuModel.isSkyBird = prepared.isSkyBird;
     gpuModel.hasEmitters = !model.particleEmitters.empty() || !model.ribbonEmitters.empty();
     gpuModel.loadSerial = nextModelLoadSerial_++;
 
@@ -1629,18 +1694,18 @@ bool CharacterRenderer::uploadModel(std::shared_ptr<const pipeline::M2Model> dat
     geometry_.releaseEmptyPages();
     vkCtx_->beginUploadBatch();
 
-    // Setup GPU buffers
-    setupModelBuffers(gpuModel);
-    // Its bones and keys, which it is posed from on the GPU.
-    gpuModel.skeleton = skeletons_.place(model, MAX_BONES, model.name.c_str());
-    // Its batches' animated alpha and texture animations, which the cull
-    // samples.
-    if (const std::vector<uint32_t> animations = packCharacterAnimations(model); !animations.empty())
-        gpuModel.animations = skeletons_.placeBlob(animations, model.name.c_str(),
-                                                   "drawn with its batches' alpha and textures standing still");
-
-    // Calculate bind pose
-    calculateBindPose(gpuModel);
+    // What was prepared and staged, given ranges and its copies recorded:
+    // its mesh (unplaced, said by the pool, the model is not drawn), its
+    // bones and keys, its batches' animations.
+    if (prepared.mesh.vertexCount > 0 && prepared.mesh.indexCount > 0) {
+        gpuModel.geometry = geometry_.placeStaged(prepared.mesh);
+        gpuModel.vertexCount = prepared.mesh.vertexCount;
+        gpuModel.indexCount = prepared.mesh.indexCount;
+    }
+    gpuModel.skeleton = skeletons_.placeStaged(prepared.skeleton, model.name.c_str(), "drawn in its bind pose");
+    gpuModel.animations = skeletons_.placeStaged(prepared.animations, model.name.c_str(),
+                                                 "drawn with its batches' alpha and textures standing still");
+    gpuModel.bindPose = prepared.bindPose;
 
     // Load textures from model.
     //
@@ -1675,20 +1740,7 @@ bool CharacterRenderer::uploadModel(std::shared_ptr<const pipeline::M2Model> dat
         std::vector<uint16_t>().swap(ownMesh->indices);
     }
 
-    // Precompute batch render order (priorityPlane, materialLayer). The result
-    // depends only on the model, so caching it here removes the per-frame
-    // per-instance allocate + sort from render().
-    gpuModel.sortedBatchIndices.resize(gpuModel.data->batches.size());
-    std::iota(gpuModel.sortedBatchIndices.begin(), gpuModel.sortedBatchIndices.end(), 0);
-    std::stable_sort(gpuModel.sortedBatchIndices.begin(), gpuModel.sortedBatchIndices.end(),
-        [&batches = gpuModel.data->batches](size_t a, size_t b) {
-            const auto& ba = batches[a];
-            const auto& bb = batches[b];
-            if (ba.priorityPlane != bb.priorityPlane)
-                return ba.priorityPlane < bb.priorityPlane;
-            return ba.materialLayer < bb.materialLayer;
-        });
-
+    gpuModel.sortedBatchIndices = prepared.sortedBatchIndices;
 
     models[id] = std::make_shared<M2ModelGPU>(std::move(gpuModel));
 
@@ -1699,9 +1751,8 @@ bool CharacterRenderer::uploadModel(std::shared_ptr<const pipeline::M2Model> dat
     return true;
 }
 
-void CharacterRenderer::setupModelBuffers(M2ModelGPU& gpuModel) {
-    const pipeline::M2Model& model = *gpuModel.data;
-
+void CharacterRenderer::prepareVertices(const pipeline::M2Model& model, std::vector<std::byte>& out,
+                                        uint32_t& count) {
     if (model.vertices.empty() || model.indices.empty()) return;
 
     const size_t vertCount = model.vertices.size();
@@ -1793,31 +1844,10 @@ void CharacterRenderer::setupModelBuffers(M2ModelGPU& gpuModel) {
         gpuVerts[i].tangent = glm::vec4(tOrtho, w);
     }
 
-    // Into the pool (CharVertexGPU, 64 bytes per vertex); unplaced, said by
-    // the pool, the model is not drawn.
-    gpuModel.geometry = geometry_.place(gpuVerts.data(), static_cast<uint32_t>(vertCount), model.indices.data(),
-                                        static_cast<uint32_t>(idxCount));
-    gpuModel.vertexCount = static_cast<uint32_t>(vertCount);
-    gpuModel.indexCount = static_cast<uint32_t>(idxCount);
-}
-
-void CharacterRenderer::calculateBindPose(M2ModelGPU& gpuModel) {
-    auto& bones = gpuModel.data->bones;
-    size_t numBones = bones.size();
-    gpuModel.bindPose.resize(numBones);
-
-    // Compute full hierarchical rest pose, then invert.
-    // Each bone's rest position is T(pivot), composed with its parent chain.
-    std::vector<glm::mat4> restPose(numBones);
-    for (size_t i = 0; i < numBones; i++) {
-        glm::mat4 local = glm::translate(glm::mat4(1.0f), bones[i].pivot);
-        if (bones[i].parentBone >= 0 && static_cast<size_t>(bones[i].parentBone) < numBones) {
-            restPose[i] = restPose[bones[i].parentBone] * local;
-        } else {
-            restPose[i] = local;
-        }
-        gpuModel.bindPose[i] = glm::inverse(restPose[i]);
-    }
+    // As the geometry pool takes them (CharVertexGPU, 64 bytes a vertex).
+    out.resize(vertCount * sizeof(CharVertexGPU));
+    std::memcpy(out.data(), gpuVerts.data(), out.size());
+    count = static_cast<uint32_t>(vertCount);
 }
 
 bool CharacterRenderer::hasModel(uint32_t modelId) const {

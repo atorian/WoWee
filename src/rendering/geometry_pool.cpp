@@ -83,6 +83,60 @@ GeometryPool::Range GeometryPool::place(const void* vertices, uint32_t vertexCou
                                         uint32_t indexCount) {
     if (vertexCount == 0 || indexCount == 0) return {};
     takeReturned();
+    const std::optional<int32_t> slot = pageFor(vertexCount, indexCount);
+    if (!slot) return {};
+    const ::VkBuffer pageVertices = pages_[static_cast<size_t>(*slot)]->vertices.buffer;
+    const ::VkBuffer pageIndices = pages_[static_cast<size_t>(*slot)]->indices.buffer;
+    return placeIn(*slot, vertexCount, indexCount, [&](uint32_t firstVertex, uint32_t firstIndex) {
+        return uploadIntoBuffer(*context_, vertices, VkDeviceSize(vertexCount) * config_.vertexStride, pageVertices,
+                                VkDeviceSize(firstVertex) * config_.vertexStride) &&
+               uploadIntoBuffer(*context_, indices, VkDeviceSize(indexCount) * indexBytes(), pageIndices,
+                                VkDeviceSize(firstIndex) * indexBytes());
+    });
+}
+
+GeometryPool::StagedMesh GeometryPool::stage(VkContext& context, const void* vertices, uint32_t vertexCount,
+                                             uint32_t vertexStride, const void* indices, uint32_t indexCount,
+                                             uint32_t indexBytes) {
+    StagedMesh mesh;
+    mesh.vertexCount = vertexCount;
+    mesh.indexCount = indexCount;
+    if (vertexCount == 0 || indexCount == 0) return mesh;
+    const VkDeviceSize vertexSize = VkDeviceSize(vertexCount) * vertexStride;
+    const VkDeviceSize indexSize = VkDeviceSize(indexCount) * indexBytes;
+    mesh.vertices = stageBytes(context.getAllocator(), vertices, vertexSize);
+    mesh.indices = stageBytes(context.getAllocator(), indices, indexSize);
+    if (!mesh.vertices.valid() || !mesh.indices.valid()) {
+        LOG_WARNING("Geometry pool: no staging memory for a mesh of ", vertexCount, " vertices on a worker; the "
+                    "frame that places it copies it instead");
+        mesh.vertices = {};
+        mesh.indices = {};
+        const auto* v = static_cast<const std::byte*>(vertices);
+        const auto* i = static_cast<const std::byte*>(indices);
+        mesh.unstagedVertices.assign(v, v + vertexSize);
+        mesh.unstagedIndices.assign(i, i + indexSize);
+    }
+    return mesh;
+}
+
+GeometryPool::Range GeometryPool::placeStaged(StagedMesh& mesh) {
+    if (mesh.vertexCount == 0 || mesh.indexCount == 0) return {};
+    // Not staged on the worker, as it said: copied here.
+    if (!mesh.vertices.valid())
+        return place(mesh.unstagedVertices.data(), mesh.vertexCount, mesh.unstagedIndices.data(), mesh.indexCount);
+    takeReturned();
+    const std::optional<int32_t> slot = pageFor(mesh.vertexCount, mesh.indexCount);
+    if (!slot) return {};
+    const ::VkBuffer pageVertices = pages_[static_cast<size_t>(*slot)]->vertices.buffer;
+    const ::VkBuffer pageIndices = pages_[static_cast<size_t>(*slot)]->indices.buffer;
+    return placeIn(*slot, mesh.vertexCount, mesh.indexCount, [&](uint32_t firstVertex, uint32_t firstIndex) {
+        return copyStaged(*context_, std::move(mesh.vertices), pageVertices,
+                          VkDeviceSize(firstVertex) * config_.vertexStride) &&
+               copyStaged(*context_, std::move(mesh.indices), pageIndices, VkDeviceSize(firstIndex) * indexBytes());
+    });
+}
+
+std::optional<int32_t> GeometryPool::pageFor(uint32_t vertexCount, uint32_t indexCount) {
     const bool shareable = vertexCount <= config_.pageVertices && indexCount <= config_.pageIndices;
 
     // A shared page with room, else a new one in the first empty slot, else
@@ -124,18 +178,17 @@ GeometryPool::Range GeometryPool::place(const void* vertices, uint32_t vertexCou
         if (budget.take())
             LOG_WARNING(config_.what, ": no memory for a mesh's own geometry page (", vertexCount, " vertices, ",
                         indexCount, " indices) - it is not drawn");
-        return {};
+        return std::nullopt;
     }
+    return slot;
+}
 
+template <class Copy>
+GeometryPool::Range GeometryPool::placeIn(int32_t slot, uint32_t vertexCount, uint32_t indexCount, Copy&& copy) {
     Page& page = *pages_[static_cast<size_t>(slot)];
     const auto firstVertex = page.vertexRanges.allocate(vertexCount);
     const auto firstIndex = page.indexRanges.allocate(indexCount);
-    const bool copied =
-        firstVertex && firstIndex &&
-        uploadIntoBuffer(*context_, vertices, VkDeviceSize(vertexCount) * config_.vertexStride, page.vertices.buffer,
-                         VkDeviceSize(*firstVertex) * config_.vertexStride) &&
-        uploadIntoBuffer(*context_, indices, VkDeviceSize(indexCount) * indexBytes(), page.indices.buffer,
-                         VkDeviceSize(*firstIndex) * indexBytes());
+    const bool copied = firstVertex && firstIndex && copy(*firstVertex, *firstIndex);
     if (!copied) {
         // Nothing has drawn these ranges, so they come back at once.
         if (firstVertex) page.vertexRanges.free(*firstVertex, vertexCount);

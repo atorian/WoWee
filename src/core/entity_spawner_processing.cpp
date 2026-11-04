@@ -137,7 +137,9 @@ void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
             // The cache's parse, shared with the portrait rather than copied.
             auto uploadStart = std::chrono::steady_clock::now();
             charRenderer->setPredecodedBLPCache(&result.predecodedTextures, true);
-            if (!charRenderer->loadModel(result.model, result.modelId)) {
+            const bool loaded = result.prepared ? charRenderer->loadPrepared(*result.prepared, result.modelId)
+                                                : charRenderer->loadModel(result.model, result.modelId);
+            if (!loaded) {
                 charRenderer->setPredecodedBLPCache(nullptr);
                 assets_.unloadableCreaturePaths_.insert(result.modelKey);
                 assets_.nonRenderableCreatureDisplayIds_.insert(result.displayId);
@@ -453,8 +455,8 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited, rendering::CpuStag
 
             AsyncCreatureLoad load;
             load.future = spawns_->jobs_.submit(s.token, 
-                [am, unitModels = &renderer_->unitModels(), tables = &tables_, m2Path, modelKey, parseModel,
-                 modelId, s, displayCopy,
+                [am, unitModels = &renderer_->unitModels(), vkContext = renderer_->getVkContext(), tables = &tables_,
+                 m2Path, modelKey, parseModel, modelId, s, displayCopy,
                  extraCopy](const JobGroup::Token& jobToken) -> PreparedCreatureModel {
                     PreparedCreatureModel result{};
                     result.token = jobToken;
@@ -653,6 +655,10 @@ void EntitySpawner::processCreatureSpawnQueue(bool unlimited, rendering::CpuStag
                         }
                     }
 
+                    // The display that parses the file uploads it: everything
+                    // of that but placing it is done here, off the frame.
+                    if (result.parsesModel && model && vkContext)
+                        result.prepared = rendering::CharacterRenderer::prepareModel(*vkContext, model);
                     result.model = std::move(model);
                     result.valid = true;
                     return result;

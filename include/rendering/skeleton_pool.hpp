@@ -160,6 +160,51 @@ public:
     /// The shader binds this many pages; a pool that needs more says so.
     static constexpr uint32_t kMaxPages = 64;
 
+    /// One storage buffer of blobs; a fitted one holds a single blob larger
+    /// than a shared page.
+    struct Page {
+        AllocatedBuffer buffer;
+        RangeAllocator words;
+        bool fitted = false;
+    };
+    /// A blob's words told apart from any other's: two independent 64-bit
+    /// digests of them and how many there are.
+    struct Content {
+        uint64_t a = 0;
+        uint64_t b = 0;
+        uint32_t words = 0;
+        bool operator==(const Content&) const = default;
+    };
+    /// A blob made ready off the frame (stage): its words in a staging
+    /// buffer, their digest, and - for a blob larger than a page - the page
+    /// of its own it goes in. The frame that places it only finds it a range
+    /// and records the copy (placeStaged). Move only; gives back what it
+    /// holds if dropped unplaced.
+    struct StagedBlob {
+        StagedBytes bytes;
+        /// The words themselves, kept only when they could not be staged on
+        /// the worker: then the frame that places them copies them.
+        std::vector<uint32_t> unstaged;
+        uint32_t words = 0;
+        /// What the placed Skeleton's boneCount says: the bones, or the
+        /// transforms of a texture-animation blob.
+        uint32_t count = 0;
+        Content content;
+        std::shared_ptr<Page> ownPage;
+        VmaAllocator allocator = VK_NULL_HANDLE;
+        StagedBlob() = default;
+        ~StagedBlob();
+        StagedBlob(StagedBlob&&) noexcept;
+        StagedBlob& operator=(StagedBlob&&) noexcept;
+        StagedBlob(const StagedBlob&) = delete;
+        StagedBlob& operator=(const StagedBlob&) = delete;
+    };
+    /// `words` made ready to place: digested, staged, and given a page of its
+    /// own when larger than a shared one. Any thread. Empty words leave it
+    /// empty, which places nothing; words that could not be staged are kept,
+    /// said, and copied by the frame that places them.
+    [[nodiscard]] static StagedBlob stage(VkContext& context, const std::vector<uint32_t>& words, uint32_t count);
+
     SkeletonPool() = default;
     ~SkeletonPool();
     SkeletonPool(const SkeletonPool&) = delete;
@@ -174,6 +219,11 @@ public:
     /// unplaced skeleton, said at warning level, when there is nowhere for it:
     /// the model is then drawn in its bind pose.
     [[nodiscard]] Skeleton place(const pipeline::M2Model& model, uint32_t boneLimit, const char* name);
+    /// The same, for a blob staged beforehand (stage, on a worker): a range
+    /// found for it and its copy recorded, or the one placed already with
+    /// the same words shared. None placed, said with what `name` is
+    /// `without` then, when there is nowhere for it.
+    [[nodiscard]] Skeleton placeStaged(StagedBlob& blob, const char* name, const char* without);
     /// The model's particle and ribbon emitters packed and copied, the same
     /// way. None placed, said, when there is nowhere for them: it is drawn
     /// without its particles and ribbons.
@@ -198,11 +248,6 @@ public:
     [[nodiscard]] uint32_t version() const { return version_; }
 
 private:
-    struct Page {
-        AllocatedBuffer buffer;
-        RangeAllocator words;
-        bool fitted = false;
-    };
     struct Returned {
         struct Blob {
             std::shared_ptr<Page> page;
@@ -221,15 +266,12 @@ private:
     /// The blob copied into a page, without looking for one held already.
     std::optional<std::pair<int32_t, uint32_t>> copyWords(const std::vector<uint32_t>& blob, const char* name,
                                                          const char* without);
+    /// The page a blob of `words` goes in: a shared one with room, the spare,
+    /// or a new one - `ownPage` (made with a staged blob) for one larger than
+    /// a page, which it takes. None, said, when there is nowhere for it.
+    std::optional<int32_t> pageFor(uint32_t words, std::shared_ptr<Page>& ownPage, const char* name,
+                                   const char* without);
 
-    /// A blob's words told apart from any other's: two independent 64-bit
-    /// digests of them and how many there are.
-    struct Content {
-        uint64_t a = 0;
-        uint64_t b = 0;
-        uint32_t words = 0;
-        bool operator==(const Content&) const = default;
-    };
     struct ContentHash {
         size_t operator()(const Content& c) const noexcept { return static_cast<size_t>(c.a); }
     };

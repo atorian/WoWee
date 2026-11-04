@@ -25,9 +25,11 @@
 
 #include <vulkan/vulkan.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -79,6 +81,28 @@ public:
     /// The mesh copied into a page, inside an upload batch. An unplaced
     /// range, said at warning level, when there is nowhere for it.
     [[nodiscard]] Range place(const void* vertices, uint32_t vertexCount, const void* indices, uint32_t indexCount);
+
+    /// A mesh made ready off the frame (stage): its vertices and indices in
+    /// staging buffers of their own, so the frame that places it only finds
+    /// it a range and records the copies (placeStaged). Move only.
+    struct StagedMesh {
+        StagedBytes vertices;
+        StagedBytes indices;
+        uint32_t vertexCount = 0;
+        uint32_t indexCount = 0;
+        /// The bytes themselves, kept only when they could not be staged on
+        /// the worker: then the frame that places them copies them.
+        std::vector<std::byte> unstagedVertices;
+        std::vector<std::byte> unstagedIndices;
+    };
+    /// `vertexCount` vertices of `vertexStride` bytes and `indexCount`
+    /// indices of `indexBytes`, staged. Any thread.
+    [[nodiscard]] static StagedMesh stage(VkContext& context, const void* vertices, uint32_t vertexCount,
+                                          uint32_t vertexStride, const void* indices, uint32_t indexCount,
+                                          uint32_t indexBytes);
+    /// The staged mesh placed: a range found and its copies recorded. An
+    /// unplaced range, said, when there is nowhere for it.
+    [[nodiscard]] Range placeStaged(StagedMesh& mesh);
     /// The mesh's ranges back once no frame in flight can draw them. The
     /// range itself is left as it is: a frame still being recorded may hold
     /// the mesh and draw it.
@@ -116,6 +140,14 @@ private:
     bool makePage(uint32_t vertexRoom, uint32_t indexRoom, bool fitted, int32_t& slot);
     /// The page in the first empty slot; its slot.
     int32_t attach(std::shared_ptr<Page> page);
+    /// The slot of a page with room for the mesh: a shared one, the spare, a
+    /// new one, or one of its own size. None, said, when there is nowhere.
+    std::optional<int32_t> pageFor(uint32_t vertexCount, uint32_t indexCount);
+    /// The ranges a mesh takes in the page at `slot`, the copies recorded by
+    /// `copy(vertexOffset, indexOffset)`; an unplaced range when they could
+    /// not be, said.
+    template <class Copy>
+    Range placeIn(int32_t slot, uint32_t vertexCount, uint32_t indexCount, Copy&& copy);
     /// The returned ranges freed into their pages.
     void takeReturned();
 

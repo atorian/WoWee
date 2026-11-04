@@ -8,6 +8,7 @@
 #include <memory>
 #include <atomic>
 #include <cstdint>
+#include <future>
 #include <string>
 #include <utility>
 #include <unordered_map>
@@ -19,6 +20,7 @@ namespace pipeline { class AssetManager; class GameTables; class M2ModelCache; s
 namespace rendering {
 
 class CharacterRenderer;
+struct PreparedCharacterModel;
 class Camera;
 class VkContext;
 class VkTexture;
@@ -127,6 +129,10 @@ private:
     // The shared cache's parse of an M2, its skin and sequences with it; null
     // when it is not there or, drawing in the world, still on its way.
     std::shared_ptr<const pipeline::M2Model> loadPreviewM2(const std::string& m2Path);
+    // That parse made ready to place (CharacterRenderer::prepareModel). In
+    // the world on a worker: null, and the preview waiting, until it is;
+    // outside it, made here.
+    std::shared_ptr<PreparedCharacterModel> preparePreviewModel(const std::shared_ptr<const pipeline::M2Model>& parsed);
     // Hang the character's weapons off the preview model's hand attachments.
     void attachWeapons(const std::vector<game::EquipmentItem>& equipment);
     // Put the weapon's enchant glint on it (char enum reports the ItemVisual id directly).
@@ -140,6 +146,9 @@ private:
     pipeline::M2ModelCache* models_ = nullptr;
     bool modelsInBackground_ = false;
     bool waiting_ = false;
+    /// The parse being prepared on a worker, and its preparation.
+    std::shared_ptr<const pipeline::M2Model> preparingFor_;
+    std::future<std::shared_ptr<PreparedCharacterModel>> preparing_;
     VkContext* vkCtx_ = nullptr;
     std::unique_ptr<CharacterRenderer> charRenderer_;
     std::unique_ptr<Camera> camera_;

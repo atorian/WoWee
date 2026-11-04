@@ -442,8 +442,24 @@ std::optional<std::pair<int32_t, uint32_t>> SkeletonPool::placeWords(const std::
 std::optional<std::pair<int32_t, uint32_t>> SkeletonPool::copyWords(const std::vector<uint32_t>& blob,
                                                                    const char* name, const char* without) {
     const auto words = static_cast<uint32_t>(blob.size());
+    std::shared_ptr<Page> noPage;
+    const std::optional<int32_t> slot = pageFor(words, noPage, name, without);
+    if (!slot) return std::nullopt;
+    Page& page = *pages_[static_cast<size_t>(*slot)];
+    const auto first = page.words.allocate(words);
+    if (!first || !uploadIntoBuffer(*context_, blob.data(), VkDeviceSize(words) * sizeof(uint32_t),
+                                    page.buffer.buffer, VkDeviceSize(*first) * sizeof(uint32_t))) {
+        if (first) page.words.free(*first, words);
+        LOG_WARNING("Skeleton pool: '", name, "' could not be copied to the GPU - it is ", without);
+        return std::nullopt;
+    }
+    return std::make_pair(*slot, *first);
+}
+
+std::optional<int32_t> SkeletonPool::pageFor(uint32_t words, std::shared_ptr<Page>& ownPage, const char* name,
+                                             const char* without) {
     int32_t slot = -1;
-    for (size_t i = 0; i < pages_.size(); ++i) {
+    for (size_t i = 0; !ownPage && i < pages_.size(); ++i) {
         if (pages_[i] && !pages_[i]->fitted && pages_[i]->words.largestFree() >= words) {
             slot = static_cast<int32_t>(i);
             break;
@@ -463,9 +479,10 @@ std::optional<std::pair<int32_t, uint32_t>> SkeletonPool::copyWords(const std::v
         }
         const uint32_t room = fitted ? words : kPageWords;
         const bool first = !fitted && !spare_.started();
-        std::shared_ptr<Page> page = fitted ? nullptr : spare_.take();
+        std::shared_ptr<Page> page = fitted ? std::exchange(ownPage, nullptr) : spare_.take();
         if (page) {
-            LOG_INFO("Skeleton pool: page ", at, " taken from the spare for '", name, "'");
+            LOG_INFO("Skeleton pool: page ", at, fitted ? " made on a worker with " : " taken from the spare for ",
+                     "'", name, "'");
         } else {
             page = std::make_shared<Page>();
             page->buffer = createBuffer(context_->getAllocator(), VkDeviceSize(room) * sizeof(uint32_t),
@@ -492,15 +509,92 @@ std::optional<std::pair<int32_t, uint32_t>> SkeletonPool::copyWords(const std::v
         fullSaid_ = false;
         ++version_;
     }
-    Page& page = *pages_[static_cast<size_t>(slot)];
-    const auto first = page.words.allocate(words);
-    if (!first || !uploadIntoBuffer(*context_, blob.data(), VkDeviceSize(words) * sizeof(uint32_t),
-                                    page.buffer.buffer, VkDeviceSize(*first) * sizeof(uint32_t))) {
-        if (first) page.words.free(*first, words);
-        LOG_WARNING("Skeleton pool: '", name, "' could not be copied to the GPU - it is ", without);
-        return std::nullopt;
+    return slot;
+}
+
+SkeletonPool::StagedBlob::~StagedBlob() {
+    if (ownPage && ownPage->buffer.buffer) destroyBuffer(allocator, ownPage->buffer);
+}
+
+SkeletonPool::StagedBlob::StagedBlob(StagedBlob&& other) noexcept
+    : bytes(std::move(other.bytes)), unstaged(std::move(other.unstaged)), words(other.words), count(other.count),
+      content(other.content), ownPage(std::move(other.ownPage)), allocator(other.allocator) {}
+
+SkeletonPool::StagedBlob& SkeletonPool::StagedBlob::operator=(StagedBlob&& other) noexcept {
+    if (this != &other) {
+        if (ownPage && ownPage->buffer.buffer) destroyBuffer(allocator, ownPage->buffer);
+        bytes = std::move(other.bytes);
+        unstaged = std::move(other.unstaged);
+        words = other.words;
+        count = other.count;
+        content = other.content;
+        ownPage = std::move(other.ownPage);
+        allocator = other.allocator;
     }
-    return std::make_pair(slot, *first);
+    return *this;
+}
+
+SkeletonPool::StagedBlob SkeletonPool::stage(VkContext& context, const std::vector<uint32_t>& words, uint32_t count) {
+    StagedBlob blob;
+    if (words.empty()) return blob;
+    VmaAllocator allocator = context.getAllocator();
+    blob.allocator = allocator;
+    blob.content = contentOf(words);
+    blob.words = static_cast<uint32_t>(words.size());
+    blob.count = count;
+    blob.bytes = stageBytes(allocator, words.data(), VkDeviceSize(words.size()) * sizeof(uint32_t));
+    if (!blob.bytes.valid()) {
+        LOG_WARNING("Skeleton pool: no staging memory for a blob of ", words.size(),
+                    " words on a worker; the frame that places it copies it instead");
+        blob.unstaged = words;
+        return blob;
+    }
+    // Larger than a shared page: its page of its own made here, rather than
+    // by the frame that places it.
+    if (blob.words > kPageWords) {
+        auto page = std::make_shared<Page>();
+        page->buffer = createBuffer(allocator, VkDeviceSize(blob.words) * sizeof(uint32_t),
+                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                    VMA_MEMORY_USAGE_GPU_ONLY);
+        if (page->buffer.buffer) {
+            page->words = RangeAllocator(blob.words);
+            page->fitted = true;
+            blob.ownPage = std::move(page);
+        } else {
+            LOG_WARNING("Skeleton pool: no memory for a page of its own for a blob of ", blob.words,
+                        " words; the frame that places it tries again");
+        }
+    }
+    return blob;
+}
+
+SkeletonPool::Skeleton SkeletonPool::placeStaged(StagedBlob& blob, const char* name, const char* without) {
+    if (!context_ || blob.words == 0) return {};
+    if (!blob.bytes.valid()) {
+        // Not staged on the worker, as it said: copied here.
+        const auto at = placeWords(blob.unstaged, name, without);
+        if (!at) return {};
+        return Skeleton{.page = at->first, .first = at->second, .words = blob.words, .boneCount = blob.count};
+    }
+    takeReturned();
+    if (auto it = held_.find(blob.content); it != held_.end()) {
+        ++it->second.users;
+        return Skeleton{.page = it->second.page, .first = it->second.first, .words = blob.words,
+                        .boneCount = blob.count};
+    }
+    const std::optional<int32_t> slot = pageFor(blob.words, blob.ownPage, name, without);
+    if (!slot) return {};
+    Page& page = *pages_[static_cast<size_t>(*slot)];
+    const auto first = page.words.allocate(blob.words);
+    if (!first || !copyStaged(*context_, std::move(blob.bytes), page.buffer.buffer,
+                              VkDeviceSize(*first) * sizeof(uint32_t))) {
+        if (first) page.words.free(*first, blob.words);
+        LOG_WARNING("Skeleton pool: '", name, "' could not be copied to the GPU - it is ", without);
+        return {};
+    }
+    held_.emplace(blob.content, Held{.page = *slot, .first = *first, .users = 1});
+    contentAt_.emplace((uint64_t(uint32_t(*slot)) << 32) | *first, blob.content);
+    return Skeleton{.page = *slot, .first = *first, .words = blob.words, .boneCount = blob.count};
 }
 
 SkeletonPool::Skeleton SkeletonPool::placeTextureAnimations(const pipeline::M2Model& model, const char* name) {

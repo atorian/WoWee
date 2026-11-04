@@ -24,7 +24,7 @@
 namespace wowee {
 
 // Forward declarations
-namespace rendering { class Renderer; class SceneCommands; class CpuStageTimes; }
+namespace rendering { class Renderer; class SceneCommands; class CpuStageTimes; struct PreparedCharacterModel; }
 namespace pipeline { class AssetManager; class GameTables; struct M2Model; struct WMOModel; }
 namespace audio { enum class VoiceType; }
 namespace game { class GameHandler; }
@@ -484,6 +484,9 @@ private:
         float scale = 1.0f;
         /// The unit model cache's parse, shared with whoever else draws it.
         std::shared_ptr<const pipeline::M2Model> model;
+        /// It made ready to draw on the worker, for the display that parses
+        /// it (CharacterRenderer::prepareModel): the frame only places it.
+        std::shared_ptr<rendering::PreparedCharacterModel> prepared;
         std::unordered_map<std::string, pipeline::BLPImage> predecodedTextures;
         bool valid = false;
         bool permanent_failure = false;

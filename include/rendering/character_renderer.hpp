@@ -18,6 +18,7 @@
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
+#include <cstddef>
 #include <memory>
 #include <vector>
 #include <unordered_map>
@@ -40,6 +41,26 @@ namespace rendering {
 class Camera;
 class VkContext;
 class VkTexture;
+
+/// A creature's or character's model made ready to draw, all but the copy's
+/// command: its vertices with tangents and its indices, its packed bones and
+/// keys (megabytes for a playable race, with a page of their own when larger
+/// than a shared one) and its batches' animations, each already in a staging
+/// buffer; its bind pose and batch order. Made on a worker
+/// (CharacterRenderer::prepareModel); loading it in the frame only finds it
+/// ranges and records the copies (loadPrepared), which consumes the staging.
+struct PreparedCharacterModel {
+    std::shared_ptr<const pipeline::M2Model> model;
+    GeometryPool::StagedMesh mesh;
+    SkeletonPool::StagedBlob skeleton;
+    SkeletonPool::StagedBlob animations;
+    glm::vec3 visualBoundMin{0.0f};
+    glm::vec3 visualBoundMax{0.0f};
+    float visualBoundRadius = 0.0f;
+    bool isSkyBird = false;
+    std::vector<glm::mat4> bindPose;
+    std::vector<size_t> sortedBatchIndices;
+};
 
 // Enchant visual (glint, glow) attached to a weapon at one of the weapon model's
 // own item-visual attachment points.
@@ -111,6 +132,14 @@ public:
     /// nothing of it. The portrait copied the race model out of the cache on
     /// every target it was shown, 50-110 ms a click.
     bool loadModel(std::shared_ptr<const pipeline::M2Model> model, uint32_t id);
+    /// Everything of loading `model` that is not recording its copies, on
+    /// any thread: what a loader worker does before it hands the model to
+    /// the frame. `context` makes the staging.
+    [[nodiscard]] static std::shared_ptr<PreparedCharacterModel> prepareModel(
+        VkContext& context, std::shared_ptr<const pipeline::M2Model> model);
+    /// A model prepared off the frame (prepareModel): only placed here. Its
+    /// staging goes with the copies; a prepared model is loaded once.
+    bool loadPrepared(PreparedCharacterModel& prepared, uint32_t id);
 
     /// `reservedId`, when not 0, is the id SceneCommands handed out for this
     /// instance (reserveInstanceId); otherwise a new one is taken.
@@ -643,8 +672,11 @@ private:
     /// Every loadModel's work. `ownMesh` is the parse itself when nobody else
     /// holds it: its vertices and indices are let go once they are on the GPU.
     bool uploadModel(std::shared_ptr<const pipeline::M2Model> data, pipeline::M2Model* ownMesh, uint32_t id);
-    void setupModelBuffers(M2ModelGPU& gpuModel);
-    void calculateBindPose(M2ModelGPU& gpuModel);
+    /// Places a prepared model and publishes it under `id`.
+    bool publishModel(PreparedCharacterModel& prepared, pipeline::M2Model* ownMesh, uint32_t id);
+    /// The model's vertices as the geometry pool takes them, with tangents
+    /// (Lengyel's method). Any thread.
+    static void prepareVertices(const pipeline::M2Model& model, std::vector<std::byte>& out, uint32_t& count);
     /// One instance's clock: its sequence and its global sequences.
     void advanceAnimation(uint32_t instanceId, CharacterInstance& instance, float deltaTime);
     [[nodiscard]] glm::mat4 getModelMatrix(const CharacterInstance& instance) const;
