@@ -2243,6 +2243,16 @@ bool VkContext::createDepthResolveImage() {
         return false;
     }
 
+    // In the layout its readers expect from the start. The water's 1x pass
+    // loads it as DEPTH_STENCIL_ATTACHMENT_OPTIMAL and the depth samplers name
+    // that layout; a frame that reached them before the scene pass had
+    // resolved into it read an UNDEFINED image (validation, world entry).
+    const VkImage image = depthResolveImage;
+    immediateSubmit([image](VkCommandBuffer cmd) {
+        transitionImageLayout(cmd, image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                              VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT);
+    });
     return true;
 }
 

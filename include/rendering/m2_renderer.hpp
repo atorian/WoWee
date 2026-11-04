@@ -626,7 +626,8 @@ public:
     [[nodiscard]] VkRenderPass afterWaterPass() const { return afterWaterPass_; }
     /// Whether render() leaves the blended things for renderAfterWater.
     [[nodiscard]] bool drawsBlendedAfterWater() const {
-        return afterWaterPass_ != VK_NULL_HANDLE && afterWaterPipes_.alpha != VK_NULL_HANDLE;
+        return afterWaterPass_ != VK_NULL_HANDLE && afterWaterPipes_.alpha != VK_NULL_HANDLE &&
+               afterWaterPipes_.opaque != VK_NULL_HANDLE && afterWaterPipes_.alphaTest != VK_NULL_HANDLE;
     }
     /// Record them, into the water's pass after the water. Needs render() to
     /// have run this frame.
@@ -787,8 +788,9 @@ public:
     bool buildMainPassPipelines(VkDescriptorSetLayout perFrameLayout);
     VkPipeline blendPipeline(M2BlendPipeline kind) const {
         switch (kind) {
-            case M2BlendPipeline::Opaque: return opaquePipeline_;
-            case M2BlendPipeline::AlphaTest: return alphaTestPipeline_;
+            case M2BlendPipeline::Opaque: return drawingAfterWater_ ? afterWaterPipes_.opaque : opaquePipeline_;
+            case M2BlendPipeline::AlphaTest:
+                return drawingAfterWater_ ? afterWaterPipes_.alphaTest : alphaTestPipeline_;
             case M2BlendPipeline::Alpha: return blended().alpha;
             case M2BlendPipeline::NoAlphaAdd: return blended().noAlphaAdd;
             case M2BlendPipeline::Modulate: return blended().modulate;
@@ -1013,6 +1015,14 @@ private:
         std::array<VkPipeline, kM2BlendPipelineCount> particle{};
         VkPipeline ribbon = VK_NULL_HANDLE;           // alpha-blended ribbons
         VkPipeline ribbonAdditive = VK_NULL_HANDLE;   // additive ribbons
+        /// A pass of its own only (after the water): the opaque and cut-out
+        /// layers the blended list carries - one whose opacity animates is
+        /// drawn back to front with the rest. The scene pass's are
+        /// opaquePipeline_ and alphaTestPipeline_; a pipeline built for one
+        /// pass is not drawn in another (VUID-vkCmdDrawIndexedIndirect-
+        /// renderPass-02684: the scene's 4x MSAA in the water's 1x pass).
+        VkPipeline opaque = VK_NULL_HANDLE;
+        VkPipeline alphaTest = VK_NULL_HANDLE;
     };
     BlendedPipelines scenePipes_;
     BlendedPipelines afterWaterPipes_;

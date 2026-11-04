@@ -309,14 +309,15 @@ bool M2Renderer::buildBlendedPipelines(VkRenderPass pass, VkSampleCountFlagBits 
     VkVertexInputBindingDescription m2Binding{};
     std::vector<VkVertexInputAttributeDescription> m2Attrs;
     m2VertexInput(m2Binding, m2Attrs);
-    auto buildM2Pipeline = [&](VkPipelineColorBlendAttachmentState blendState) -> VkPipeline {
+    auto buildM2Pipeline = [&](VkPipelineColorBlendAttachmentState blendState,
+                               bool depthWrite = false) -> VkPipeline {
         return PipelineBuilder()
             .setShaders(m2Vert.stageInfo(VK_SHADER_STAGE_VERTEX_BIT),
                         m2Frag.stageInfo(VK_SHADER_STAGE_FRAGMENT_BIT))
             .setVertexInput({m2Binding}, m2Attrs)
             .setTopology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST)
             .setRasterization(VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE, kM2FrontFace)
-            .setDepthTest(true, false, VK_COMPARE_OP_LESS_OR_EQUAL)
+            .setDepthTest(true, depthWrite, VK_COMPARE_OP_LESS_OR_EQUAL)
             .setColorBlendAttachment(blendState)
             .setMultisample(samples)
             .setLayout(pipelineLayout_)
@@ -331,6 +332,12 @@ bool M2Renderer::buildBlendedPipelines(VkRenderPass pass, VkSampleCountFlagBits 
     out.additive = buildM2Pipeline(PipelineBuilder::blendAdditive());
     out.modulate = buildM2Pipeline(m2ModulateBlendState(false));
     out.modulate2x = buildM2Pipeline(m2ModulateBlendState(true));
+    // Another pass's opaque and cut-out layers, as the scene pass's are built
+    // (depth written, the sky's excepted); the scene pass has its own.
+    if (!derive) {
+        out.opaque = buildM2Pipeline(PipelineBuilder::blendDisabled(), !skyMode_);
+        out.alphaTest = buildM2Pipeline(PipelineBuilder::blendAlpha(), !skyMode_);
+    }
 
     // Particles: a quad per instance (an M2ParticleQuad), its four
     // corners made by the vertex shader. They were points, which can only be
@@ -437,7 +444,8 @@ void M2Renderer::destroyBlendedPipelines(BlendedPipelines& pipes) {
     if (!vkCtx_) return;
     DeferredResources retired(*vkCtx_);
     for (VkPipeline* p : {&pipes.alpha, &pipes.noAlphaAdd, &pipes.additive, &pipes.modulate,
-                          &pipes.modulate2x, &pipes.ribbon, &pipes.ribbonAdditive}) {
+                          &pipes.modulate2x, &pipes.ribbon, &pipes.ribbonAdditive, &pipes.opaque,
+                          &pipes.alphaTest}) {
         retired.destroy(*p);
         *p = VK_NULL_HANDLE;
     }
