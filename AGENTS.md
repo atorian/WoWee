@@ -125,6 +125,45 @@ it is ready.
   chunks, M2 instances), unit and weapon model uploads, packet handlers that
   load. New code adds none.
 
+## Verifying a change
+
+User decision (2026-11-03): the user waits for every check an agent runs.
+Ten minutes spent checking one change ten ways is the failure this section
+prevents; a check is run because its answer is unknown, not to feel sure.
+
+- **Think first.** Before running a build, test, scene or the client, say
+  what it can show that the diff, a grep or the code has not already
+  settled, and how long it takes. ctest records each test's time in
+  `build-dev/Testing/Temporary/CTestCostData.txt`; the GPU scene checks
+  take 2-110 s each. A check whose answer is already known is not run.
+- **One check per claim.** Each thing the change claims ("the doodad is
+  posed", "the packet carries the field") is verified by the one check that
+  observes it - the test that exercises the changed code. Not that test,
+  then `scene_render` by hand, then the client: a second method that
+  confirms the same thing tells nothing new.
+- **The fewest tests that cover what changed**, never the whole suite (user
+  decision, 2026-11-02). Name the code each test exercises that the change
+  touched; a test of untouched code, or one already failing on master (the
+  `scene_reference_*` approvals on Windows), tells nothing. A port that
+  changes the renderer's frame is checked by the test that draws what it
+  adds and one or two scenes that draw what it edits - not by forty-four
+  GPU tests at two at a time.
+- **About two minutes of waiting per change**, builds and checks together.
+  When what a change needs takes longer, run it in the background and end
+  the turn saying what is still running, or ask the user first. No loop of
+  rebuild-and-rerun to see whether a fix holds: when a check fails, find the
+  cause in the code before running it again.
+- **The client is not a test.** Relaunching it after a rebuild (above) is
+  for the user. An agent does not wait on the client, or read its log, to
+  verify what a test covers; only for what nothing else can show (a frame
+  budget, a flow through the whole game).
+- **CI runs the rest.** On every push it builds everything and runs every
+  test except the GPU ones (plain `ctest`, never `-C gpu`). What CI runs is
+  not repeated locally before a push; the GPU tests run only where someone
+  runs them, so the one a change needs is run here.
+- **Subagents get these rules in their brief.** A brief that builds or tests
+  repeats them; a subagent may not have read this file.
+
 ## Errors are logged, never swallowed
 
 - Every failure is visible in the log at the default level: `LOG_WARNING` or
@@ -182,12 +221,14 @@ whatever the code looks like inside.
   into the game (`GameHarness`), a scene into the renderer (`scene_render`), a
   call on the public API - and read what its callers read. Not private fields,
   not internal steps that could change while the behaviour stays right.
-- **A test for a bug fails first.** Run it against the bug before the fix and
-  see it fail; a test that never failed has not shown it can.
-- **A new test must be able to fail.** After writing one, break the code under
-  test (invert a condition, return a constant, drop a write) and see it fail,
-  then restore the code. Name the realistic bug it catches; a test that
-  catches none is deleted.
+- **A new test is seen to fail once.** A test that never failed has not
+  shown it can. For a bug fix, the run against the bug before the fix is that
+  failure. For new behaviour, break the code under test once (invert a
+  condition, return a constant, drop a write) by the cheapest edit - in a
+  shader, so that only its `.spv` rebuilds - run that one test, and restore
+  the code. One failing run is the evidence: not one per variation, and not
+  both a run before the fix and a broken-code run. Name the realistic bug it
+  catches; a test that catches none is deleted.
 - **A context is tested on its own.** Domain and service tests link only their
   context's library; fakes implement its ports and the real `core::EventBus`
   delivers its events. What a packet does end to end is still tested through
@@ -199,13 +240,8 @@ whatever the code looks like inside.
   an acceptance test: a scene drawn by `scene_render` and the picture checked
   (`tools/scene_render/check_*.py`). Those are slow and run apart from the
   unit tests.
-- **Run the fewest tests that cover what changed**, not the whole suite (user
-  decision, 2026-11-02). Before running one, name the code it exercises
-  that the change touched; a test of untouched code, or one already failing
-  on master (the `scene_reference_*` approvals on Windows), tells nothing.
-  A port that changes the renderer's frame is checked by the test that
-  draws what it adds and one or two scenes that draw what it edits - not by
-  forty-four GPU tests at two at a time. CI runs everything on push.
+- **Which tests to run, and how long to wait for them,** is in "Verifying a
+  change" above.
 - **A test that needs a GPU is registered with `wowee_add_gpu_test`**, never
   `add_test` (user decision, 2026-11-01). It goes into ctest's `gpu`
   configuration, so a plain `ctest` neither lists nor runs it, and takes one
