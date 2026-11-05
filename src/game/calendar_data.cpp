@@ -1,4 +1,5 @@
 #include "game/calendar_data.hpp"
+#include "game/packed_time.hpp"
 
 #include "calendar/domain/records.hpp"
 
@@ -82,7 +83,7 @@ bool parseCalendarSendCalendar(network::Packet& packet, CalendarData& out) {
         if (!packet.hasRemaining(4 + 4 + 4 + 4)) return false;
         ev.type = packet.readUInt32();
         ev.eventTimePacked = packet.readUInt32();
-        ev.eventTime = core::unpackWowPackedTime(ev.eventTimePacked);
+        ev.eventTime = game::unpackWowPackedTime(ev.eventTimePacked);
         ev.flags = packet.readUInt32();
         ev.dungeonId = static_cast<int32_t>(packet.readUInt32());
         if (!packet.hasFullPackedGuid()) return false;
@@ -92,7 +93,7 @@ bool parseCalendarSendCalendar(network::Packet& packet, CalendarData& out) {
 
     if (!packet.hasRemaining(4 + 4)) return false;
     out.serverTimeUnix = packet.readUInt32();
-    out.zoneTime = core::unpackWowPackedTime(packet.readUInt32());
+    out.zoneTime = game::unpackWowPackedTime(packet.readUInt32());
 
     if (!packet.hasRemaining(4)) return false;
     const uint32_t numLockouts = packet.readUInt32();
@@ -137,7 +138,10 @@ bool parseCalendarSendCalendar(network::Packet& packet, CalendarData& out) {
         holiday.looping = packet.readUInt32();
         holiday.priority = packet.readUInt32();
         holiday.calendarFilterType = packet.readUInt32();
-        for (uint32_t& date : holiday.dates) date = packet.readUInt32();
+        for (auto& date : holiday.dates) {
+            const uint32_t packed = packet.readUInt32();
+            if (packed != 0) date = unpackWowPackedTime(packed);
+        }
         for (uint32_t& dur : holiday.durations) dur = packet.readUInt32();
         for (uint32_t& flag : holiday.calendarFlags) flag = packet.readUInt32();
         if (!readTerminatedString(packet, holiday.textureFilename)) return false;
@@ -166,8 +170,8 @@ bool parseCalendarSendEvent(network::Packet& packet, CalendarEventDetail& out) {
     out.dungeonId = static_cast<int32_t>(packet.readUInt32());
     out.flags = packet.readUInt32();
     out.eventTimePacked = packet.readUInt32();
-    out.eventTime = core::unpackWowPackedTime(out.eventTimePacked);
-    out.timeZoneTime = core::unpackWowPackedTime(packet.readUInt32());
+    out.eventTime = game::unpackWowPackedTime(out.eventTimePacked);
+    out.timeZoneTime = game::unpackWowPackedTime(packet.readUInt32());
     out.guildId = packet.readUInt32();
 
     if (!packet.hasRemaining(4)) return false;
@@ -187,7 +191,7 @@ bool parseCalendarSendEvent(network::Packet& packet, CalendarEventDetail& out) {
         inv.rank = packet.readUInt8();
         inv.isGuildMember = packet.readUInt8() != 0;
         inv.inviteId = packet.readUInt64();
-        inv.statusTime = core::unpackWowPackedTime(packet.readUInt32());
+        inv.statusTime = game::unpackWowPackedTime(packet.readUInt32());
         if (!readTerminatedString(packet, inv.note)) return false;
         out.invitees.push_back(std::move(inv));
     }

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 #include "loot/services/ports.hpp"
 
 #include <vector>

@@ -8,11 +8,11 @@
 #include <fstream>
 #include "rendering/vk_utils.hpp"
 #include "rendering/gpu_allocations.hpp"
-#include "core/env_flag.hpp"
+#include "foundation/env_flag.hpp"
 #include "rendering/pipeline_cache_file.hpp"
 #include "rendering/vk_texture.hpp"
 #include "rendering/host_image_copy.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "pipeline/blp_loader.hpp"
 #include <VkBootstrap.h>
 #include <SDL3/SDL_vulkan.h>

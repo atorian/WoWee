@@ -1,6 +1,6 @@
 #include "game/lfg_gateway.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "game/chat_log.hpp"
 #include "game/entity.hpp"
 #include "game/frame_xml_events.hpp"

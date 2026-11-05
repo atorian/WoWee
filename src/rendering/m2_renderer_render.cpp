@@ -8,7 +8,7 @@
 #include "rendering/m2_blend_mode.hpp"
 #include "rendering/m2_glow_card.hpp"
 #include "rendering/m2_particle_emission.hpp"
-#include "core/thread_pool.hpp"
+#include "foundation/thread_pool.hpp"
 #include "pipeline/m2_model_classifier.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/cpu_stage_times.hpp"
@@ -25,8 +25,8 @@
 #include "rendering/m2_anim_clock.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
-#include "core/logger.hpp"
-#include "core/profiler.hpp"
+#include "foundation/logger.hpp"
+#include "foundation/profiler.hpp"
 #include <chrono>
 #include <cctype>
 #include <glm/gtc/matrix_transform.hpp>

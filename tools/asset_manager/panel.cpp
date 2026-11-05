@@ -11,8 +11,8 @@
 
 #include "imgui.h"
 
-#include "core/data_paths.hpp"
-#include "core/local_time.hpp"
+#include "pipeline/data_paths.hpp"
+#include "foundation/local_time.hpp"
 #include "pipeline/asset_inventory.hpp"
 
 #include "casc.hpp"

@@ -4,7 +4,7 @@
 #include "game/game_utils.hpp"
 #include "game/opcodes.hpp"
 #include "game/reputation_gateway.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "reputation/domain/records.hpp"
 #include "reputation/services/reputation.hpp"
 

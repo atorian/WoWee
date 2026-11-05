@@ -1,7 +1,7 @@
 #include "ui/scene_pick.hpp"
 
-#include "core/application.hpp"
-#include "core/coordinates.hpp"
+#include "client/application.hpp"
+#include "pipeline/coordinates.hpp"
 #include "game/game_handler.hpp"
 #include "game/entity.hpp"
 #include "rendering/camera.hpp"

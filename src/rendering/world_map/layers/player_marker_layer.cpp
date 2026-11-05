@@ -6,7 +6,7 @@
 #include "rendering/vk_texture.hpp"
 #include "rendering/vk_context.hpp"
 #include "pipeline/asset_manager.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <imgui.h>
 #include <backends/imgui_impl_vulkan.h>
 #include <cmath>

@@ -1,7 +1,7 @@
 // The CVar store the game, the interface and the addons share.
 #include <catch_amalgamated.hpp>
 
-#include "core/cvar_store.hpp"
+#include "foundation/cvar_store.hpp"
 #include "test_support.hpp"
 
 #include <fstream>

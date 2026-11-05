@@ -4,9 +4,9 @@
 #include "game/transport_clock_sync.hpp"
 #include "game/transport_manager.hpp"
 #include "game/transport_path_repository.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "math/spline.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <algorithm>
 #include <glm/gtc/constants.hpp>
 #include <cmath>
@@ -225,7 +225,7 @@ void TransportClockSync::updateYawAlignment(
         horizontalV *= glm::inversesqrt(hLenSq);
         // The velocity is canonical, so the heading has to be too. A server yaw s
         // is canonical yaw s - PI/2, and canonical yaw is atan2(-dy, dx), which
-        // puts the direction at (sin s, cos s) - see core/coordinates.hpp.
+        // puts the direction at (sin s, cos s) - see pipeline/coordinates.hpp.
         //
         // This read it as (cos s, sin s), the two components swapped. That is a
         // reflection, not a rotation, so the dot product it produced was not the

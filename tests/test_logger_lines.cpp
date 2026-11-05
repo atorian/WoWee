@@ -5,7 +5,7 @@
 // background thread while the game thread goes on logging. Line by line, the
 // game's own warnings landed in the middle of it.
 #include "catch_amalgamated.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "scratch_dir.hpp"
 
 #include <atomic>

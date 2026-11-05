@@ -35,7 +35,7 @@ The multi-expansion support is built on the **Expansion Profile** system:
 4. **Opcodes and DBC layouts** - `opcodes.json` (which may `_extends` another
    profile's) and `dbc_layouts.json` in the same directory
 
-`Application::loadExpansionTables()` (`src/core/application.cpp`) loads the
+`Application::loadExpansionTables()` (`src/client/application.cpp`) loads the
 opcode table, update fields, packet parsers and DBC layouts together, at startup
 and again whenever the active expansion changes.
 

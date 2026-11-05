@@ -13,7 +13,7 @@
 #include "rendering/camera.hpp"
 #include "rendering/frustum.hpp"
 #include "pipeline/asset_manager.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/quaternion.hpp>

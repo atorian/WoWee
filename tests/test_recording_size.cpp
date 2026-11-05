@@ -5,7 +5,7 @@
 // the encoder refuses the frame, or worse, crops a line off it. And a Retina
 // window is four times the pixels of the 1080p the recording is kept to.
 #include <catch_amalgamated.hpp>
-#include "core/screen_recorder.hpp"
+#include "client/screen_recorder.hpp"
 
 using wowee::core::recordingFrameSize;
 

@@ -2,7 +2,7 @@
 
 #include <cstring>
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "rendering/vk_utils.hpp"
 
 namespace wowee {

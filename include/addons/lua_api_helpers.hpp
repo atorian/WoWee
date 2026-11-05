@@ -18,8 +18,8 @@
 #include "game/update_field_table.hpp"
 #include "game/inventory_slots.hpp"
 #include "pet/services/pet.hpp"
-#include "core/logger.hpp"
-#include "core/app_clock.hpp"
+#include "foundation/logger.hpp"
+#include "foundation/app_clock.hpp"
 #include "ui/widget_tree.hpp"
 
 namespace wowee::reputation { class IReputation; struct ReputationEntry; struct ReputationRow; }

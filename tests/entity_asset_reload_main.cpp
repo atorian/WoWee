@@ -1,6 +1,6 @@
 // Optional native regression: real spawns and resident GPU geometry across
 // lookup invalidation, as when realm patches mount between two maps.
-#include "core/entity_spawner.hpp"
+#include "client/entity_spawner.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include "rendering/m2_renderer.hpp"

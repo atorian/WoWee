@@ -2,7 +2,7 @@
 
 #include "arena/domain/records.hpp"
 #include "arena/services/ports.hpp"
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 
 #include <cstdint>
 #include <optional>

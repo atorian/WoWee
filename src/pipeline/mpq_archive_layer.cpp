@@ -1,5 +1,5 @@
 #include "pipeline/mpq_archive_layer.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 #include <StormLib.h>
 

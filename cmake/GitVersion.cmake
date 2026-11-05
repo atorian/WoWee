@@ -1,4 +1,4 @@
-# Writes core/version.hpp from `git describe`, so the version shown in the client
+# Writes client/version.hpp from `git describe`, so the version shown in the client
 # is always the last tag reachable from HEAD.
 #
 # Run as a script (cmake -P) from a build-time custom target, not just at configure

@@ -1,6 +1,6 @@
 #include "calendar/domain/records.hpp"
 
-#include "core/local_time.hpp"
+#include "foundation/local_time.hpp"
 
 #include <algorithm>
 #include <ctime>
@@ -34,8 +34,8 @@ std::vector<CalendarDayEntry> calendarEntriesForDay(const CalendarData& data,
     for (size_t h = 0; h < data.holidays.size(); ++h) {
         const CalendarHoliday& holiday = data.holidays[h];
         for (int i = 0; i < CalendarHoliday::kNumDates; ++i) {
-            if (holiday.dates[i] == 0) continue;
-            const core::WowDate start = core::unpackWowPackedTime(holiday.dates[i]);
+            if (!holiday.dates[i]) continue;
+            const WowDate& start = *holiday.dates[i];
             const int64_t first = dayNumber(start.fullYear(), start.month, start.day);
             if (wanted < first) continue;
             // Hours, rounded up to whole days and never less than one: a
@@ -80,7 +80,7 @@ std::vector<CalendarDayEntry> calendarEntriesForDay(const CalendarData& data,
     }
 
     for (size_t e = 0; e < data.events.size(); ++e) {
-        const core::WowDate when = data.events[e].eventTime;
+        const WowDate when = data.events[e].eventTime;
         if (when.month != month || when.day != day || when.fullYear() != year) {
             continue;
         }
@@ -100,8 +100,8 @@ std::vector<CalendarDayEntry> calendarEntriesForDay(const CalendarData& data,
                              return a.kind < b.kind;
                          }
                          if (a.kind != CalendarEntryKind::Event) return false;
-                         const core::WowDate& ta = data.events[a.index].eventTime;
-                         const core::WowDate& tb = data.events[b.index].eventTime;
+                         const WowDate& ta = data.events[a.index].eventTime;
+                         const WowDate& tb = data.events[b.index].eventTime;
                          if (ta.hour != tb.hour) return ta.hour < tb.hour;
                          return ta.minute < tb.minute;
                      });

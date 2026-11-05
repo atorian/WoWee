@@ -2,7 +2,7 @@
 
 #include "addons/lua_api_registrations.hpp"
 #include "addons/lua_engine.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "ui/widget_tree.hpp"
 
 #include <algorithm>

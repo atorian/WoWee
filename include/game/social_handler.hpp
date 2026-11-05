@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 #include "game/world_packet_data.hpp"
 #include "game/opcodes.hpp"
 #include "game/group_defines.hpp"

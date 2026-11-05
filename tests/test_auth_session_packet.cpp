@@ -17,7 +17,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "game/world_packets.hpp"
-#include "core/application.hpp"
+#include "client/application.hpp"
 
 #include <array>
 #include <cstdint>

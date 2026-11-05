@@ -1,7 +1,7 @@
 #include "game/trade_gateway.hpp"
 
-#include "core/cvar_store.hpp"
-#include "core/logger.hpp"
+#include "foundation/cvar_store.hpp"
+#include "foundation/logger.hpp"
 #include "game/chat_log.hpp"
 #include "game/frame_xml_events.hpp"
 #include "game/inventory_handler.hpp"

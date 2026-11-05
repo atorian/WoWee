@@ -12,10 +12,10 @@
 
 #include "client_harness.hpp"
 
-#include "core/coordinates.hpp"
-#include "core/map_scope.hpp"
-#include "core/thread_pool.hpp"
-#include "core/world_reconnect.hpp"
+#include "pipeline/coordinates.hpp"
+#include "client/map_scope.hpp"
+#include "foundation/thread_pool.hpp"
+#include "client/world_reconnect.hpp"
 #include "game/movement_flags.hpp"
 #include "game/opcodes.hpp"
 #include "rendering/camera_controller.hpp"

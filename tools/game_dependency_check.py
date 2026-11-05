@@ -7,7 +7,7 @@ WHY
 
 The game layer (src/game, include/game) is the protocol and the state it
 builds: who is where, what they cast, what the player carries. How any of it
-looks or sounds is the client's, in core/, rendering/, audio/ and ui/. The
+looks or sounds is the client's, in client/, rendering/, audio/ and ui/. The
 game says what happened on core::EventBus (game/game_events.hpp) and asks for
 what it needs through interfaces it is handed (GameServices,
 TransportScene); see AGENTS.md, "Layers".
@@ -19,9 +19,8 @@ complaint because the client target has every include path there is.
 WHAT IT DOES
 
 Reads the direct quoted includes of every file in src/game and include/game
-and reports the ones that reach rendering/, audio/, ui/, addons/ or a core/
-header that is the client's rather than infrastructure. sweep_guard holds the
-count to what it was when the check was written; it only goes down.
+and reports the ones that reach rendering/, audio/, ui/, addons/ or client/.
+sweep_guard holds the count to what it was when the check was written; it only goes down.
 
 Shared constants that happen to live under rendering/ (the AnimationData ids,
 the movement step limits) are listed apart: they are data both sides read,
@@ -33,15 +32,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-FORBIDDEN = ("rendering/", "audio/", "ui/", "addons/")
-# core/ headers that are infrastructure the game may use.
-CORE_ALLOWED = {
-    "core/logger.hpp", "core/profiler.hpp", "core/env_flag.hpp", "core/thread_pool.hpp",
-    "core/coordinates.hpp", "core/local_time.hpp", "core/data_paths.hpp",
-    "core/memory_monitor.hpp", "core/event_bus.hpp", "core/app_clock.hpp",
-    "core/config_paths.hpp", "core/https_get.hpp", "core/cvar_store.hpp",
-    "core/string_util.hpp", "core/packed_time.hpp",
-}
+FORBIDDEN = ("rendering/", "audio/", "ui/", "addons/", "client/")
 # Data both sides read, under rendering/ for now.
 SHARED_CONSTANTS = {
     "rendering/animation/animation_ids.hpp",
@@ -61,7 +52,7 @@ def main() -> int:
         for inc in INCLUDE.findall(text):
             if inc in SHARED_CONSTANTS:
                 shared.append((rel, inc))
-            elif inc.startswith(FORBIDDEN) or (inc.startswith("core/") and inc not in CORE_ALLOWED):
+            elif inc.startswith(FORBIDDEN):
                 reaches.append((rel, inc))
 
     print(f"{len(files)} game layer files\n")

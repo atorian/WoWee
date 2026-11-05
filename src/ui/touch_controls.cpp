@@ -1,6 +1,6 @@
 #include "ui/touch_controls.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "rendering/camera_controller.hpp"
 #include "rendering/movement_command.hpp"
 

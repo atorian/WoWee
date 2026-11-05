@@ -11,9 +11,9 @@
 #include "game/ui_errors.hpp"
 #include "game/world_packets.hpp"
 #include "game/update_field_table.hpp"
-#include "core/coordinates.hpp"
-#include "core/event_bus.hpp"
-#include "core/logger.hpp"
+#include "pipeline/coordinates.hpp"
+#include "foundation/event_bus.hpp"
+#include "foundation/logger.hpp"
 #include "network/packet.hpp"
 
 #include <algorithm>

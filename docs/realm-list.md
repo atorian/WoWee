@@ -519,7 +519,7 @@ host with the realm's advertised port.
 ## In the Client
 
 The client wires this up in `src/ui/auth_screen.cpp` and
-`src/core/ui_screen_callback_handler.cpp`:
+`src/client/ui_screen_callback_handler.cpp`:
 
 - The login card's **Server** list holds every server logged into before and
   ChromieCraft (`logon.chromiecraft.com`, port 3724, WotLK), which is added on

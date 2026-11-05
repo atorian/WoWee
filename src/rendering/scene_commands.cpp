@@ -1,6 +1,6 @@
 #include "rendering/scene_commands.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "rendering/character_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/renderer.hpp"

@@ -16,6 +16,7 @@
 union SDL_Event;
 
 namespace wowee {
+namespace rendering { class VkContext; }
 namespace pipeline { class AssetManager; }
 
 // Forward declarations
@@ -39,7 +40,7 @@ public:
      * Initialize ImGui and UI screens
      * @param window Window instance for ImGui initialization
      */
-    bool initialize(core::Window* window);
+    bool initialize(core::Window* window, rendering::VkContext* context);
 
     /// Loads the game's own interface font, if it is in the data.
     ///
@@ -130,6 +131,7 @@ private:
     std::vector<uint8_t> clientFontData_;
     float clientFontSize_ = 15.0f;
     core::Window* window = nullptr;
+    rendering::VkContext* context_ = nullptr;
     UIServices services_;  // Injected services
 
     // UI Screens

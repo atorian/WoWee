@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/cache_stats.hpp"
+#include "foundation/cache_stats.hpp"
 #include "pipeline/archive_layer.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "pipeline/dbc_loader.hpp"

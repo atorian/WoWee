@@ -6,7 +6,7 @@
 #include "pipeline/placement_transform.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "collision/spatial_grid.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 #include <algorithm>
 #include <cmath>

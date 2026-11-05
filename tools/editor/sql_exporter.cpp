@@ -1,7 +1,7 @@
-#include "core/local_time.hpp"
+#include "foundation/local_time.hpp"
 #include "sql_exporter.hpp"
-#include "core/coordinates.hpp"
-#include "core/logger.hpp"
+#include "pipeline/coordinates.hpp"
+#include "foundation/logger.hpp"
 #include <fstream>
 #include <filesystem>
 #include <ctime>

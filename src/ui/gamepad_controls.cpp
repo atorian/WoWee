@@ -1,8 +1,8 @@
 #include "ui/gamepad_controls.hpp"
 
-#include "core/gamepad.hpp"
-#include "core/input.hpp"
-#include "core/logger.hpp"
+#include "platform/gamepad.hpp"
+#include "platform/input.hpp"
+#include "foundation/logger.hpp"
 #include "rendering/camera_controller.hpp"
 #include "rendering/movement_command.hpp"
 

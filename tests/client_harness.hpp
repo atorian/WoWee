@@ -31,13 +31,13 @@
 
 #include "game_harness.hpp"
 
-#include "core/client_loop.hpp"
-#include "core/entity_spawn_callback_handler.hpp"
-#include "core/entity_spawner.hpp"
-#include "core/frame_observer.hpp"
-#include "core/player_view.hpp"
-#include "core/world_entry_callback_handler.hpp"
-#include "core/world_loader.hpp"
+#include "client/client_loop.hpp"
+#include "client/entity_spawn_callback_handler.hpp"
+#include "client/entity_spawner.hpp"
+#include "client/frame_observer.hpp"
+#include "client/player_view.hpp"
+#include "client/world_entry_callback_handler.hpp"
+#include "client/world_loader.hpp"
 #include "addons/addon_manager.hpp"
 #include "rendering/camera.hpp"
 

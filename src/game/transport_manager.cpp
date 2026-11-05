@@ -6,8 +6,8 @@
 #include "game/game_utils.hpp"
 #include "game/transport_scene.hpp"
 #include "rendering/movement_limits.hpp"
-#include "core/coordinates.hpp"
-#include "core/logger.hpp"
+#include "pipeline/coordinates.hpp"
+#include "foundation/logger.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/constants.hpp>
 #include <glm/gtx/quaternion.hpp>

@@ -15,7 +15,7 @@
 
 #include <string>
 
-#include "core/helm_visual.hpp"
+#include "client/helm_visual.hpp"
 
 using wowee::core::raceGenderSuffix;
 

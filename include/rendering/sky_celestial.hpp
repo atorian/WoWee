@@ -25,7 +25,7 @@
 
 #include <glm/glm.hpp>
 
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 
 namespace wowee::rendering::sky_celestial {
 

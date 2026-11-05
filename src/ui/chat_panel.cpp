@@ -10,10 +10,10 @@
 #include "ui/spellbook_screen.hpp"
 #include "ui/ui_colors.hpp"
 #include "rendering/vk_context.hpp"
-#include "core/application.hpp"
+#include "client/application.hpp"
 #include "addons/addon_manager.hpp"
-#include "core/coordinates.hpp"
-#include "core/input.hpp"
+#include "pipeline/coordinates.hpp"
+#include "platform/input.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/animation_controller.hpp"
 #include "rendering/camera.hpp"
@@ -26,7 +26,7 @@
 #include "pipeline/dbc_layout.hpp"
 #include "game/expansion_profile.hpp"
 #include "game/character.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <algorithm>
@@ -40,7 +40,7 @@
 #include <ctime>
 #include <unordered_set>
 #include <unordered_map>
-#include "core/local_time.hpp"
+#include "foundation/local_time.hpp"
 #include "ui/framexml_takeover.hpp"
 
 namespace wowee { namespace ui {

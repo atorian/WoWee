@@ -1,7 +1,7 @@
 // The ordinary client: the client and nothing else. Everything a client
-// program does lives in runClient (src/core/client_main.cpp), which the native
+// program does lives in runClient (src/client/client_main.cpp), which the native
 // loading fixture's own main() calls with its frame observer.
-#include "core/client_main.hpp"
+#include "client/client_main.hpp"
 
 // SDLActivity loads libwowee.so and calls SDL_main, the name this header gives
 // main(). SDL2's SDL.h pulled it in; SDL3's does not, and without it the

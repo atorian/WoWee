@@ -6,7 +6,7 @@
 #include "rendering/character_mover.hpp"
 #include "rendering/movement_limits.hpp"
 #include "rendering/movement_command.hpp"
-#include "core/input.hpp"
+#include "platform/input.hpp"
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <array>

@@ -2,7 +2,7 @@
 
 #include "game/world_packet_data.hpp"
 #include "game/entity.hpp"
-#include "core/string_util.hpp"
+#include "foundation/string_util.hpp"
 #include <algorithm>
 #include <cctype>
 #include <memory>

@@ -1,7 +1,7 @@
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "pipeline/wowee_terrain_loader.hpp"
 #include "pipeline/liquid_types.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <filesystem>

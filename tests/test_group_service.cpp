@@ -1,7 +1,7 @@
 // The group service against a recording gateway and the real event bus.
 #include <catch_amalgamated.hpp>
 
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 #include "group/services/group_service.hpp"
 
 #include <string>

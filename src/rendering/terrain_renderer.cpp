@@ -18,8 +18,8 @@
 #include "rendering/normal_map.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
-#include "core/env_flag.hpp"
-#include "core/logger.hpp"
+#include "foundation/env_flag.hpp"
+#include "foundation/logger.hpp"
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>

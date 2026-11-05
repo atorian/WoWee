@@ -1,6 +1,6 @@
 #include "ui/macro_icon.hpp"
 #include "pet/services/pet.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "ui/macro_text.hpp"
 #include "ui/chat/macro_evaluator.hpp"
 #include "ui/chat/game_state_adapter.hpp"

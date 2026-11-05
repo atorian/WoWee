@@ -3,7 +3,7 @@
 // recording gateway and the real event bus. Only wowee_reputation is linked.
 #include <catch_amalgamated.hpp>
 
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 #include "reputation/services/reputation_service.hpp"
 
 #include <string>

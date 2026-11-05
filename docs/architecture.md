@@ -43,7 +43,28 @@ Wowee follows a modular architecture with clear separation of concerns:
 
 ## Core Systems
 
-### 1. Application Layer (`src/core/`)
+The engine facilities and the client have separate directories and libraries:
+
+| Module | Owns | CMake target |
+|---|---|---|
+| `foundation/` | Logging, events, worker tasks, cancellation, settings and clocks | `wowee_foundation` |
+| `math/` | Reusable spline math | `wowee_math` |
+| `platform/` | OS paths, memory/process queries and pacing | `wowee_platform` |
+| `platform/` SDL integration | Window, keyboard, mouse and controller devices | `wowee_platform_sdl` |
+| `client/` | Startup, subsystem lifetimes, frame orchestration and wiring | `wowee_client` |
+
+Existing C++ infrastructure APIs keep their `wowee::core` namespace. Their
+header paths and library dependencies define ownership; there are no legacy
+`core/` forwarding headers. WoW coordinates, geoset rules and installation data
+paths live in `pipeline/`. The calendar owns decoded dates; `game/packed_time.hpp`
+encodes and decodes the wire format before it reaches the domain.
+The HTTPS implementation lives in `network/`, matching its `wowee_net` owner.
+
+`core::JobGroup` in Foundation manages work lifetimes and independent
+cancellation.
+The client's `AssetRequests` owns appearance request channels and GUID reuse.
+
+### 1. Application Layer (`src/client/`)
 
 **Application** (`application.hpp/cpp`) - Main controller
 - Owns all subsystems (renderer, game handler, asset manager, UI, addon manager, audio coordinator)
@@ -51,22 +72,27 @@ Wowee follows a modular architecture with clear separation of concerns:
 - Runs update/render loop, paced by `FramePacer` (`frame_pacer.hpp/cpp`): integer-nanosecond deltas off a monotonic clock, and a frame cap that sleeps most of the wait and spins the rest
 - Populates `GameServices` struct and passes to `GameHandler` at construction
 
-**Window** (`window.hpp/cpp`) - SDL3 + Vulkan wrapper
-- Creates SDL3 window with Vulkan surface
-- Owns `VkContext` (Vulkan device, swapchain, render passes)
+**Window** (`platform/window.hpp/cpp`) - SDL3 window
+- Creates the native window and loads the platform's Vulkan library
+- Owns no graphics context and includes no renderer headers
 - Handles resize events; carries the window size in points and the drawable size in pixels, which differ on high-density displays
 
-**Input** (`input.hpp/cpp`) - Input management
+**WindowSurface** (`rendering/window_surface.hpp/cpp`) - Vulkan presentation
+- Adapts the platform window to the renderer's `RenderSurface` interface
+- Owns `VkContext` and updates its swapchain when the window's mode or vsync preference changes
+- `Application` and the editor own their window and surface separately. The renderer and interface release their resources before the surface, which releases Vulkan before the native window is destroyed
+
+**Input** (`platform/input.hpp/cpp`) - Input management
 - Keyboard state tracking (SDL scancodes)
 - Mouse position, buttons (1-based SDL indices), wheel delta
 - Per-frame delta calculation
 - Virtual keys and mouse buttons, which the touch controls and the gamepad press on the player's behalf
 
-**Gamepad** (`gamepad.hpp/cpp`) - SDL game controller device
+**Gamepad** (`platform/gamepad.hpp/cpp`) - SDL game controller device
 - Open, hot-plug, radial stick deadzone, trigger and button state per frame
 - `ui::GamepadControls` (`src/ui/gamepad_controls.cpp`) turns it into virtual keys, camera motion and a pointer. The default scheme (`src/ui/gamepad_bindings.cpp`) is seeded into the interface's key bindings, where it can be rebound
 
-**Logger** (`logger.hpp/cpp`) - Thread-safe logging
+**Logger** (`foundation/logger.hpp/cpp`) - Thread-safe logging
 - Multiple log levels (DEBUG, INFO, WARNING, ERROR, FATAL)
 - File output to `logs/wowee.log` (`WOWEE_LOG_FILE` renames it), or a per-user log directory when the working directory is not writable
 - Configurable via `WOWEE_LOG_LEVEL` env var

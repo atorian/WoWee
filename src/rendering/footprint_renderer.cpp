@@ -2,7 +2,7 @@
 #include "collision/collision_world.hpp"
 #include "pipeline/m2_loader.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "pipeline/dbc_loader.hpp"

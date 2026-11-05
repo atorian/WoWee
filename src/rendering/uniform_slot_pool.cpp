@@ -1,6 +1,6 @@
 #include "rendering/uniform_slot_pool.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 #include <algorithm>
 

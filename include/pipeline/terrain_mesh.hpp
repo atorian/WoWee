@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "pipeline/adt_loader.hpp"
 
 #include <glm/glm.hpp>

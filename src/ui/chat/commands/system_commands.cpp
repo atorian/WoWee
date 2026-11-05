@@ -6,7 +6,7 @@
 #include "ui/ui_services.hpp"
 #include "game/game_handler.hpp"
 #include "addons/addon_manager.hpp"
-#include "core/application.hpp"
+#include "client/application.hpp"
 #include "ui/framexml_takeover.hpp"
 #include "ui/chat/chat_utils.hpp"
 #include "rendering/camera_controller.hpp"

@@ -1,5 +1,5 @@
 #include "pipeline/wowee_battlegrounds.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "pipeline/wowee_binary_io.hpp"
 
 #include <cstdio>

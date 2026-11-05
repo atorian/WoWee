@@ -1,8 +1,8 @@
 // Native GPU/lifetime tests of the client's real previews/maps, without a realm.
 // Built only with WOWEE_BUILD_RENDER_CLIENT_PROBE=ON.
-#include "core/application.hpp"
-#include "core/window.hpp"
-#include "core/frame_observer.hpp"
+#include "client/application.hpp"
+#include "platform/window.hpp"
+#include "client/frame_observer.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/performance_hud.hpp"
 #include "rendering/character_preview.hpp"

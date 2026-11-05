@@ -6,7 +6,7 @@
 #include "rendering/world_map/layers/taxi_node_layer.hpp"
 #include "game/item_text.hpp"
 #include "rendering/world_map/coordinate_projection.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include <imgui.h>
 #include <cmath>
 #include <cstdio>

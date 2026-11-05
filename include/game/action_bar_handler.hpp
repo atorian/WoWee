@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 #include "game/opcode_table.hpp"
 #include "game/spell_defines.hpp"
 

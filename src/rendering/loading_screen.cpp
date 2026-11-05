@@ -3,7 +3,7 @@
 
 #include <SDL3/SDL_vulkan.h>
 #include "rendering/vk_context.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <imgui_impl_vulkan.h>

@@ -9,9 +9,9 @@ extern "C" {
 #include "addons/addon_globals.hpp"
 #include "ui/framexml_takeover.hpp"
 #include "game/game_handler.hpp"
-#include "core/logger.hpp"
-#include "core/window.hpp"
-#include "core/config_paths.hpp"
+#include "foundation/logger.hpp"
+#include "platform/window.hpp"
+#include "platform/config_paths.hpp"
 #include <sstream>
 #include "ui/xml_parser.hpp"
 #include "ui/framexml_emitter.hpp"

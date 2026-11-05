@@ -14,8 +14,8 @@
 #include "game/packet_parsers.hpp"
 #include "game/entity.hpp"
 #include "game/opcode_table.hpp"
-#include "core/logger.hpp"
-#include "core/app_clock.hpp"
+#include "foundation/logger.hpp"
+#include "foundation/app_clock.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cctype>
@@ -25,8 +25,8 @@
 #include <iomanip>
 #include <sstream>
 #include <ctime>
-#include "core/local_time.hpp"
-#include "core/cvar_store.hpp"
+#include "foundation/local_time.hpp"
+#include "foundation/cvar_store.hpp"
 
 namespace wowee {
 namespace game {

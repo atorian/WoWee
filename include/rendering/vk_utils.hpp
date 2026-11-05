@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-#include "core/env_flag.hpp"
+#include "foundation/env_flag.hpp"
 #include "rendering/gpu_allocations.hpp"
 
 namespace wowee {
@@ -274,7 +274,7 @@ inline size_t envSizeOrDefault(const char* name, size_t defValue) {
 // visual artifact to the subsystem that draws it: turn one off and see whether
 // the artifact survives.
 //
-// Through the one reader in core/env_flag.hpp. This was a third rule: only the
+// Through the one reader in foundation/env_flag.hpp. This was a third rule: only the
 // exact string "0" disabled, so WOWEE_M2_NO_PARTICLES=off switched the
 // suppression on - the opposite of what anyone typing it means, on a flag
 // whose whole job is to be turned on and off while chasing an artifact.

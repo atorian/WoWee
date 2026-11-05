@@ -5,7 +5,7 @@
 #include <cmath>
 #include <limits>
 
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "pipeline/client_random.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/terrain_mesh.hpp"

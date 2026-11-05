@@ -5,7 +5,7 @@ $root = 'D:\games\WoWee'
 Set-Location "$root\build"
 New-Item -ItemType Directory -Force -Path 'orgrimmar-light-v2-objects' | Out-Null
 $commands = Get-Content compile_commands.json -Raw | ConvertFrom-Json
-foreach ($file in @('src/core/application.cpp','src/rendering/lighting_manager.cpp')) {
+foreach ($file in @('src/client/application.cpp','src/rendering/lighting_manager.cpp')) {
     $entry = $commands | Where-Object { $_.file -eq "$($root.Replace('\','/'))/$file" -and $_.output -match '/wowee\.dir/' } | Select-Object -First 1
     if (-not $entry) { throw "Missing command: $file" }
     $object = 'orgrimmar-light-v2-objects/' + $file + '.obj'
@@ -22,7 +22,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Light tests failed' }
 $baseline = Get-Content fast-session-client.rsp
 foreach ($variant in @('fixed')) {
     $lines = foreach ($line in $baseline) {
-        if ($line -eq '"fast-session-link/src/core/application.cpp.obj"') { '"orgrimmar-light-v2-objects/src/core/application.cpp.obj"' }
+        if ($line -eq '"fast-session-link/src/client/application.cpp.obj"') { '"orgrimmar-light-v2-objects/src/client/application.cpp.obj"' }
         elseif ($variant -eq 'fixed' -and $line -eq '"fast-session-link/src/rendering/lighting_manager.cpp.obj"') { '"orgrimmar-light-v2-objects/src/rendering/lighting_manager.cpp.obj"' }
         else { $line }
     }

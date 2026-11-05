@@ -5,7 +5,7 @@
 
 #include "game_harness.hpp"
 
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "game/entity.hpp"
 #include "game/game_events.hpp"
 #include "game/action_bar_handler.hpp"

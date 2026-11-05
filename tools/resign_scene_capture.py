@@ -3,7 +3,7 @@
 
 A capture signs the files it was taken against - the expansion's manifest and
 each realm patch archive - with their size and last write, and a replay
-refuses one that is not as signed (src/core/scene_capture_files.cpp).
+refuses one that is not as signed (src/client/scene_capture_files.cpp).
 
 Captures before 2026-11-01 signed the write in the local-time form of
 libstdc++'s std::filesystem clock on Windows, which moves by an hour for an

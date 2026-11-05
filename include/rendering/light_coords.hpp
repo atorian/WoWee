@@ -20,11 +20,11 @@
 ///
 /// The axis mapping is checked against zones whose world coordinates are
 /// known. It is the same mirrored-and-swapped pairing the terrain uses, and
-/// the one core/coordinates.hpp warns not to "fix".
+/// the one pipeline/coordinates.hpp warns not to "fix".
 
 #include <glm/glm.hpp>
 
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 
 namespace wowee::rendering {
 

@@ -1,6 +1,6 @@
 #include "rendering/normal_map_builder.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 #include <algorithm>
 #include <exception>

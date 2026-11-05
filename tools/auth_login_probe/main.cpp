@@ -4,7 +4,7 @@
 #include "auth/srp.hpp"
 #include "network/tcp_socket.hpp"
 #include "network/packet.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 #include <algorithm>
 #include <atomic>

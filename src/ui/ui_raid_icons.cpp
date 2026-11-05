@@ -1,7 +1,7 @@
 #include "ui/ui_raid_icons.hpp"
 #include "ui/ui_texture_load.hpp"
 
-#include "core/application.hpp"
+#include "client/application.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "rendering/vk_context.hpp"
 

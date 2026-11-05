@@ -5,7 +5,7 @@
 #include "ui/chat/game_state_adapter.hpp"
 #include "ui/chat/input_modifier_adapter.hpp"
 #include "game/game_handler.hpp"
-#include "core/application.hpp"
+#include "client/application.hpp"
 #include "rendering/renderer.hpp"
 
 namespace wowee { namespace ui {

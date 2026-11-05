@@ -1,11 +1,11 @@
 #include "rendering/overlay_system.hpp"
 #include "collision/collision_world.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_shader.hpp"
 #include "rendering/vk_pipeline.hpp"
 #include "rendering/vk_utils.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
 #include <vector>

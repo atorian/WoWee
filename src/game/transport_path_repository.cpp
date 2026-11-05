@@ -3,8 +3,8 @@
 // Ported from TransportManager (path management subset).
 #include "game/transport_path_repository.hpp"
 #include "game/game_data.hpp"
-#include "core/coordinates.hpp"
-#include "core/logger.hpp"
+#include "pipeline/coordinates.hpp"
+#include "foundation/logger.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/asset_manager.hpp"
 #include <algorithm>

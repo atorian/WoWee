@@ -715,60 +715,60 @@ set(WOWEE_SOURCES
     src/collision/model_collision_cache.cpp
 
     # Core
-    src/core/application.cpp
-    src/core/movement_status.cpp
-    src/core/movement_reporting.cpp
-    src/core/original_player_mover.cpp
-    src/core/interface_resources.cpp
-    src/core/application_world_loading.cpp
-    src/core/client_main.cpp
-    src/core/client_loop.cpp
-    src/core/world_reconnect.cpp
-    src/core/login_server_renewal.cpp
-    src/core/realm_address.cpp
-    src/core/interface_input.cpp
-    src/core/client_shortcuts.cpp
-    src/core/process_stats.cpp
-    src/core/resource_telemetry.cpp
-    src/core/resource_monitor.cpp
-    src/core/benchmark_run.cpp
-    src/core/scene_replay.cpp
-    src/core/scene_capture_files.cpp
-    src/core/screen_recorder.cpp
-    src/core/entity_spawner.cpp
-    src/core/entity_spawner_player.cpp
-    src/core/entity_spawner_processing.cpp
-    src/core/appearance_composer.cpp
-    src/core/helm_visual.cpp
-    src/core/enchant_visual.cpp
-    src/core/world_loader.cpp
-    src/core/map_scope.cpp
-    src/core/character_session.cpp
-    src/core/zone_tracker.cpp
-    src/core/player_view.cpp
-    src/core/spell_presentation.cpp
-    src/core/renderer_transport_scene.cpp
-    src/core/screen_recording.cpp
-    src/core/npc_interaction_callback_handler.cpp
-    src/core/audio_callback_handler.cpp
-    src/core/entity_spawn_callback_handler.cpp
-    src/core/animation_callback_handler.cpp
-    src/core/transport_callback_handler.cpp
-    src/core/world_entry_callback_handler.cpp
-    src/core/ui_screen_callback_handler.cpp
-    src/core/window.cpp
-    src/core/input.cpp
-    src/core/gamepad.cpp
-    src/core/logger.cpp
-    src/core/memory_monitor.cpp
-    src/core/app_clock.cpp
-    src/core/frame_budget.cpp
-    src/core/config_paths.cpp
-    src/core/frame_pacer.cpp
-    src/core/https_get.cpp
-    src/core/update_check.cpp
-    src/core/realm_patches.cpp
-    src/core/realm_patch_sync.cpp
+    src/client/application.cpp
+    src/client/movement_status.cpp
+    src/client/movement_reporting.cpp
+    src/client/original_player_mover.cpp
+    src/client/interface_resources.cpp
+    src/client/application_world_loading.cpp
+    src/client/client_main.cpp
+    src/client/client_loop.cpp
+    src/client/world_reconnect.cpp
+    src/client/login_server_renewal.cpp
+    src/client/realm_address.cpp
+    src/client/interface_input.cpp
+    src/client/client_shortcuts.cpp
+    src/platform/process_stats.cpp
+    src/client/resource_telemetry.cpp
+    src/client/resource_monitor.cpp
+    src/client/benchmark_run.cpp
+    src/client/scene_replay.cpp
+    src/client/scene_capture_files.cpp
+    src/client/screen_recorder.cpp
+    src/client/entity_spawner.cpp
+    src/client/entity_spawner_player.cpp
+    src/client/entity_spawner_processing.cpp
+    src/client/appearance_composer.cpp
+    src/client/helm_visual.cpp
+    src/client/enchant_visual.cpp
+    src/client/world_loader.cpp
+    src/client/map_scope.cpp
+    src/client/character_session.cpp
+    src/client/zone_tracker.cpp
+    src/client/player_view.cpp
+    src/client/spell_presentation.cpp
+    src/client/renderer_transport_scene.cpp
+    src/client/screen_recording.cpp
+    src/client/npc_interaction_callback_handler.cpp
+    src/client/audio_callback_handler.cpp
+    src/client/entity_spawn_callback_handler.cpp
+    src/client/animation_callback_handler.cpp
+    src/client/transport_callback_handler.cpp
+    src/client/world_entry_callback_handler.cpp
+    src/client/ui_screen_callback_handler.cpp
+    src/platform/window.cpp
+    src/platform/input.cpp
+    src/platform/gamepad.cpp
+    src/foundation/logger.cpp
+    src/platform/memory_monitor.cpp
+    src/foundation/app_clock.cpp
+    src/foundation/frame_budget.cpp
+    src/platform/config_paths.cpp
+    src/platform/frame_pacer.cpp
+    src/network/https_get.cpp
+    src/client/update_check.cpp
+    src/client/realm_patches.cpp
+    src/client/realm_patch_sync.cpp
 
     # Math
     src/math/spline.cpp
@@ -789,7 +789,7 @@ set(WOWEE_SOURCES
     src/mcp/mcp_server.cpp
     src/mcp/http_transport.cpp
     src/mcp/main_thread_queue.cpp
-    src/core/agent_bridge.cpp
+    src/client/agent_bridge.cpp
     src/ui/agent_controls.cpp
     src/ui/agent_controls_apply.cpp
     src/auth/srp.cpp
@@ -902,8 +902,8 @@ set(WOWEE_SOURCES
     src/pipeline/dds_loader.cpp
     src/pipeline/dbc_loader.cpp
     src/pipeline/asset_manager.cpp
-    src/pipeline/stb_image_impl.cpp
-    src/pipeline/stb_image_write_impl.cpp
+    src/third_party/stb_image_impl.cpp
+    src/third_party/stb_image_write_impl.cpp
     src/pipeline/asset_inventory.cpp
     src/pipeline/asset_manifest.cpp
     src/pipeline/loose_file_reader.cpp
@@ -1259,8 +1259,8 @@ set(WOWEE_SOURCES
     src/ui/chat/chat_utils.cpp
     src/ui/chat/chat_bubble_manager.cpp
     src/ui/plural_escape.cpp
-    src/core/open_url.cpp
-    src/core/click_drag.cpp
+    src/platform/open_url.cpp
+    src/client/click_drag.cpp
     src/ui/chat/chat_command_registry.cpp
     src/ui/chat/macro_evaluator.cpp
     src/ui/chat/macro_eval_convenience.cpp
@@ -1318,10 +1318,11 @@ set(WOWEE_SOURCES
 # link them instead of compiling the same files again. The editor alone used
 # to compile all 170 pipeline files a second time.
 #
-#   wowee_base      the infrastructure every module may use: the logger and
-#                   the memory monitor; coordinates, data paths and the
-#                   profiler are header-only and come with its include path
-#   wowee_pipeline  asset formats and loaders; depends on wowee_base only
+#   wowee_foundation logging, events, tasks, settings and clocks
+#   wowee_math      reusable spline math
+#   wowee_platform  OS paths, memory/process queries and frame pacing
+#   wowee_platform_sdl SDL windows and input; no renderer dependency
+#   wowee_pipeline  WoW asset formats and loaders, on the engine facilities
 #   wowee_collision the solid world: terrain heights, building and doodad
 #                   shapes and placements, and every floor, wall and ray query
 #                   over them; depends on wowee_pipeline only
@@ -1334,26 +1335,41 @@ set(WOWEE_SOURCES
 #                   moves (ViewerMotion) rather than asking, so a scene can be
 #                   drawn without the client - see tools/scene_render.
 #
-# Nothing in src/pipeline includes another module, which is what makes it the
-# first to come out. The rest of the client stays one target until the cycles
-# between its modules are broken (issues #33, #34).
+# Client startup, lifetime management and wiring live in src/client. Engine
+# facilities have their own physical directories and never include client/.
 #
 # src/rendering also holds the client's presentation of the player and its
 # interface images, which stay in the client: they drive the renderer from
 # input, animation state, sound and the game. tools/render_dependency_check.py
 # fails the build's check if anything in wowee_render reaches for the client.
-set(WOWEE_BASE_SOURCES
-    src/core/logger.cpp
-    src/core/memory_monitor.cpp
-    src/core/app_clock.cpp
-    src/core/frame_budget.cpp
-    src/core/config_paths.cpp
-    src/core/cvar_store.cpp
-    src/math/spline.cpp
+set(WOWEE_FOUNDATION_SOURCES
+    src/foundation/logger.cpp
+    src/foundation/app_clock.cpp
+    src/foundation/frame_budget.cpp
+    src/foundation/cvar_store.cpp
 )
+set(WOWEE_MATH_SOURCES src/math/spline.cpp)
+set(WOWEE_PLATFORM_CORE_SOURCES
+    src/platform/config_paths.cpp
+    src/platform/memory_monitor.cpp
+    src/platform/process_stats.cpp
+    src/platform/frame_pacer.cpp
+    src/platform/open_url.cpp
+)
+set(WOWEE_PLATFORM_SDL_SOURCES
+    src/platform/window.cpp
+    src/platform/input.cpp
+    src/platform/gamepad.cpp
+)
+set(WOWEE_IMAGE_CODEC_SOURCES
+    src/third_party/stb_image_impl.cpp
+    src/third_party/stb_image_write_impl.cpp
+)
+list(REMOVE_ITEM WOWEE_SOURCES ${WOWEE_FOUNDATION_SOURCES} ${WOWEE_MATH_SOURCES}
+    ${WOWEE_PLATFORM_CORE_SOURCES} ${WOWEE_PLATFORM_SDL_SOURCES} ${WOWEE_IMAGE_CODEC_SOURCES})
 set(WOWEE_PIPELINE_SOURCES ${WOWEE_SOURCES})
 list(FILTER WOWEE_PIPELINE_SOURCES INCLUDE REGEX "^src/pipeline/")
-list(REMOVE_ITEM WOWEE_SOURCES ${WOWEE_BASE_SOURCES} ${WOWEE_PIPELINE_SOURCES})
+list(REMOVE_ITEM WOWEE_SOURCES ${WOWEE_FOUNDATION_SOURCES} ${WOWEE_PIPELINE_SOURCES})
 set(WOWEE_COLLISION_SOURCES ${WOWEE_SOURCES})
 list(FILTER WOWEE_COLLISION_SOURCES INCLUDE REGEX "^src/collision/")
 list(REMOVE_ITEM WOWEE_SOURCES ${WOWEE_COLLISION_SOURCES})
@@ -1366,6 +1382,7 @@ set(WOWEE_RENDER_CLIENT_SOURCES
     src/rendering/spell_visual_state.cpp
     src/rendering/spell_visual_system.cpp
 )
+list(APPEND WOWEE_SOURCES src/rendering/window_surface.cpp)
 set(WOWEE_RENDER_SOURCES ${WOWEE_SOURCES})
 list(FILTER WOWEE_RENDER_SOURCES INCLUDE REGEX "^src/rendering/")
 list(FILTER WOWEE_RENDER_SOURCES EXCLUDE REGEX "^src/rendering/(animation|world_map)/")
@@ -1374,12 +1391,13 @@ list(REMOVE_ITEM WOWEE_SOURCES ${WOWEE_RENDER_SOURCES})
 # wowee_protocol: the wire. Packets, their builders and parsers for each
 # expansion, the opcode and update-field tables, the movement splines in them,
 # the session crypto and the expansion profiles that choose between layouts.
-# Depends on wowee_base only. The packet tests link it: they each compiled
-# these fourteen files themselves, about a third of a full build's work.
+# Packet tests link this library without the game session or client. Calendar
+# packet decoding belongs here too, alongside the other wire parsers.
 set(WOWEE_PROTOCOL_SOURCES
     src/network/packet.cpp
     src/auth/crypto.cpp
     src/game/character.cpp
+    src/game/calendar_data.cpp
     src/game/expansion_profile.cpp
     src/game/opcode_table.cpp
     src/game/update_field_table.cpp
@@ -1405,7 +1423,7 @@ set(WOWEE_NET_SOURCES
     src/network/world_socket.cpp
     src/auth/rc4.cpp
     src/auth/vanilla_crypt.cpp
-    src/core/https_get.cpp
+    src/network/https_get.cpp
 )
 list(REMOVE_ITEM WOWEE_SOURCES ${WOWEE_NET_SOURCES})
 # wowee_game: the game - the session, the domain handlers and the state they
@@ -1418,10 +1436,10 @@ list(FILTER WOWEE_GAME_SOURCES INCLUDE REGEX "^src/game/")
 list(REMOVE_ITEM WOWEE_SOURCES ${WOWEE_GAME_SOURCES})
 
 set(WOWEE_HEADERS
-    include/core/application.hpp
-    include/core/window.hpp
-    include/core/input.hpp
-    include/core/logger.hpp
+    include/client/application.hpp
+    include/platform/window.hpp
+    include/platform/input.hpp
+    include/foundation/logger.hpp
 
     include/network/socket.hpp
     include/network/packet.hpp
@@ -1545,7 +1563,7 @@ set(WOWEE_HEADERS
 set(WOWEE_MACOS_SOURCES)
 if(APPLE)
     enable_language(OBJCXX)
-    set(WOWEE_MACOS_SOURCES src/core/macos_platform.mm)
+    set(WOWEE_MACOS_SOURCES src/platform/macos_platform.mm)
 endif()
 
 set(WOWEE_PLATFORM_SOURCES)
@@ -1610,7 +1628,7 @@ endif()
 # every member nothing refers to, and a program has to be the same set of
 # objects whatever it reaches first. A change to the client compiles once and
 # every program relinks.
-add_library(wowee_client_objects OBJECT ${WOWEE_SOURCES} ${WOWEE_HEADERS} ${WOWEE_MACOS_SOURCES})
+add_library(wowee_client_objects OBJECT ${WOWEE_SOURCES} ${WOWEE_HEADERS})
 add_library(wowee_client STATIC $<TARGET_OBJECTS:wowee_client_objects>)
 target_link_libraries(wowee_client PUBLIC wowee_client_objects)
 
@@ -1626,7 +1644,7 @@ endif()
 target_link_libraries(wowee PRIVATE wowee_client_objects)
 
 # Tracy profiler - zero overhead when WOWEE_ENABLE_TRACY is OFF. Set up on
-# wowee_base, which the client and every tool linking the libraries share.
+# wowee_foundation, which the client and every tool linking the libraries share.
 if(WOWEE_ENABLE_TRACY)
     message(STATUS "Tracy profiler: ENABLED")
 endif()
@@ -1671,10 +1689,10 @@ add_dependencies(wowee wowee_runtime_assets)
 # Version header generated from `git describe`. Regenerated on every build (the
 # script rewrites the header only when the version changed), so tagging a release
 # is enough to update the version shown in the client.
-set(WOWEE_VERSION_HEADER ${CMAKE_BINARY_DIR}/generated/core/version.hpp)
+set(WOWEE_VERSION_HEADER ${CMAKE_BINARY_DIR}/generated/client/version.hpp)
 set(WOWEE_VERSION_SCRIPT_ARGS
     -DSRC_DIR=${CMAKE_SOURCE_DIR}
-    -DIN_FILE=${CMAKE_SOURCE_DIR}/include/core/version.hpp.in
+    -DIN_FILE=${CMAKE_SOURCE_DIR}/include/client/version.hpp.in
     -DOUT_FILE=${WOWEE_VERSION_HEADER}
     -P ${CMAKE_SOURCE_DIR}/cmake/GitVersion.cmake
 )
@@ -1742,7 +1760,7 @@ set(WOWEE_PCH_STD
 target_precompile_headers(wowee_client_objects PRIVATE
     ${WOWEE_PCH_STD}
     <glm/glm.hpp>
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/core/logger.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/foundation/logger.hpp
 )
 # Vendored headers as SYSTEM to suppress third-party warnings
 target_include_directories(wowee_client_objects SYSTEM PUBLIC
@@ -1782,18 +1800,9 @@ endif()
 if(UNIX AND NOT APPLE AND NOT ANDROID)
     target_link_libraries(wowee_client_objects PRIVATE X11)
 endif()
-if(APPLE)
-    target_link_libraries(wowee_client_objects PRIVATE "-framework Foundation")
-endif()
 if(WIN32)
-    # winmm: timeBeginPeriod/timeEndPeriod, which the frame pacer uses to ask
-    # for a 1ms sleep granularity. Windows defaults to a 15.6ms timer tick -
-    # more than two whole frames at 144Hz - and without this the link fails
-    # on __imp_timeBeginPeriod rather than the cap simply being coarse.
-    #
-    # No SDL main library: SDL3 has none, its WinMain shim being header-only
-    # in SDL_main.h, where SDL2 kept it in a separate SDL2main.
-    target_link_libraries(wowee_client_objects PRIVATE ws2_32 winmm)
+    # No SDL main library: SDL3's WinMain shim is header-only.
+    target_link_libraries(wowee_client_objects PRIVATE ws2_32)
 endif()
 
 target_link_libraries(wowee_client_objects PUBLIC imgui)
@@ -1829,20 +1838,40 @@ elseif(glm_FOUND)
     target_include_directories(wowee_client_objects PUBLIC ${GLM_INCLUDE_DIRS})
 endif()
 
-# wowee_base and wowee_pipeline: see where their sources are split off
+# wowee_foundation and wowee_pipeline: see where their sources are split off
 # WOWEE_SOURCES. Static, and position-independent on Android, where they are
 # linked into the client's shared library.
-add_library(wowee_base STATIC ${WOWEE_BASE_SOURCES})
-target_include_directories(wowee_base PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_compile_features(wowee_base PUBLIC cxx_std_20)
-target_link_libraries(wowee_base PUBLIC Threads::Threads)
+add_library(wowee_foundation STATIC ${WOWEE_FOUNDATION_SOURCES})
+target_include_directories(wowee_foundation PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_compile_features(wowee_foundation PUBLIC cxx_std_20)
+target_link_libraries(wowee_foundation PUBLIC Threads::Threads)
+add_library(wowee_math STATIC ${WOWEE_MATH_SOURCES})
+target_link_libraries(wowee_math PUBLIC wowee_foundation)
 if(TARGET glm::glm-header-only)
-    target_link_libraries(wowee_base PUBLIC glm::glm-header-only)
+    target_link_libraries(wowee_math PUBLIC glm::glm-header-only)
 elseif(TARGET glm::glm)
-    target_link_libraries(wowee_base PUBLIC glm::glm)
+    target_link_libraries(wowee_math PUBLIC glm::glm)
 elseif(glm_FOUND)
-    target_include_directories(wowee_base PUBLIC ${GLM_INCLUDE_DIRS})
+    target_include_directories(wowee_math PUBLIC ${GLM_INCLUDE_DIRS})
 endif()
+# OS services are usable by headless programs without SDL or a renderer.
+add_library(wowee_platform STATIC ${WOWEE_PLATFORM_CORE_SOURCES})
+target_link_libraries(wowee_platform PUBLIC wowee_foundation)
+if(WIN32)
+    target_link_libraries(wowee_platform PUBLIC winmm psapi shell32)
+endif()
+
+# The single stb implementation serves file loaders and the SDL window icon.
+add_library(wowee_image_codec STATIC ${WOWEE_IMAGE_CODEC_SOURCES})
+target_include_directories(wowee_image_codec SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/extern)
+
+add_library(wowee_platform_sdl STATIC ${WOWEE_PLATFORM_SDL_SOURCES} ${WOWEE_MACOS_SOURCES})
+target_link_libraries(wowee_platform_sdl PUBLIC wowee_platform SDL3::SDL3
+    PRIVATE wowee_image_codec)
+if(APPLE)
+    target_link_libraries(wowee_platform_sdl PRIVATE "-framework Foundation")
+endif()
+
 # The profiler macros expand differently with Tracy on, so every library that
 # uses them has to agree with the client, and the runtime goes with the
 # definition: a tool linking instrumented pipeline objects needs TracyClient
@@ -1851,7 +1880,7 @@ if(WOWEE_ENABLE_TRACY)
     if(NOT EXISTS ${CMAKE_SOURCE_DIR}/extern/tracy/public/TracyClient.cpp)
         message(FATAL_ERROR "WOWEE_ENABLE_TRACY is on but extern/tracy is missing - run tools/fetch_tracy.sh")
     endif()
-    target_sources(wowee_base PRIVATE ${CMAKE_SOURCE_DIR}/extern/tracy/public/TracyClient.cpp)
+    target_sources(wowee_foundation PRIVATE ${CMAKE_SOURCE_DIR}/extern/tracy/public/TracyClient.cpp)
     # Tracy's own source, not ours: under the project's -Werror its Windows
     # GetProcAddress casts and unused parameters stop the build.
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -1861,38 +1890,38 @@ if(WOWEE_ENABLE_TRACY)
         set_source_files_properties(${CMAKE_SOURCE_DIR}/extern/tracy/public/TracyClient.cpp
             PROPERTIES COMPILE_OPTIONS "/w")
     endif()
-    target_compile_definitions(wowee_base PUBLIC TRACY_ENABLE)
-    target_include_directories(wowee_base SYSTEM PUBLIC ${CMAKE_SOURCE_DIR}/extern/tracy/public)
-    target_link_libraries(wowee_base PUBLIC ${CMAKE_DL_LIBS})
+    target_compile_definitions(wowee_foundation PUBLIC TRACY_ENABLE)
+    target_include_directories(wowee_foundation SYSTEM PUBLIC ${CMAKE_SOURCE_DIR}/extern/tracy/public)
+    target_link_libraries(wowee_foundation PUBLIC ${CMAKE_DL_LIBS})
     # Its socket to the profiler and its symbol resolution for callstacks.
     if(WIN32)
-        target_link_libraries(wowee_base PUBLIC ws2_32 dbghelp)
+        target_link_libraries(wowee_foundation PUBLIC ws2_32 dbghelp)
     endif()
 endif()
 
 # wowee_contacts: the friend, ignore and mute lists - their domain model and
 # the service the protocol, the interface and the addon layer reach them
-# through. On wowee_base only, so its tests link nothing of the client.
+# through. On wowee_foundation only, so its tests link nothing of the client.
 set(WOWEE_CONTACTS_SOURCES
     src/contacts/domain/contact_list.cpp
     src/contacts/services/contacts_service.cpp
 )
 add_library(wowee_contacts STATIC ${WOWEE_CONTACTS_SOURCES})
-target_link_libraries(wowee_contacts PUBLIC wowee_base)
+target_link_libraries(wowee_contacts PUBLIC wowee_foundation)
 # wowee_who: /who - its last answer, where answers go, and the query.
 set(WOWEE_WHO_SOURCES
     src/who/domain/who_list.cpp
     src/who/services/who_service.cpp
 )
 add_library(wowee_who STATIC ${WOWEE_WHO_SOURCES})
-target_link_libraries(wowee_who PUBLIC wowee_base)
+target_link_libraries(wowee_who PUBLIC wowee_foundation)
 # wowee_duel: a duel the player is asked to or in, its countdown and answers.
 set(WOWEE_DUEL_SOURCES
     src/duel/domain/duel.cpp
     src/duel/services/duel_service.cpp
 )
 add_library(wowee_duel STATIC ${WOWEE_DUEL_SOURCES})
-target_link_libraries(wowee_duel PUBLIC wowee_base)
+target_link_libraries(wowee_duel PUBLIC wowee_foundation)
 # wowee_petition: guild and arena charters - the registrar's offer and the
 # signatures on the charter shown.
 set(WOWEE_PETITION_SOURCES
@@ -1900,14 +1929,14 @@ set(WOWEE_PETITION_SOURCES
     src/petition/services/petition_service.cpp
 )
 add_library(wowee_petition STATIC ${WOWEE_PETITION_SOURCES})
-target_link_libraries(wowee_petition PUBLIC wowee_base)
+target_link_libraries(wowee_petition PUBLIC wowee_foundation)
 # wowee_arena: the player's arena teams - their standings and rosters.
 set(WOWEE_ARENA_SOURCES
     src/arena/domain/arena_teams.cpp
     src/arena/services/arena_service.cpp
 )
 add_library(wowee_arena STATIC ${WOWEE_ARENA_SOURCES})
-target_link_libraries(wowee_arena PUBLIC wowee_base)
+target_link_libraries(wowee_arena PUBLIC wowee_foundation)
 # wowee_battleground: the battleground queues, what battlemasters list, the
 # scoreboard and everyone's position on the map.
 set(WOWEE_BATTLEGROUND_SOURCES
@@ -1915,7 +1944,7 @@ set(WOWEE_BATTLEGROUND_SOURCES
     src/battleground/services/battleground_service.cpp
 )
 add_library(wowee_battleground STATIC ${WOWEE_BATTLEGROUND_SOURCES})
-target_link_libraries(wowee_battleground PUBLIC wowee_base)
+target_link_libraries(wowee_battleground PUBLIC wowee_foundation)
 # wowee_lfg: the dungeon finder - the queue, the proposal, the role check,
 # the vote to kick, and what it pays and forbids.
 set(WOWEE_LFG_SOURCES
@@ -1923,7 +1952,7 @@ set(WOWEE_LFG_SOURCES
     src/lfg/services/lfg_service.cpp
 )
 add_library(wowee_lfg STATIC ${WOWEE_LFG_SOURCES})
-target_link_libraries(wowee_lfg PUBLIC wowee_base)
+target_link_libraries(wowee_lfg PUBLIC wowee_foundation)
 # wowee_calendar: the calendar the server sends, the event open, and the
 # placement of a day's rows.
 set(WOWEE_CALENDAR_SOURCES
@@ -1932,7 +1961,7 @@ set(WOWEE_CALENDAR_SOURCES
     src/calendar/services/calendar_service.cpp
 )
 add_library(wowee_calendar STATIC ${WOWEE_CALENDAR_SOURCES})
-target_link_libraries(wowee_calendar PUBLIC wowee_base)
+target_link_libraries(wowee_calendar PUBLIC wowee_foundation)
 # wowee_group: the player's party or raid - its roster and members' stats,
 # the pending invite, the ready check and the raid target markers.
 set(WOWEE_GROUP_SOURCES
@@ -1940,7 +1969,7 @@ set(WOWEE_GROUP_SOURCES
     src/group/services/group_service.cpp
 )
 add_library(wowee_group STATIC ${WOWEE_GROUP_SOURCES})
-target_link_libraries(wowee_group PUBLIC wowee_base)
+target_link_libraries(wowee_group PUBLIC wowee_foundation)
 # wowee_guild: the player's guild - membership, the roster, the invite, what
 # its members did and the rank editor - and other guilds' names.
 set(WOWEE_GUILD_SOURCES
@@ -1949,7 +1978,7 @@ set(WOWEE_GUILD_SOURCES
     src/guild/services/guild_service.cpp
 )
 add_library(wowee_guild STATIC ${WOWEE_GUILD_SOURCES})
-target_link_libraries(wowee_guild PUBLIC wowee_base)
+target_link_libraries(wowee_guild PUBLIC wowee_foundation)
 # wowee_auction: the auction house the player is standing at - its three
 # lists, the last search and the wait before the next.
 set(WOWEE_AUCTION_SOURCES
@@ -1957,7 +1986,7 @@ set(WOWEE_AUCTION_SOURCES
     src/auction/services/auction_service.cpp
 )
 add_library(wowee_auction STATIC ${WOWEE_AUCTION_SOURCES})
-target_link_libraries(wowee_auction PUBLIC wowee_base)
+target_link_libraries(wowee_auction PUBLIC wowee_foundation)
 # wowee_mail: the mailbox the player is at - the inbox, the letter being
 # written and its enclosures, and whether unread mail is waiting.
 set(WOWEE_MAIL_SOURCES
@@ -1966,7 +1995,7 @@ set(WOWEE_MAIL_SOURCES
     src/mail/services/mail_service.cpp
 )
 add_library(wowee_mail STATIC ${WOWEE_MAIL_SOURCES})
-target_link_libraries(wowee_mail PUBLIC wowee_base)
+target_link_libraries(wowee_mail PUBLIC wowee_foundation)
 # wowee_guild_bank: the guild vault the player is at - the tab being viewed
 # and its contents, the tab texts, the money and the logs.
 set(WOWEE_GUILD_BANK_SOURCES
@@ -1974,7 +2003,7 @@ set(WOWEE_GUILD_BANK_SOURCES
     src/guild_bank/services/guild_bank_service.cpp
 )
 add_library(wowee_guild_bank STATIC ${WOWEE_GUILD_BANK_SOURCES})
-target_link_libraries(wowee_guild_bank PUBLIC wowee_base)
+target_link_libraries(wowee_guild_bank PUBLIC wowee_foundation)
 # wowee_trade: a trade with another player - who, how far it has got, what
 # each side has put down and which side has accepted.
 set(WOWEE_TRADE_SOURCES
@@ -1982,7 +2011,7 @@ set(WOWEE_TRADE_SOURCES
     src/trade/services/trade_service.cpp
 )
 add_library(wowee_trade STATIC ${WOWEE_TRADE_SOURCES})
-target_link_libraries(wowee_trade PUBLIC wowee_base)
+target_link_libraries(wowee_trade PUBLIC wowee_foundation)
 # wowee_loot: the open loot window and what is remembered per source, and the
 # group's rolls.
 set(WOWEE_LOOT_SOURCES
@@ -1991,7 +2020,7 @@ set(WOWEE_LOOT_SOURCES
     src/loot/services/loot_service.cpp
 )
 add_library(wowee_loot STATIC ${WOWEE_LOOT_SOURCES})
-target_link_libraries(wowee_loot PUBLIC wowee_base)
+target_link_libraries(wowee_loot PUBLIC wowee_foundation)
 # wowee_achievement: the player's achievements, what an inspected player has
 # earned, and what the game's files say about each achievement.
 set(WOWEE_ACHIEVEMENT_SOURCES
@@ -2000,7 +2029,7 @@ set(WOWEE_ACHIEVEMENT_SOURCES
     src/achievement/services/achievement_service.cpp
 )
 add_library(wowee_achievement STATIC ${WOWEE_ACHIEVEMENT_SOURCES})
-target_link_libraries(wowee_achievement PUBLIC wowee_base)
+target_link_libraries(wowee_achievement PUBLIC wowee_foundation)
 # wowee_title: the titles the player knows and wears, and CharTitles.dbc's
 # names for them.
 set(WOWEE_TITLE_SOURCES
@@ -2009,7 +2038,7 @@ set(WOWEE_TITLE_SOURCES
     src/title/services/title_service.cpp
 )
 add_library(wowee_title STATIC ${WOWEE_TITLE_SOURCES})
-target_link_libraries(wowee_title PUBLIC wowee_base)
+target_link_libraries(wowee_title PUBLIC wowee_foundation)
 # wowee_reputation: the character's standings and the reputation panel's rows,
 # and what Faction.dbc says about each faction.
 set(WOWEE_REPUTATION_SOURCES
@@ -2018,7 +2047,7 @@ set(WOWEE_REPUTATION_SOURCES
     src/reputation/services/reputation_service.cpp
 )
 add_library(wowee_reputation STATIC ${WOWEE_REPUTATION_SOURCES})
-target_link_libraries(wowee_reputation PUBLIC wowee_base)
+target_link_libraries(wowee_reputation PUBLIC wowee_foundation)
 # wowee_pet: the player's pet - its bar, stance, spells and fields - and the
 # stable.
 set(WOWEE_PET_SOURCES
@@ -2026,15 +2055,15 @@ set(WOWEE_PET_SOURCES
     src/pet/services/pet_service.cpp
 )
 add_library(wowee_pet STATIC ${WOWEE_PET_SOURCES})
-target_link_libraries(wowee_pet PUBLIC wowee_base)
+target_link_libraries(wowee_pet PUBLIC wowee_foundation)
 
 add_library(wowee_pipeline STATIC ${WOWEE_PIPELINE_SOURCES})
-target_link_libraries(wowee_pipeline PUBLIC wowee_base)
+target_link_libraries(wowee_pipeline PUBLIC wowee_foundation wowee_math wowee_platform PRIVATE wowee_image_codec)
 target_include_directories(wowee_pipeline SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/extern)
 target_precompile_headers(wowee_pipeline PRIVATE
     ${WOWEE_PCH_STD}
     <glm/glm.hpp>
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/core/logger.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/foundation/logger.hpp
 )
 
 add_library(wowee_collision STATIC ${WOWEE_COLLISION_SOURCES})
@@ -2045,15 +2074,15 @@ if(MSVC)
 else()
     set_source_files_properties(src/collision/movement_contact.cpp src/collision/movement_surface.cpp src/collision/movement_facet.cpp src/collision/terrain_facets.cpp src/collision/liquid_facets.cpp src/collision/map_facets.cpp src/collision/terrain_chunk_facets.cpp src/collision/terrain_heights.cpp src/collision/m2_facets.cpp src/collision/wmo_model_facets.cpp src/collision/wmo_world_facets.cpp src/collision/doodad_facets.cpp src/collision/movement_dimensions.cpp src/collision/movement_plot.cpp src/collision/movement_frame.cpp PROPERTIES COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off")
 endif()
-target_link_libraries(wowee_collision PUBLIC wowee_pipeline wowee_base)
+target_link_libraries(wowee_collision PUBLIC wowee_pipeline wowee_foundation)
 target_precompile_headers(wowee_collision PRIVATE
     ${WOWEE_PCH_STD}
     <glm/glm.hpp>
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/core/logger.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/foundation/logger.hpp
 )
 
 add_library(wowee_render STATIC ${WOWEE_RENDER_SOURCES})
-target_link_libraries(wowee_render PUBLIC wowee_collision wowee_pipeline wowee_base SDL3::SDL3 Vulkan::Vulkan Threads::Threads)
+target_link_libraries(wowee_render PUBLIC wowee_collision wowee_pipeline wowee_foundation wowee_platform_sdl SDL3::SDL3 Vulkan::Vulkan Threads::Threads)
 # Its private headers sit beside its sources (rendering/m2_renderer_internal.h).
 target_include_directories(wowee_render PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_include_directories(wowee_render SYSTEM PUBLIC
@@ -2068,37 +2097,37 @@ endforeach()
 target_precompile_headers(wowee_render PRIVATE
     ${WOWEE_PCH_STD}
     <glm/glm.hpp>
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/core/logger.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/foundation/logger.hpp
 )
 # The shaders and assets it loads at run time are put beside the binaries that
 # use it.
 add_dependencies(wowee_render wowee_runtime_assets)
 
 add_library(wowee_protocol STATIC ${WOWEE_PROTOCOL_SOURCES})
-target_link_libraries(wowee_protocol PUBLIC wowee_base OpenSSL::Crypto ZLIB::ZLIB)
+target_link_libraries(wowee_protocol PUBLIC wowee_foundation wowee_math OpenSSL::Crypto ZLIB::ZLIB)
 target_include_directories(wowee_protocol SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/extern)
 target_precompile_headers(wowee_protocol PRIVATE
     ${WOWEE_PCH_STD}
     <glm/glm.hpp>
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/core/logger.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/foundation/logger.hpp
 )
 
 add_library(wowee_net STATIC ${WOWEE_NET_SOURCES})
-target_link_libraries(wowee_net PUBLIC wowee_protocol wowee_base OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+target_link_libraries(wowee_net PUBLIC wowee_protocol wowee_foundation OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
 if(WIN32)
     target_link_libraries(wowee_net PUBLIC ws2_32)
 endif()
 target_precompile_headers(wowee_net PRIVATE
     ${WOWEE_PCH_STD}
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/core/logger.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/foundation/logger.hpp
 )
 
 add_library(wowee_game STATIC ${WOWEE_GAME_SOURCES})
-target_link_libraries(wowee_game PUBLIC wowee_contacts wowee_who wowee_duel wowee_petition wowee_arena wowee_battleground wowee_lfg wowee_calendar wowee_group wowee_guild wowee_auction wowee_mail wowee_guild_bank wowee_trade wowee_loot wowee_achievement wowee_title wowee_reputation wowee_pet wowee_net wowee_protocol wowee_pipeline wowee_base)
+target_link_libraries(wowee_game PUBLIC wowee_contacts wowee_who wowee_duel wowee_petition wowee_arena wowee_battleground wowee_lfg wowee_calendar wowee_group wowee_guild wowee_auction wowee_mail wowee_guild_bank wowee_trade wowee_loot wowee_achievement wowee_title wowee_reputation wowee_pet wowee_net wowee_protocol wowee_pipeline wowee_foundation)
 target_precompile_headers(wowee_game PRIVATE
     ${WOWEE_PCH_STD}
     <glm/glm.hpp>
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/core/logger.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/foundation/logger.hpp
 )
 # Warden's module emulator. Optional: without it the game answers the checks
 # it can and says so for the rest.
@@ -2109,11 +2138,11 @@ if(HAVE_UNICORN)
 endif()
 
 if(ANDROID)
-    set_target_properties(wowee_base wowee_contacts wowee_who wowee_duel wowee_petition wowee_arena wowee_battleground wowee_lfg wowee_calendar wowee_group wowee_guild wowee_auction wowee_mail wowee_guild_bank wowee_trade wowee_loot wowee_achievement wowee_title wowee_reputation wowee_pet wowee_pipeline wowee_collision wowee_render wowee_protocol
+    set_target_properties(wowee_foundation wowee_math wowee_platform wowee_platform_sdl wowee_image_codec wowee_contacts wowee_who wowee_duel wowee_petition wowee_arena wowee_battleground wowee_lfg wowee_calendar wowee_group wowee_guild wowee_auction wowee_mail wowee_guild_bank wowee_trade wowee_loot wowee_achievement wowee_title wowee_reputation wowee_pet wowee_pipeline wowee_collision wowee_render wowee_protocol
                           wowee_net wowee_game PROPERTIES POSITION_INDEPENDENT_CODE ON)
 endif()
 
-target_link_libraries(wowee_client_objects PUBLIC wowee_game wowee_render wowee_collision wowee_pipeline wowee_net wowee_protocol wowee_base)
+target_link_libraries(wowee_client_objects PUBLIC wowee_game wowee_render wowee_collision wowee_pipeline wowee_net wowee_protocol wowee_foundation)
 
 # Compiler warnings.
 #
@@ -2247,7 +2276,7 @@ function(wowee_apply_client_flags target)
     endif()
 endfunction()
 
-foreach(_client_target wowee wowee_client_objects wowee_base wowee_contacts wowee_who wowee_duel wowee_petition wowee_arena wowee_battleground wowee_lfg wowee_calendar wowee_group wowee_guild wowee_auction wowee_mail wowee_guild_bank wowee_trade wowee_loot wowee_achievement wowee_title wowee_reputation wowee_pet wowee_pipeline wowee_collision wowee_render wowee_protocol wowee_net wowee_game)
+foreach(_client_target wowee wowee_client_objects wowee_foundation wowee_math wowee_platform wowee_platform_sdl wowee_image_codec wowee_contacts wowee_who wowee_duel wowee_petition wowee_arena wowee_battleground wowee_lfg wowee_calendar wowee_group wowee_guild wowee_auction wowee_mail wowee_guild_bank wowee_trade wowee_loot wowee_achievement wowee_title wowee_reputation wowee_pet wowee_pipeline wowee_collision wowee_render wowee_protocol wowee_net wowee_game)
     wowee_apply_client_flags(${_client_target})
 endforeach()
 if(WOWEE_ENABLE_ASAN)
@@ -2474,7 +2503,7 @@ wowee_apply_client_flags(scene_render)
 #
 # The game data is bin/Data unless WOWEE_GAME_DATA_DIR names it. On macOS the
 # asset extractor writes to the per-user folder the client's application
-# bundle reads (core/data_paths.hpp), while bin/Data is the tree's own Data/
+# bundle reads (pipeline/data_paths.hpp), while bin/Data is the tree's own Data/
 # with the expansion profiles alone; when that folder exists it is the default.
 set(_wowee_mac_data "$ENV{HOME}/Library/Application Support/Wowee/Data")
 if(APPLE AND EXISTS "${_wowee_mac_data}/expansions")
@@ -2949,7 +2978,7 @@ add_executable(auth_probe
     src/auth/auth_packets.cpp
     src/auth/auth_opcodes.cpp
 )
-target_link_libraries(auth_probe PRIVATE wowee_net wowee_protocol wowee_base)
+target_link_libraries(auth_probe PRIVATE wowee_net wowee_protocol wowee_foundation)
 target_include_directories(auth_probe PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
@@ -2969,7 +2998,7 @@ add_executable(auth_login_probe
     src/auth/big_num.cpp
     src/auth/srp.cpp
 )
-target_link_libraries(auth_login_probe PRIVATE wowee_net wowee_protocol wowee_base)
+target_link_libraries(auth_login_probe PRIVATE wowee_net wowee_protocol wowee_foundation)
 target_include_directories(auth_login_probe PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
@@ -3262,10 +3291,6 @@ add_executable(wowee_editor
     # Pipeline (asset loading)
     src/ui/settings_schema.cpp
 
-    # Core
-    src/core/window.cpp
-
-    ${WOWEE_MACOS_SOURCES}
 )
 target_link_libraries(wowee_editor PRIVATE wowee_render wowee_pipeline)
 target_include_directories(wowee_editor PRIVATE

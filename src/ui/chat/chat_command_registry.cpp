@@ -3,7 +3,7 @@
 #include "ui/chat/chat_command_registry.hpp"
 #include <algorithm>
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 namespace wowee { namespace ui {
 

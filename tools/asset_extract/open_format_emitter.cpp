@@ -7,7 +7,7 @@
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/adt_loader.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 #include <nlohmann/json.hpp>
 

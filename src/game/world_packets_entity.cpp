@@ -5,7 +5,7 @@
 #include "game/opcodes.hpp"
 #include "game/character.hpp"
 #include "auth/crypto.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <algorithm>
 #include <array>
 #include <cctype>

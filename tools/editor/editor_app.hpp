@@ -13,7 +13,8 @@
 #include "editor_project.hpp"
 #include "zone_manifest.hpp"
 #include "asset_browser.hpp"
-#include "core/window.hpp"
+#include "platform/window.hpp"
+#include "rendering/window_surface.hpp"
 #include "pipeline/asset_manager.hpp"
 #include <string>
 #include <memory>
@@ -138,6 +139,7 @@ private:
     void shutdownImGui();
 
     std::unique_ptr<core::Window> window_;
+    std::unique_ptr<rendering::WindowSurface> windowSurface_;
     std::unique_ptr<pipeline::AssetManager> assetManager_;
     EditorCamera camera_;
     EditorViewport viewport_;

@@ -1,6 +1,6 @@
 #include "pipeline/dds_loader.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 #include <algorithm>
 #include <cstring>

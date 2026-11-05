@@ -15,7 +15,7 @@
 #include "addons/lua_api_registrations.hpp"
 #include "addons/lua_engine.hpp"
 #include "addons/minimap_zoom.hpp"
-#include "core/cvar_store.hpp"
+#include "foundation/cvar_store.hpp"
 #include "ui/widget_tree.hpp"
 
 #include <string>

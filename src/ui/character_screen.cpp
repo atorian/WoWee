@@ -5,9 +5,9 @@
 #include "rendering/character_preview.hpp"
 #include "rendering/renderer.hpp"
 #include "pipeline/asset_manager.hpp"
-#include "core/application.hpp"
-#include "core/config_paths.hpp"
-#include "core/logger.hpp"
+#include "client/application.hpp"
+#include "platform/config_paths.hpp"
+#include "foundation/logger.hpp"
 #include "addons/addon_manager.hpp"
 #include <imgui.h>
 #include <imgui_internal.h>

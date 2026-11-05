@@ -21,7 +21,7 @@
  */
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/m2_color_track.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <cstring>
 #include <cmath>
 #include <algorithm>

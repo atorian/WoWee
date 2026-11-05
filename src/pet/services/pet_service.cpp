@@ -1,6 +1,6 @@
 #include "pet/services/pet_service.hpp"
 
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 #include "pet/domain/actions.hpp"
 
 namespace wowee::pet {

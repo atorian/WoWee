@@ -2,8 +2,8 @@
 #include "pipeline/adt_alpha.hpp"
 #include "pipeline/heap_bytes.hpp"
 #include <algorithm>
-#include "core/coordinates.hpp"
-#include "core/logger.hpp"
+#include "pipeline/coordinates.hpp"
+#include "foundation/logger.hpp"
 #include <cmath>
 
 namespace wowee {

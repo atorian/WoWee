@@ -1,7 +1,7 @@
 #include <catch_amalgamated.hpp>
 #include "game/warden_memory.hpp"
-#include "core/env.hpp"
-#include "core/logger.hpp"
+#include "foundation/env.hpp"
+#include "foundation/logger.hpp"
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>

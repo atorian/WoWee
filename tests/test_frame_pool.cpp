@@ -1,6 +1,6 @@
 #include <catch_amalgamated.hpp>
 #include "rendering/frame_pool.hpp"
-#include "core/frame_worker.hpp"
+#include "foundation/frame_worker.hpp"
 #include <atomic>
 #include <future>
 #include <memory>

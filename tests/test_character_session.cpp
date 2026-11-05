@@ -18,7 +18,7 @@
 #include "addons/interface_state_binding.hpp"
 #include "addons/lua_api_registrations.hpp"
 #include "addons/toc_parser.hpp"
-#include "core/character_identity.hpp"
+#include "client/character_identity.hpp"
 #include "game/opcodes.hpp"
 
 extern "C" {

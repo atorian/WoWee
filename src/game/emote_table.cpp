@@ -3,7 +3,7 @@
 #include "game/game_data.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/dbc_layout.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 #include <algorithm>
 #include <cctype>

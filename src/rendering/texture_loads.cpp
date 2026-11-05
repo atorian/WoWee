@@ -1,7 +1,7 @@
 #include "rendering/texture_loads.hpp"
 #include "rendering/vk_texture.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
 

@@ -10,7 +10,7 @@
 #include "rendering/vk_shader.hpp"
 #include "rendering/vk_utils.hpp"
 #include "pipeline/asset_manager.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 #include <algorithm>
 #include <cstddef>

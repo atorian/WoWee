@@ -1,11 +1,11 @@
 #include "network/world_socket.hpp"
-#include "core/env_flag.hpp"
+#include "foundation/env_flag.hpp"
 #include "network/packet.hpp"
 #include "network/net_platform.hpp"
 #include "game/opcode_table.hpp"
 #include "auth/crypto.hpp"
-#include "core/logger.hpp"
-#include "core/profiler.hpp"
+#include "foundation/logger.hpp"
+#include "foundation/profiler.hpp"
 #include <iomanip>
 #include <sstream>
 #include <cstdio>

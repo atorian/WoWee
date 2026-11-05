@@ -2,7 +2,7 @@
 // recording gateway and the real event bus. Only wowee_who is linked.
 #include <catch_amalgamated.hpp>
 
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 #include "who/services/who_service.hpp"
 
 #include <string>

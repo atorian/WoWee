@@ -8,7 +8,7 @@
 #include "rendering/sky_bodies.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/vk_context.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 namespace wowee {
 namespace rendering {

@@ -2,7 +2,7 @@
 // real event bus. Only wowee_pet is linked.
 #include <catch_amalgamated.hpp>
 
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 #include "pet/services/pet_service.hpp"
 
 #include <string>

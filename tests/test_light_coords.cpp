@@ -69,7 +69,7 @@ TEST_CASE("the volumes lighting known zones contain those zones", "[light]") {
 }
 
 TEST_CASE("the axes are mirrored and swapped, not copied", "[light]") {
-    // The pairing core/coordinates.hpp warns not to "fix": the DBC's X feeds
+    // The pairing pipeline/coordinates.hpp warns not to "fix": the DBC's X feeds
     // the world's Y and its Y feeds the world's X, both negated about the grid
     // centre. Copying them across straight is the mistake that looks right
     // because both are called X.

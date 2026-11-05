@@ -2,7 +2,7 @@
 // Extracted from WorldMap::renderImGuiOverlay (Phase 8 of refactoring plan).
 #include "rendering/world_map/layers/quest_poi_layer.hpp"
 #include "rendering/world_map/coordinate_projection.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "rendering/polygon_triangulate.hpp"
 #include <imgui.h>
 #include <vector>

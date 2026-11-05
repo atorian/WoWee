@@ -1,9 +1,9 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/base_fallback.hpp"
 #include "pipeline/dds_loader.hpp"
-#include "core/env_flag.hpp"
-#include "core/logger.hpp"
-#include "core/profiler.hpp"
+#include "foundation/env_flag.hpp"
+#include "foundation/logger.hpp"
+#include "foundation/profiler.hpp"
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>

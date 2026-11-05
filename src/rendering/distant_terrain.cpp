@@ -9,8 +9,8 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "pipeline/minimap_tile_index.hpp"
-#include "core/logger.hpp"
-#include "core/profiler.hpp"
+#include "foundation/logger.hpp"
+#include "foundation/profiler.hpp"
 #include <chrono>
 #include <cstddef>
 #include <cstdlib>

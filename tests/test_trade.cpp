@@ -2,7 +2,7 @@
 // the real event bus. Only wowee_trade is linked.
 #include <catch_amalgamated.hpp>
 
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 #include "trade/services/trade_service.hpp"
 
 #include <map>

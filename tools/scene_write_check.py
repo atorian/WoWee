@@ -22,7 +22,7 @@ import re
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-SCANNED = ("src/core", "src/ui", "src/game", "src/addons")
+SCANNED = ("src/client", "src/ui", "src/game", "src/addons")
 # What the renderer library keeps for the client's presentation and the client
 # drives - the player's animation, spell visuals, corpse dressing, effects -
 # changes the scene the same way.

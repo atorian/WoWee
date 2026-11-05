@@ -6,7 +6,7 @@
 
 #include <catch_amalgamated.hpp>
 
-#include "core/update_check.hpp"
+#include "client/update_check.hpp"
 
 using wowee::core::isNewerVersion;
 

@@ -5,7 +5,7 @@
 #include "game/game_utils.hpp"
 #include "game/packet_sender.hpp"
 #include "game/world_packets.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "network/packet.hpp"
 
 #include <algorithm>

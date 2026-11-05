@@ -4,9 +4,9 @@
 #include "auth/integrity.hpp"
 #include "network/tcp_socket.hpp"
 #include "network/packet.hpp"
-#include "core/logger.hpp"
-#include "core/data_paths.hpp"
-#include "core/string_util.hpp"
+#include "foundation/logger.hpp"
+#include "pipeline/data_paths.hpp"
+#include "foundation/string_util.hpp"
 #include <sstream>
 #include <iomanip>
 #include <algorithm>

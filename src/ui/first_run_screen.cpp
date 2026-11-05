@@ -5,7 +5,7 @@
 #include <algorithm>
 
 #include "imgui.h"
-#include "core/application.hpp"
+#include "client/application.hpp"
 #include "ui/paper_ui.hpp"
 
 namespace wowee::ui {

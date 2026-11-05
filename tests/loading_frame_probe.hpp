@@ -1,8 +1,8 @@
 #pragma once
 
-#include "core/event_bus.hpp"
-#include "core/frame_observer.hpp"
-#include "core/frame_plan.hpp"
+#include "foundation/event_bus.hpp"
+#include "client/frame_observer.hpp"
+#include "client/frame_plan.hpp"
 #include <chrono>
 #include <string>
 #include <vector>

@@ -6,7 +6,7 @@
 #include "addons/lua_api_helpers.hpp"
 #include "game/item_text.hpp"
 #include "addons/lua_engine.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <set>
 
 namespace wowee::addons {

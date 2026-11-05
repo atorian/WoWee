@@ -13,7 +13,7 @@ follow.
 | 1  | **Main thread**        | `Application::run()` (`application.cpp`, called from `main.cpp`) | Entire session                |
 | 2  | **Async network pump** | `WorldSocket::asyncPumpLoop()` started by `startAsyncPump()` inside `WorldSocket::connect()` (`world_socket.cpp`) | Connect → disconnect          |
 | 3  | **Terrain workers**    | `TerrainManager::initialize()` spawns the worker pool that runs `workerLoop()` (`terrain_manager.cpp`) | Map load → `stopWorkers()` on shutdown |
-| 4  | **Frame workers**      | `core::ThreadPool::frameWorkers()` (`include/core/thread_pool.hpp`), created on first use | Process lifetime |
+| 4  | **Frame workers**      | `core::ThreadPool::frameWorkers()` (`include/foundation/thread_pool.hpp`), created on first use | Process lifetime |
 | 5  | **I/O workers**        | `core::ThreadPool::ioWorkers()` (same header), two threads, created on first use | Process lifetime |
 | 6  | **Watchdog**           | Inline lambda `std::thread` started in `Application::run()` (`application.cpp:1291`) | Start of main loop → exit from `run()` (joined by a scope guard) |
 | 7  | **World preload**      | `WorldLoader` preload, up to four `std::thread`s held in `WorldPreload::workers` (`world_loader.cpp`) | Preload start → `cancelWorldPreload()` joins them |
@@ -117,14 +117,14 @@ follow.
 | `completedNormalMaps_` | `normalMapResultsMutex_`  | Detached threads push, main thread drains |
 | `pendingNormalMapCount_`| `std::atomic<int>`       | acq_rel ordering; the last task out signals `normalMapDoneCV_`, which `shutdown()` and `clear()` wait on |
 
-### Logger (`include/core/logger.hpp`)
+### Logger (`include/foundation/logger.hpp`)
 
 | Variable    | Guard           | Notes |
 |-------------|-----------------|-------|
 | `minLevel_` | `std::atomic<int>` | Fast path check in `shouldLog()` |
 | `fileStream`, `lastMessage_`, suppression state | `mutex` | Locked in `log()` |
 
-### Application (`src/core/application.cpp`)
+### Application (`src/client/application.cpp`)
 
 | Variable                | Guard              | Notes |
 |-------------------------|--------------------|-------|
@@ -132,7 +132,7 @@ follow.
 | `watchdogRequestRelease`| `std::atomic<bool>` | Local in `run()`. Watchdog stores, main exchanges |
 | `watchdogRunning`       | `std::atomic<bool>` | Local in `run()`. Cleared by the scope guard that joins the watchdog |
 
-### Update Check (`include/core/update_check.hpp`)
+### Update Check (`include/client/update_check.hpp`)
 
 | Variable                  | Guard            | Notes |
 |---------------------------|------------------|-------|

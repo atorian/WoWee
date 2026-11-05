@@ -24,7 +24,7 @@
 
 #include <glm/glm.hpp>
 
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "pipeline/placement_transform.hpp"
 
 using wowee::pipeline::adtPlacementMatrix;

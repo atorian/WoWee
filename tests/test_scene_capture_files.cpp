@@ -4,7 +4,7 @@
 // and nothing whose content changed.
 #include <catch_amalgamated.hpp>
 
-#include "core/scene_capture_files.hpp"
+#include "client/scene_capture_files.hpp"
 
 #include <chrono>
 #include <cstdint>

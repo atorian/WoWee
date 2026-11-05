@@ -3,7 +3,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "auction/services/auction_service.hpp"
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 
 #include <algorithm>
 #include <map>

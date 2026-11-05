@@ -81,7 +81,7 @@ set(TEST_SYSTEM_INCLUDE_DIRS
 # does not ask for the logger fails to link if its subject starts using one -
 # only survives while omitting the variable omits the symbols.
 add_library(wowee_test_common OBJECT
-    ${CMAKE_SOURCE_DIR}/src/core/logger.cpp
+    ${CMAKE_SOURCE_DIR}/src/foundation/logger.cpp
 )
 target_include_directories(wowee_test_common PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(wowee_test_common SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
@@ -189,7 +189,7 @@ wowee_add_test(test_event_bus
 # should end with, once per crossing. No logger: the owner logs what it says.
 wowee_add_test(test_resource_telemetry
     SOURCES test_resource_telemetry.cpp
-            ${CMAKE_SOURCE_DIR}/src/core/frame_budget.cpp)
+            ${CMAKE_SOURCE_DIR}/src/foundation/frame_budget.cpp)
 target_link_libraries(test_resource_telemetry PRIVATE wowee_client)
 
 # The frame budget the profile, the benchmark and scene_render report: the
@@ -197,13 +197,13 @@ target_link_libraries(test_resource_telemetry PRIVATE wowee_client)
 # the one they are part of. No logger: the owner logs the lines.
 wowee_add_test(test_frame_budget
     SOURCES test_frame_budget.cpp
-            ${CMAKE_SOURCE_DIR}/src/core/frame_budget.cpp)
+            ${CMAKE_SOURCE_DIR}/src/foundation/frame_budget.cpp)
 
 # WOWEE_BENCHMARK's run: when the flight starts and ends, where the camera
 # goes, and what the report covers. No client.
 wowee_add_test(test_benchmark_run
     SOURCES test_benchmark_run.cpp
-            ${CMAKE_SOURCE_DIR}/src/core/frame_budget.cpp)
+            ${CMAKE_SOURCE_DIR}/src/foundation/frame_budget.cpp)
 target_link_libraries(test_benchmark_run PRIVATE wowee_client)
 
 # What a scene replay accepts of the files its capture was taken against: the
@@ -211,13 +211,13 @@ target_link_libraries(test_benchmark_run PRIVATE wowee_client)
 # spelled, and nothing rewritten. No client.
 wowee_add_test(test_scene_capture_files
     SOURCES test_scene_capture_files.cpp
-            ${CMAKE_SOURCE_DIR}/src/core/scene_capture_files.cpp)
+            ${CMAKE_SOURCE_DIR}/src/client/scene_capture_files.cpp)
 
 # The pipeline cache kept between runs: checked against the device, written
 # whole or not at all.
 wowee_add_test(test_pipeline_cache_file
     SOURCES test_pipeline_cache_file.cpp)
-target_link_libraries(test_pipeline_cache_file PRIVATE wowee_render wowee_base)
+target_link_libraries(test_pipeline_cache_file PRIVATE wowee_render wowee_foundation)
 if(TARGET Vulkan::Vulkan)
     target_link_libraries(test_pipeline_cache_file PRIVATE Vulkan::Vulkan)
 endif()
@@ -234,7 +234,7 @@ target_link_libraries(test_range_allocator PRIVATE wowee_render)
 # Which of the two memory pressure levels a share of free RAM is.
 wowee_add_test(test_memory_pressure
     SOURCES test_memory_pressure.cpp)
-target_link_libraries(test_memory_pressure PRIVATE wowee_base)
+target_link_libraries(test_memory_pressure PRIVATE wowee_platform)
 
 # What the video memory is used for, from the allocator's detailed map: each
 # allocation by its usage flags, in VRAM or system memory. No device.
@@ -311,7 +311,7 @@ target_link_libraries(test_asset_inventory PRIVATE wowee_pipeline)
 # config_paths for where the executable is, which is where the assets go.
 wowee_add_test(test_data_paths
     SOURCES test_data_paths.cpp
-            ${CMAKE_SOURCE_DIR}/src/core/config_paths.cpp
+            ${CMAKE_SOURCE_DIR}/src/platform/config_paths.cpp
             ${TEST_COMMON_SOURCES})
 
 # ── test_log_privacy ────────────────────────────────────────
@@ -1557,21 +1557,21 @@ register_test_target(test_dds_sidecar)
 # them anyway, and drew every upscaled glow on a weapon as a white card.
 wowee_add_test(test_dds_override
     SOURCES test_dds_override.cpp)
-target_link_libraries(test_dds_override PRIVATE wowee_pipeline wowee_base)
+target_link_libraries(test_dds_override PRIVATE wowee_pipeline wowee_foundation)
 
 # ── test_m2_model_cache ──────────────────────────────────────
 # A unit model is parsed once, off the frame, and shared by everyone who
 # draws it.
 wowee_add_test(test_m2_model_cache
     SOURCES test_m2_model_cache.cpp)
-target_link_libraries(test_m2_model_cache PRIVATE wowee_pipeline wowee_base)
+target_link_libraries(test_m2_model_cache PRIVATE wowee_pipeline wowee_foundation)
 
 # ── test_asset_file_cache ────────────────────────────────────
 # A texture read to be uploaded is not kept a second time in the file cache;
 # a model file read for its own sake is.
 wowee_add_test(test_asset_file_cache
     SOURCES test_asset_file_cache.cpp)
-target_link_libraries(test_asset_file_cache PRIVATE wowee_pipeline wowee_base)
+target_link_libraries(test_asset_file_cache PRIVATE wowee_pipeline wowee_foundation)
 
 # ── test_blp_alpha_scan ──────────────────────────────────────
 # M2 textures were decoded to RGBA8 so something could walk every fourth byte
@@ -2046,7 +2046,7 @@ register_test_target(test_open_format_emitter)
 wowee_add_test(test_frame_pacer
     SOURCES test_frame_pacer.cpp
             ${TEST_COMMON_SOURCES})
-target_link_libraries(test_frame_pacer PRIVATE wowee_client)
+target_link_libraries(test_frame_pacer PRIVATE wowee_platform)
 if(WIN32)
     # Same winmm the client links, for the same two timer calls.
     target_link_libraries(test_frame_pacer PRIVATE winmm)
@@ -2057,8 +2057,8 @@ endif()
 # part that decides whether anybody is told anything.
 add_executable(test_update_check
     test_update_check.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/https_get.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/config_paths.cpp
+    ${CMAKE_SOURCE_DIR}/src/network/https_get.cpp
+    ${CMAKE_SOURCE_DIR}/src/platform/config_paths.cpp
     ${TEST_COMMON_SOURCES}
 )
 target_link_libraries(test_update_check PRIVATE wowee_client)
@@ -2731,7 +2731,7 @@ add_executable(test_sky_model_gate
 target_link_libraries(test_sky_model_gate PRIVATE wowee_render)
 target_include_directories(test_sky_model_gate PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_sky_model_gate SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
-target_link_libraries(test_sky_model_gate PRIVATE catch2_main wowee_pipeline wowee_base)
+target_link_libraries(test_sky_model_gate PRIVATE catch2_main wowee_pipeline wowee_foundation)
 wowee_test_link_glm(test_sky_model_gate)
 add_test(NAME sky_model_gate COMMAND test_sky_model_gate)
 register_test_target(test_sky_model_gate)
@@ -2745,7 +2745,7 @@ add_executable(test_zone_light
 target_link_libraries(test_zone_light PRIVATE wowee_render)
 target_include_directories(test_zone_light PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_zone_light SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
-target_link_libraries(test_zone_light PRIVATE catch2_main wowee_pipeline wowee_base)
+target_link_libraries(test_zone_light PRIVATE catch2_main wowee_pipeline wowee_foundation)
 wowee_test_link_glm(test_zone_light)
 add_test(NAME zone_light COMMAND test_zone_light)
 register_test_target(test_zone_light)
@@ -2758,7 +2758,7 @@ add_executable(test_light_channels
 target_link_libraries(test_light_channels PRIVATE wowee_render)
 target_include_directories(test_light_channels PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_light_channels SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
-target_link_libraries(test_light_channels PRIVATE catch2_main wowee_pipeline wowee_base)
+target_link_libraries(test_light_channels PRIVATE catch2_main wowee_pipeline wowee_foundation)
 wowee_test_link_glm(test_light_channels)
 add_test(NAME light_channels COMMAND test_light_channels)
 register_test_target(test_light_channels)
@@ -2771,7 +2771,7 @@ add_executable(test_light_volume_blend
 target_link_libraries(test_light_volume_blend PRIVATE wowee_render)
 target_include_directories(test_light_volume_blend PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_light_volume_blend SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
-target_link_libraries(test_light_volume_blend PRIVATE catch2_main wowee_pipeline wowee_base)
+target_link_libraries(test_light_volume_blend PRIVATE catch2_main wowee_pipeline wowee_foundation)
 wowee_test_link_glm(test_light_volume_blend)
 add_test(NAME light_volume_blend COMMAND test_light_volume_blend)
 register_test_target(test_light_volume_blend)
@@ -3052,7 +3052,7 @@ target_link_libraries(test_movement_world PRIVATE wowee_collision)
 #
 # A probe links the library that holds what it exercises and nothing is
 # compiled for it again. The probes of the client-side status and reporting
-# adapters (src/core) link the client objects, as test_shared_rules does.
+# adapters (src/client) link the client objects, as test_shared_rules does.
 function(wowee_add_original_probe target)
     cmake_parse_arguments(ARG "" "" "LIBS" ${ARGN})
     add_executable(${target} ${target}.cpp)
@@ -3385,7 +3385,7 @@ target_include_directories(server_extension_fixture PRIVATE ${CMAKE_SOURCE_DIR}/
 add_executable(test_server_extension test_server_extension.cpp
     ${CMAKE_SOURCE_DIR}/src/game/server_protocol.cpp
     ${CMAKE_SOURCE_DIR}/src/game/server_extension.cpp
-    ${CMAKE_SOURCE_DIR}/src/core/https_get.cpp)
+    ${CMAKE_SOURCE_DIR}/src/network/https_get.cpp)
 target_include_directories(test_server_extension PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_server_extension SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
 target_compile_definitions(test_server_extension PRIVATE
@@ -3438,7 +3438,7 @@ register_test_target(test_realm_patch_sync)
 add_executable(test_archive_layer test_archive_layer.cpp)
 target_include_directories(test_archive_layer PRIVATE ${TEST_INCLUDE_DIRS})
 target_include_directories(test_archive_layer SYSTEM PRIVATE ${TEST_SYSTEM_INCLUDE_DIRS})
-target_link_libraries(test_archive_layer PRIVATE catch2_main wowee_pipeline wowee_base)
+target_link_libraries(test_archive_layer PRIVATE catch2_main wowee_pipeline wowee_foundation)
 wowee_test_link_glm(test_archive_layer)
 if(STORMLIB_LIBRARY AND STORMLIB_INCLUDE_DIR)
     # The MPQ half is the client's: see "Realm patch archives" in the top-level
@@ -3607,7 +3607,7 @@ endif()
 wowee_add_test(test_cvar_store
     SOURCES test_cvar_store.cpp
             ${TEST_COMMON_SOURCES}
-            ${CMAKE_SOURCE_DIR}/src/core/cvar_store.cpp)
+            ${CMAKE_SOURCE_DIR}/src/foundation/cvar_store.cpp)
 
 # ── test_m2_cull_grid ────────────────────────────────────────
 # The M2 view and shadow passes reject whole columns of the world before
@@ -3629,7 +3629,7 @@ target_link_libraries(test_lightning_storm PRIVATE wowee_render)
 
 wowee_add_test(test_rain_audio
     SOURCES test_rain_audio.cpp)
-target_link_libraries(test_rain_audio PRIVATE wowee_client wowee_pipeline wowee_base ${CMAKE_DL_LIBS} Threads::Threads)
+target_link_libraries(test_rain_audio PRIVATE wowee_client wowee_pipeline wowee_foundation ${CMAKE_DL_LIBS} Threads::Threads)
 
 # ── test_audio_settings ──────────────────────────────────────
 # The sound settings through setSettingValue: a volume set in the client is
@@ -3650,7 +3650,10 @@ set(_wowee_test_libraries
     wowee_game     WOWEE_GAME_SOURCES
     wowee_net      WOWEE_NET_SOURCES
     wowee_protocol WOWEE_PROTOCOL_SOURCES
-    wowee_base     WOWEE_BASE_SOURCES
+    wowee_foundation WOWEE_FOUNDATION_SOURCES
+    wowee_math       WOWEE_MATH_SOURCES
+    wowee_platform   WOWEE_PLATFORM_CORE_SOURCES
+    wowee_platform_sdl WOWEE_PLATFORM_SDL_SOURCES
 )
 get_property(_wowee_test_targets GLOBAL PROPERTY WOWEE_ALL_TEST_TARGETS)
 while(_wowee_test_libraries)

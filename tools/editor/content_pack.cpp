@@ -1,5 +1,5 @@
 #include "content_pack.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <filesystem>

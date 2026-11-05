@@ -18,7 +18,7 @@
 #include "rendering/shadow_cull_reuse.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <algorithm>

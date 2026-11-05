@@ -1,6 +1,6 @@
 #include "rendering/vk_buffer.hpp"
 #include "rendering/vk_context.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <cstring>
 
 namespace wowee {

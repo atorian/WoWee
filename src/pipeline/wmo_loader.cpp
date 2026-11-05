@@ -1,6 +1,6 @@
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/liquid_types.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <cstring>
 #include <glm/gtc/quaternion.hpp>
 

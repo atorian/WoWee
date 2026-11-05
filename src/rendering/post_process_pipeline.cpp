@@ -7,8 +7,8 @@
 #include "rendering/vk_pipeline.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/amd_fsr3_runtime.hpp"
-#include "core/logger.hpp"
-#include "core/profiler.hpp"
+#include "foundation/logger.hpp"
+#include "foundation/profiler.hpp"
 #include <cstdlib>
 #include <algorithm>
 #include <glm/gtc/matrix_inverse.hpp>

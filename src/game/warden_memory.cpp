@@ -1,6 +1,6 @@
 #include "game/warden_memory.hpp"
-#include "core/logger.hpp"
-#include "core/data_paths.hpp"
+#include "foundation/logger.hpp"
+#include "pipeline/data_paths.hpp"
 #include "game/warden_hmac.hpp"
 #include <atomic>
 #include <chrono>

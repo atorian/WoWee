@@ -3,7 +3,7 @@
 // Data/interface/worldmap/ - no dependency on WorldLoader.
 #include "rendering/world_map/map_resolver.hpp"
 #include "rendering/world_map/coordinate_projection.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 #include <algorithm>
 #include <cctype>

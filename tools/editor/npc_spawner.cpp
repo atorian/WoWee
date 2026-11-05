@@ -1,5 +1,5 @@
 #include "npc_spawner.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <sstream>

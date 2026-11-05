@@ -1,5 +1,5 @@
 #include "collision/m2_shape.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 #include <algorithm>
 #include <cmath>

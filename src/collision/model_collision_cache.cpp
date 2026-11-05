@@ -1,7 +1,7 @@
 #include "collision/model_collision_cache.hpp"
 
 #include "collision/movement_world.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "pipeline/m2_loader.hpp"
 
 #include <cstring>

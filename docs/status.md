@@ -85,13 +85,13 @@ In progress / known gaps:
 - Visual edge cases: some M2/WMO rendering gaps (some particle effects)
 - Water refraction: always on and no longer a setting; srcAccessMask barrier fix (2026-03-18) resolved prior VK_ERROR_DEVICE_LOST on AMD/Mali GPUs
 - Shadows: held on, with no settings control. Turning them off loses the device, and the fault is not found yet
-- Realm patch directories: EZWoW-announced archives download over the login connection into the per-realm directory (`src/core/realm_patch_sync.cpp`), but they are not mounted yet
+- Realm patch directories: EZWoW-announced archives download over the login connection into the per-realm directory (`src/client/realm_patch_sync.cpp`), but they are not mounted yet
 - Fixed 2026-05-15: classic/turtle update-field tables had multiple wrong indices (`UNIT_FIELD_BYTES_1`=133 colliding with `UNIT_FIELD_MOUNTDISPLAYID`=133; STAT0..4 at 138..142; RESISTANCES at 154; missing NATIVEDISPLAYID). Corrected against vmangos `UpdateFields_1_12_1.h`: BYTES_1=138, STAT0..4=150..154, RESISTANCES=155, added NATIVEDISPLAYID=132.
 
 ## Where To Look
 
-- Entry point: `src/main.cpp`, `src/core/application.cpp`
+- Entry point: `src/main.cpp`, `src/client/application.cpp`
 - Networking/auth: `src/auth/`, `src/network/`, `src/game/game_handler.cpp`
 - Rendering: `src/rendering/`
 - Interface: `src/ui/` (FrameXML emitter, widget tree and renderer, login screens, settings schema), `src/addons/` (Lua API)
-- Assets/extraction: `tools/asset_manager/` (the builder panel and `wowee_assets`), `tools/asset_extract/`, `extract_assets.sh`, `src/pipeline/asset_manager.cpp`, `include/core/data_paths.hpp`
+- Assets/extraction: `tools/asset_manager/` (the builder panel and `wowee_assets`), `tools/asset_extract/`, `extract_assets.sh`, `src/pipeline/asset_manager.cpp`, `include/pipeline/data_paths.hpp`

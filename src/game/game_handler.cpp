@@ -3,7 +3,7 @@
 #include "title/services/titles.hpp"
 #include "reputation/domain/records.hpp"
 #include "reputation/services/reputation.hpp"
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 #include "game/game_events.hpp"
 #include <stdexcept>
 #include "game/reputation_standing.hpp"
@@ -35,11 +35,11 @@
 #include "network/world_connection.hpp"
 #include "network/packet.hpp"
 #include "auth/crypto.hpp"
-#include "core/coordinates.hpp"
-#include "core/config_paths.hpp"
+#include "pipeline/coordinates.hpp"
+#include "platform/config_paths.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "game/protocol_constants.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include <glm/gtx/quaternion.hpp>

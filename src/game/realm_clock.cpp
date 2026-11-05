@@ -8,7 +8,7 @@ void RealmClock::setUnixTime(uint32_t unixSeconds, Clock::time_point at) {
     source_ = Source::UnixTime;
 }
 
-bool RealmClock::setPackedDate(const core::WowDate& date, Clock::time_point at) {
+bool RealmClock::setPackedDate(const calendar::WowDate& date, Clock::time_point at) {
     if (source_ == Source::UnixTime) return false;
     const auto seconds = packedDateSeconds(date);
     if (!seconds) return false;
@@ -23,7 +23,7 @@ std::optional<double> RealmClock::seconds(Clock::time_point at) const {
     return anchorSeconds_ + std::chrono::duration<double>(at - anchorAt_).count();
 }
 
-std::optional<double> RealmClock::packedDateSeconds(const core::WowDate& date) {
+std::optional<double> RealmClock::packedDateSeconds(const calendar::WowDate& date) {
     // Year 0 of the packed field is 2000, and a zero word unpacks to its first
     // minute: that is the server saying nothing, not the turn of the century.
     if (date.yearSince2000 == 0) return std::nullopt;

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "ui/ui_services.hpp"
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 #include <vulkan/vulkan.h>
 #include <imgui.h>
 #include <string>

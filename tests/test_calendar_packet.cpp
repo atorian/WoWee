@@ -17,7 +17,7 @@
 #include "network/packet.hpp"
 
 #include <ctime>
-#include "core/local_time.hpp"
+#include "foundation/local_time.hpp"
 
 
 using namespace wowee::game;
@@ -68,7 +68,7 @@ Packet fullCalendar() {
     p.writeUInt64(1001);
     p.writeString("Naxxramas");
     p.writeUInt32(1);
-    p.writeUInt32(0x09E1C000u);       // packed time
+    p.writeUInt32(0x09A5D46Bu);       // packed time
     p.writeUInt32(0x0100u);
     p.writeUInt32(533);
     p.writePackedGuid(0x070000000000ABCDull);
@@ -81,7 +81,7 @@ Packet fullCalendar() {
     p.writePackedGuid(0x42ull);
 
     p.writeUInt32(1300000000u);       // server time
-    p.writeUInt32(0x09E1C000u);       // zone time
+    p.writeUInt32(0x09A5D46Bu);       // zone time
 
     p.writeUInt32(1);                 // lockouts
     p.writeUInt32(533); p.writeUInt32(1); p.writeUInt32(86400);
@@ -93,7 +93,7 @@ Packet fullCalendar() {
     p.writeUInt32(615); p.writeUInt32(604800); p.writeUInt32(3600);
 
     p.writeUInt32(2);                 // holidays
-    writeHoliday(p, 141, "Calendar_HallowsEnd", 0x09E1C000u);
+    writeHoliday(p, 141, "Calendar_HallowsEnd", 0x09A5D46Bu);
     writeHoliday(p, 181, "Calendar_WinterVeil", 0x0A21C000u);
 
     return p;
@@ -128,7 +128,7 @@ TEST_CASE("A whole calendar reads back field for field", "[calendar]") {
     CHECK(cal.events[0].creatorGuid == 0x070000000000ABCDull);
     // Kept raw as well as unpacked: the interface sorts events on the packed
     // value and re-sending it is how an edit keeps the same time.
-    CHECK(cal.events[0].eventTimePacked == 0x09E1C000u);
+    CHECK(cal.events[0].eventTimePacked == 0x09A5D46Bu);
     // A dungeon id of -1 is "no dungeon", which only reads correctly as
     // signed - as a uint32 it is four billion and every guard on it inverts.
     CHECK(cal.events[1].dungeonId == -1);
@@ -153,7 +153,8 @@ TEST_CASE("A whole calendar reads back field for field", "[calendar]") {
     REQUIRE(cal.holidays.size() == 2);
     CHECK(cal.holidays[0].id == 141);
     CHECK(cal.holidays[0].textureFilename == "Calendar_HallowsEnd");
-    CHECK(cal.holidays[0].dates[0] == 0x09E1C000u);
+    REQUIRE(cal.holidays[0].dates[0]);
+    CHECK(cal.holidays[0].dates[0]->yearSince2000 == 9);
     CHECK(cal.holidays[0].durations[0] == 24);
     CHECK(cal.holidays[0].calendarFlags[0] == 0x10u);
     // The second holiday is the one that proves the array lengths. Read 25
@@ -161,7 +162,8 @@ TEST_CASE("A whole calendar reads back field for field", "[calendar]") {
     // tail of the previous row's texture name rather than 181.
     CHECK(cal.holidays[1].id == 181);
     CHECK(cal.holidays[1].textureFilename == "Calendar_WinterVeil");
-    CHECK(cal.holidays[1].dates[0] == 0x0A21C000u);
+    REQUIRE(cal.holidays[1].dates[0]);
+    CHECK(cal.holidays[1].dates[0]->yearSince2000 == 10);
 }
 
 TEST_CASE("The event time unpacks as a date", "[calendar]") {
@@ -169,13 +171,14 @@ TEST_CASE("The event time unpacks as a date", "[calendar]") {
     CalendarData cal;
     REQUIRE(parseCalendarSendCalendar(p, cal));
 
-    // Same helper the achievement and guild parsers use, so the calendar
-    // cannot drift into a fifth reading of the same field.
-    const wowee::core::WowDate expected = wowee::core::unpackWowPackedTime(0x09E1C000u);
-    CHECK(cal.events[0].eventTime.fullYear() == expected.fullYear());
-    CHECK(cal.events[0].eventTime.month == expected.month);
-    CHECK(cal.events[0].eventTime.day == expected.day);
-    CHECK(cal.zoneTime.fullYear() == expected.fullYear());
+    // Server fixture: 24 November 2009, 17:43. Fixed expectations catch a
+    // shared codec with wrong shifts as well as a parser reading another field.
+    CHECK(cal.events[0].eventTime.fullYear() == 2009);
+    CHECK(cal.events[0].eventTime.month == 11);
+    CHECK(cal.events[0].eventTime.day == 24);
+    CHECK(cal.events[0].eventTime.hour == 17);
+    CHECK(cal.events[0].eventTime.minute == 43);
+    CHECK(cal.zoneTime.fullYear() == 2009);
 }
 
 TEST_CASE("An empty calendar is not an error", "[calendar]") {
@@ -186,7 +189,7 @@ TEST_CASE("An empty calendar is not an error", "[calendar]") {
     p.writeUInt32(0);
     p.writeUInt32(0);
     p.writeUInt32(1300000000u);
-    p.writeUInt32(0x09E1C000u);
+    p.writeUInt32(0x09A5D46Bu);
     p.writeUInt32(0);
     p.writeUInt32(1135814400u);
     p.writeUInt32(0);
@@ -261,7 +264,7 @@ TEST_CASE("A day's rows are holidays first, then events by time", "[calendar]") 
     festival.id = 141;
     festival.textureFilename = "Calendar_HallowsEnd";
     // Three days from 11 August 2026, 00:00.
-    festival.dates[0] = (26u << 24) | (7u << 20) | (10u << 14);
+    festival.dates[0] = wowee::calendar::WowDate{.day = 11, .month = 8, .yearSince2000 = 26};
     festival.durations[0] = 72;
     cal.holidays = {festival};
 
@@ -296,7 +299,7 @@ TEST_CASE("A holiday with no duration still happens on its day", "[calendar]") {
     // zero days would drop the holiday entirely rather than show it once.
     CalendarData cal;
     CalendarHoliday oneOff;
-    oneOff.dates[0] = (26u << 24) | (7u << 20) | (10u << 14);
+    oneOff.dates[0] = wowee::calendar::WowDate{.day = 11, .month = 8, .yearSince2000 = 26};
     oneOff.durations[0] = 0;
     cal.holidays = {oneOff};
 
@@ -320,15 +323,15 @@ Packet oneEvent() {
     p.writeUInt32(100);                       // maxInvites
     p.writeUInt32(static_cast<uint32_t>(-1)); // dungeonId
     p.writeUInt32(0x0400);                    // flags
-    p.writeUInt32(0x09E1C000u);               // eventTime
-    p.writeUInt32(0x09E1C000u);               // timeZoneTime
+    p.writeUInt32(0x09A5D46Bu);               // eventTime
+    p.writeUInt32(0x09A5D46Bu);               // timeZoneTime
     p.writeUInt32(77);                        // guildId
 
     p.writeUInt32(2);                         // invitees
     p.writePackedGuid(0x11ull);
     p.writeUInt8(80); p.writeUInt8(1); p.writeUInt8(2); p.writeUInt8(1);
     p.writeUInt64(9001);
-    p.writeUInt32(0x09E1C000u);
+    p.writeUInt32(0x09A5D46Bu);
     p.writeString("see you there");
     p.writePackedGuid(0x070000000000BEEFull);
     p.writeUInt8(72); p.writeUInt8(0); p.writeUInt8(0); p.writeUInt8(0);

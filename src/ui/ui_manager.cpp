@@ -11,9 +11,9 @@
 #include <fstream>
 #include <iterator>
 #include <chrono>
-#include "core/window.hpp"
-#include "core/application.hpp"
-#include "core/logger.hpp"
+#include "platform/window.hpp"
+#include "client/application.hpp"
+#include "foundation/logger.hpp"
 #include "auth/auth_handler.hpp"
 #include "game/game_handler.hpp"
 #include "rendering/vk_context.hpp"
@@ -90,11 +90,12 @@ float interfaceScale([[maybe_unused]] SDL_Window* window) {
 
 }  // namespace
 
-bool UIManager::initialize(core::Window* win) {
+bool UIManager::initialize(core::Window* win, rendering::VkContext* context) {
+    context_ = context;
     window = win;
     LOG_INFO("Initializing UI manager");
 
-    auto* vkCtx = window->getVkContext();
+    auto* vkCtx = context_;
     if (!vkCtx) {
         LOG_ERROR("No Vulkan context available for ImGui initialization");
         return false;
@@ -366,7 +367,7 @@ void UIManager::loadInterfaceFont(const std::string& dataRoot,
 
 void UIManager::shutdown() {
     if (imguiInitialized) {
-        auto* vkCtx = window ? window->getVkContext() : nullptr;
+        auto* vkCtx = context_;
         if (vkCtx) {
             vkCtx->waitIdle();
         }

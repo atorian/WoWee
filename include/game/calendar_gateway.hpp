@@ -2,7 +2,7 @@
 
 #include "calendar/domain/events.hpp"
 #include "calendar/services/ports.hpp"
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 
 #include <cstdint>
 #include <string>

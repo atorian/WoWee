@@ -1,5 +1,5 @@
 #pragma once
-#include "core/job_group.hpp"
+#include "foundation/job_group.hpp"
 #include "pipeline/distant_terrain.hpp"
 #include "rendering/vk_utils.hpp"
 #include <memory>

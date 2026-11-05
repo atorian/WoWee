@@ -1,7 +1,7 @@
 #include "rendering/liquid_scene.hpp"
 
-#include "core/coordinates.hpp"
-#include "core/logger.hpp"
+#include "pipeline/coordinates.hpp"
+#include "foundation/logger.hpp"
 #include "pipeline/adt_loader.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "rendering/water_mask.hpp"

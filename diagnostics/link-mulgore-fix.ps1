@@ -4,7 +4,7 @@ $env:Path = 'C:\msys64\mingw64\bin;C:\msys64\usr\bin;' + $env:Path
 $root = 'D:\games\WoWee'
 $build = "$root\build"
 Set-Location $build
-$files = @('src/core/application.cpp','src/pipeline/dbc_loader.cpp','src/rendering/terrain_renderer.cpp','src/rendering/wmo_renderer.cpp','src/rendering/m2_renderer_render.cpp')
+$files = @('src/client/application.cpp','src/pipeline/dbc_loader.cpp','src/rendering/terrain_renderer.cpp','src/rendering/wmo_renderer.cpp','src/rendering/m2_renderer_render.cpp')
 $ninja = [System.IO.File]::ReadAllText("$build\build.ninja")
 $line = @($ninja -split "`n" | Where-Object { $_.StartsWith('build bin/wowee.exe:') })[0]
 $objects = [regex]::Matches(($line -split ' \|')[0], 'CMakeFiles/wowee\.dir/[^ ]+\.obj')

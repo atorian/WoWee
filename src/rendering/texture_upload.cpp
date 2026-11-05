@@ -1,6 +1,6 @@
 #include "rendering/texture_upload.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_texture.hpp"

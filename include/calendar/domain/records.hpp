@@ -1,15 +1,14 @@
 #pragma once
 
-#include "core/packed_time.hpp"
+#include "calendar/domain/date.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace wowee::calendar {
-
-using core::WowDate;
 
 // The calendar's records: what the server sends of it, an event in full, and
 // the draft an event is built in. The protocol reads them
@@ -63,7 +62,7 @@ struct CalendarHoliday {
     uint32_t looping = 0;
     uint32_t priority = 0;
     uint32_t calendarFilterType = 0;
-    uint32_t dates[kNumDates] = {};
+    std::optional<WowDate> dates[kNumDates];
     uint32_t durations[kNumDurations] = {};
     uint32_t calendarFlags[kNumFlags] = {};
     std::string textureFilename;

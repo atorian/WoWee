@@ -3,7 +3,7 @@
 #include "game/opcodes.hpp"
 #include "game/game_events.hpp"
 #include "game/server_protocol.hpp"
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 #include "game/game_utils.hpp"
 #include "game/warden_crypto.hpp"
 #include "game/warden_memory.hpp"
@@ -13,11 +13,11 @@
 #include "auth/crypto.hpp"
 #include "game/expansion_profile.hpp"
 #include "pipeline/asset_manager.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "game/warden_constants.hpp"
 #include "game/warden_known_modules.hpp"
 #include "game/warden_module_cache.hpp"
-#include "core/config_paths.hpp"
+#include "platform/config_paths.hpp"
 #include <algorithm>
 #include <cctype>
 #include <chrono>

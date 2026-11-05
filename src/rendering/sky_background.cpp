@@ -1,6 +1,6 @@
 #include "rendering/sky_background.hpp"
 #include "rendering/vk_context.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <algorithm>
 
 namespace wowee::rendering {

@@ -1,6 +1,6 @@
 #include "ui/gamepad_controls.hpp"
 
-#include "core/gamepad.hpp"
+#include "platform/gamepad.hpp"
 
 #include <span>
 #include <string>

@@ -1,6 +1,6 @@
 #include "pipeline/liquid_types.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 namespace wowee {
 namespace pipeline {

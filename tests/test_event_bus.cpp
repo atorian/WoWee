@@ -1,6 +1,6 @@
 #include <catch_amalgamated.hpp>
 
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 
 #include <memory>
 #include <stdexcept>

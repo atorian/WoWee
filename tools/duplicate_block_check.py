@@ -52,7 +52,7 @@ SETTLED = {
         "declarations match because it is a facade; the bodies do not, and "
         "guild_commands, social_panel and lua_social_api all reach it through "
         "GameHandler.",
-    ("src/core/entity_spawner_player.cpp", "src/rendering/character_preview.cpp"):
+    ("src/client/entity_spawner_player.cpp", "src/rendering/character_preview.cpp"):
         "The equipment-to-geoset pick, in the world and in the paper doll. The "
         "shared run of erases and inserts is genuinely the same, and the two "
         "ends of it are not: the preview substitutes within a geoset group "

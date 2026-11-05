@@ -1,6 +1,6 @@
 #include "game/update_field_table.hpp"
 #include "game/json_table_scan.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <fstream>
 #include <sstream>
 #include <algorithm>

@@ -3,12 +3,12 @@
 #include "ui/ui_colors.hpp"
 #include "ui/ui_helpers.hpp"
 #include "rendering/vk_context.hpp"
-#include "core/application.hpp"
-#include "core/appearance_composer.hpp"
+#include "client/application.hpp"
+#include "client/appearance_composer.hpp"
 #include "addons/addon_manager.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "pet/domain/actions.hpp"
-#include "core/input.hpp"
+#include "platform/input.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/post_process_pipeline.hpp"
 #include "rendering/animation_controller.hpp"
@@ -38,7 +38,7 @@
 
 #include "game/expansion_profile.hpp"
 #include "game/character.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <algorithm>

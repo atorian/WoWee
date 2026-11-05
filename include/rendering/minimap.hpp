@@ -13,7 +13,7 @@
 #include <deque>
 #include <list>
 #include <algorithm>
-#include "core/job_group.hpp"
+#include "foundation/job_group.hpp"
 #include "rendering/wmo_minimap.hpp"
 #include <array>
 

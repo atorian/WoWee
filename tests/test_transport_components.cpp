@@ -6,7 +6,7 @@
 #include "game/transport_manager.hpp"
 #include "game/transport_path_repository.hpp"
 #include "math/spline.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include <glm/gtc/constants.hpp>
 #include <cmath>
 
@@ -133,7 +133,7 @@ TEST_CASE("ClockSync: processServerUpdate sets yaw and rotation", "[transport_cl
     REQUIRE(t.position == pos);
 }
 
-// Server yaw s points along canonical (sin s, cos s) - see core/coordinates.hpp.
+// Server yaw s points along canonical (sin s, cos s) - see pipeline/coordinates.hpp.
 // So a transport travelling along canonical +X is facing its direction of travel
 // at s = +pi/2, and facing exactly backwards at s = -pi/2.
 static constexpr float kServerYawAlongCanonicalX = glm::half_pi<float>();

@@ -3,7 +3,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "game_harness.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "game/entity.hpp"
 #include "game/world_handler.hpp"
 #include "game/game_events.hpp"

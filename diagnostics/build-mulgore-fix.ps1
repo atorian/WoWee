@@ -5,7 +5,7 @@ $root = 'D:\games\WoWee'
 $build = "$root\build"
 Set-Location $build
 $commands = Get-Content "$build\compile_commands.json" -Raw | ConvertFrom-Json
-$files = @('src/core/application.cpp','src/pipeline/dbc_loader.cpp','src/rendering/terrain_renderer.cpp','src/rendering/wmo_renderer.cpp','src/rendering/m2_renderer_render.cpp')
+$files = @('src/client/application.cpp','src/pipeline/dbc_loader.cpp','src/rendering/terrain_renderer.cpp','src/rendering/wmo_renderer.cpp','src/rendering/m2_renderer_render.cpp')
 $jobs = @()
 foreach ($file in $files) {
     $entry = $commands | Where-Object { $_.file -eq "$($root.Replace('\','/'))/$file" -and $_.output -match '/wowee\.dir/' } | Select-Object -First 1

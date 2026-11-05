@@ -4,7 +4,7 @@
 // raid warning overlay, combat text, DPS meter, buff bar,
 // battleground score HUD, combat log, threat window, BG scoreboard.
 // ============================================================
-#include "core/local_time.hpp"
+#include "foundation/local_time.hpp"
 #include "ui/combat_ui.hpp"
 #include "addons/lua_api_registrations.hpp"
 #include "ui/framexml_takeover.hpp"
@@ -13,10 +13,10 @@
 #include "ui/inventory_screen.hpp"
 #include "ui/ui_colors.hpp"
 #include "ui/ui_helpers.hpp"
-#include "core/application.hpp"
-#include "core/window.hpp"
-#include "core/logger.hpp"
-#include "core/coordinates.hpp"
+#include "client/application.hpp"
+#include "platform/window.hpp"
+#include "foundation/logger.hpp"
+#include "pipeline/coordinates.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/camera.hpp"
 #include "game/game_handler.hpp"

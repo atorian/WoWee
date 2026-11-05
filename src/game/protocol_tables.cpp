@@ -6,7 +6,7 @@
 #include "game/opcode_table.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/update_field_table.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 #include <memory>
 #include <string>

@@ -7,7 +7,7 @@
 #include <filesystem>
 #include <fstream>
 
-#include "core/data_paths.hpp"
+#include "pipeline/data_paths.hpp"
 
 namespace wowee {
 namespace pipeline {

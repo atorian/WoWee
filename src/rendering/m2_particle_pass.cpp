@@ -1,6 +1,6 @@
 #include "rendering/m2_particle_pass.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "rendering/particle_pool.hpp"
 #include "rendering/skeleton_pool.hpp"
 #include "rendering/vk_context.hpp"

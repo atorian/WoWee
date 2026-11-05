@@ -28,7 +28,7 @@
 #include "rendering/texture_upload.hpp"
 #include "rendering/m2_track_sampler.hpp"
 #include "rendering/animation/animation_ids.hpp"
-#include "core/thread_pool.hpp"
+#include "foundation/thread_pool.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_texture.hpp"
 #include "rendering/vk_pipeline.hpp"
@@ -41,9 +41,9 @@
 #include "pipeline/m2_model_classifier.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
-#include "core/env_flag.hpp"
-#include "core/geoset_rules.hpp"
-#include "core/logger.hpp"
+#include "foundation/env_flag.hpp"
+#include "pipeline/geoset_rules.hpp"
+#include "foundation/logger.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/quaternion.hpp>

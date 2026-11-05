@@ -2,7 +2,7 @@
 #include "game/game_data.hpp"
 #include "achievement/services/achievements.hpp"
 #include "game/achievement_data.hpp"
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 #include "game/game_events.hpp"
 #include "game/protocol_constants.hpp"
 #include "game/update_field_table.hpp"
@@ -18,14 +18,14 @@
 #include "game/game_utils.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/entity.hpp"
-#include "core/coordinates.hpp"
-#include "core/env_flag.hpp"
-#include "core/logger.hpp"
+#include "pipeline/coordinates.hpp"
+#include "foundation/env_flag.hpp"
+#include "foundation/logger.hpp"
 #include "network/world_connection.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/dbc_layout.hpp"
-#include "core/cvar_store.hpp"
+#include "foundation/cvar_store.hpp"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>

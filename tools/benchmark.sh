@@ -3,7 +3,7 @@
 #
 #   tools/benchmark.sh [route] [seconds]      (default: dalaran 60)
 #
-# Routes: dalaran, stormwind, orgrimmar (src/core/benchmark_run.cpp). The
+# Routes: dalaran, stormwind, orgrimmar (src/client/benchmark_run.cpp). The
 # client enters the route's map offline - no realm, no login - waits for the
 # world to settle, flies one lap in the given seconds, writes
 # logs/benchmark-<route>-<stamp>.txt beside itself and closes. See

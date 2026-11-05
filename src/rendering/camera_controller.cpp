@@ -1,10 +1,10 @@
 #include "rendering/camera_controller.hpp"
 #include "collision/collision_world.hpp"
 
-#include "core/env_flag.hpp"
+#include "foundation/env_flag.hpp"
 #include "rendering/swim_wall.hpp"
-#include "core/click_drag.hpp"
-#include "core/coordinates.hpp"
+#include "client/click_drag.hpp"
+#include "pipeline/coordinates.hpp"
 #include "ui/keybinding_manager.hpp"
 #include "ui/framexml_takeover.hpp"
 #include "rendering/movement_limits.hpp"
@@ -16,12 +16,12 @@
 #include <sstream>
 #include <string>
 #include <utility>
-#include "core/thread_pool.hpp"
+#include "foundation/thread_pool.hpp"
 #include <imgui.h>
 #include "rendering/liquid_scene.hpp"
 #include "rendering/character_renderer.hpp"
 #include "game/opcodes.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <glm/glm.hpp>
 #include <cmath>
 #include <limits>

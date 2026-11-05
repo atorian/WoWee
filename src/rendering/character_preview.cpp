@@ -14,13 +14,13 @@
 #include "pipeline/char_sections.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include "pipeline/required_table.hpp"
-#include "core/appearance_composer.hpp"
-#include "core/geoset_rules.hpp"
+#include "client/appearance_composer.hpp"
+#include "pipeline/geoset_rules.hpp"
 #include "pipeline/item_textures.hpp"
 #include "pipeline/m2_asset_loader.hpp"
 #include "pipeline/m2_model_cache.hpp"
-#include "core/logger.hpp"
-#include "core/application.hpp"
+#include "foundation/logger.hpp"
+#include "client/application.hpp"
 #include <imgui.h>
 #include <backends/imgui_impl_vulkan.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -829,7 +829,7 @@ bool CharacterPreview::applyEquipment(const std::vector<game::EquipmentItem>& eq
         }
     }
 
-    // core/geoset_rules.hpp, the same rule the world paths use.
+    // pipeline/geoset_rules.hpp, the same rule the world paths use.
     //
     // This copy took a second id as its fallback rather than looking inside the
     // group, so where the two ids given were the same - which every call below

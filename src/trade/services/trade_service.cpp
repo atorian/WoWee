@@ -1,7 +1,7 @@
 #include "trade/services/trade_service.hpp"
 
-#include "core/event_bus.hpp"
-#include "core/logger.hpp"
+#include "foundation/event_bus.hpp"
+#include "foundation/logger.hpp"
 
 namespace wowee::trade {
 

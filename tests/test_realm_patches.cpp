@@ -11,7 +11,7 @@
 
 #include <string>
 
-#include "core/realm_patches.hpp"
+#include "client/realm_patches.hpp"
 
 using wowee::core::isSafePatchFileName;
 using wowee::core::realmPatchDirName;

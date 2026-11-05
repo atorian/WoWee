@@ -1,5 +1,5 @@
 #include "terrain_editor.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "stb_image.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>

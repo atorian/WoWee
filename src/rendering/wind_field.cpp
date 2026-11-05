@@ -1,6 +1,6 @@
 #include "rendering/wind_field.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "pipeline/wind_zones.hpp"
 
 #include <algorithm>

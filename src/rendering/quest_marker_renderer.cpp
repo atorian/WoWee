@@ -1,5 +1,5 @@
 #include "rendering/quest_marker_renderer.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/frustum.hpp"
 #include "rendering/vk_context.hpp"
@@ -8,7 +8,7 @@
 #include "rendering/vk_utils.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <SDL3/SDL.h>

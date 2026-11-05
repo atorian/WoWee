@@ -5,8 +5,8 @@
 #include "pipeline/heap_bytes.hpp"
 
 #include <span>
-#include "core/logger.hpp"
-#include "core/profiler.hpp"
+#include "foundation/logger.hpp"
+#include "foundation/profiler.hpp"
 #include <cstring>
 #include <cmath>
 #include <algorithm>

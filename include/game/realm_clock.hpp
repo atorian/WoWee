@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/packed_time.hpp"
+#include "calendar/domain/date.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -50,7 +50,7 @@ public:
     /// it was not taken: the Unix time is already known, or the date is not one
     /// (a zero packs to 1 January 2000, which is how "no date" arrives, and a
     /// field out of range is no date either). The caller says which.
-    bool setPackedDate(const core::WowDate& date, Clock::time_point at);
+    bool setPackedDate(const calendar::WowDate& date, Clock::time_point at);
 
     [[nodiscard]] Source source() const { return source_; }
 
@@ -59,7 +59,7 @@ public:
 
     /// The seconds since 1970 a packed date names, or empty when it names no
     /// date at all.
-    [[nodiscard]] static std::optional<double> packedDateSeconds(const core::WowDate& date);
+    [[nodiscard]] static std::optional<double> packedDateSeconds(const calendar::WowDate& date);
 
 private:
     double anchorSeconds_ = 0.0;

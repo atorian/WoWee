@@ -1,6 +1,6 @@
 #include "rendering/sky_bodies.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "rendering/sky_billboard.hpp"
 #include "rendering/vk_context.hpp"

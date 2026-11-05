@@ -1,7 +1,7 @@
 #include "rendering/animation/combat_fsm.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include "game/inventory.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 namespace wowee {
 namespace rendering {

@@ -1,6 +1,6 @@
 #include "rendering/terrain_bake.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "rendering/terrain_vertex.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_pipeline.hpp"

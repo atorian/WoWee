@@ -1,7 +1,7 @@
 #include "game/zone_manager.hpp"
 #include "game/game_data.hpp"
 #include "pipeline/asset_manager.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <algorithm>
 #include <cstdlib>
 #include <ctime>

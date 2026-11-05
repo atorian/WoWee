@@ -1,8 +1,8 @@
 #include "collision/movement_world.hpp"
 
 #include "collision/doodad_facets.hpp"
-#include "core/coordinates.hpp"
-#include "core/logger.hpp"
+#include "pipeline/coordinates.hpp"
+#include "foundation/logger.hpp"
 #include "pipeline/liquid_types.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/placement_transform.hpp"

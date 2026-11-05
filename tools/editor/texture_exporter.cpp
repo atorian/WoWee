@@ -3,7 +3,7 @@
 #include "pipeline/blp_loader.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_loader.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <filesystem>
 #include <algorithm>
 

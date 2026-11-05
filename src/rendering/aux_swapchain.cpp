@@ -1,7 +1,7 @@
 #include "rendering/aux_swapchain.hpp"
 
 #include "rendering/vk_context.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 #include <SDL3/SDL_vulkan.h>
 #include <VkBootstrap.h>

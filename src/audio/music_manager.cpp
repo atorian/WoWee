@@ -3,8 +3,8 @@
 #include <chrono>
 #include "audio/audio_engine.hpp"
 #include "pipeline/asset_manager.hpp"
-#include "core/thread_pool.hpp"
-#include "core/logger.hpp"
+#include "foundation/thread_pool.hpp"
+#include "foundation/logger.hpp"
 #include <algorithm>
 #include <filesystem>
 #include <fstream>

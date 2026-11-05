@@ -5,7 +5,7 @@ $root = 'D:\games\WoWee'
 Set-Location "$root\build"
 New-Item -ItemType Directory -Force -Path 'glass-lamps-objects','glass-lamps-shaders' | Out-Null
 $commands = Get-Content compile_commands.json -Raw | ConvertFrom-Json
-$files = @('src/core/application.cpp','src/rendering/renderer.cpp','src/rendering/rt_lighting.cpp','src/rendering/character_preview.cpp','src/rendering/m2_renderer.cpp','src/rendering/m2_renderer_render.cpp','src/rendering/wmo_renderer.cpp','src/rendering/terrain_renderer.cpp')
+$files = @('src/client/application.cpp','src/rendering/renderer.cpp','src/rendering/rt_lighting.cpp','src/rendering/character_preview.cpp','src/rendering/m2_renderer.cpp','src/rendering/m2_renderer_render.cpp','src/rendering/wmo_renderer.cpp','src/rendering/terrain_renderer.cpp')
 $jobs = @()
 foreach ($file in $files) {
     $entry = $commands | Where-Object { $_.file -eq "$($root.Replace('\','/'))/$file" -and $_.output -match '/wowee\.dir/' } | Select-Object -First 1
@@ -38,7 +38,7 @@ $entry = $commands | Where-Object { $_.file -eq "$($root.Replace('\','/'))/src/p
 $command = [regex]::Replace($entry.command, '-o \S+', '-o glass-lamps-objects/test_m2_loader.cpp.obj')
 & cmd.exe '/d' '/s' '/c' $command
 if ($LASTEXITCODE -ne 0) { throw 'Test M2 loader compile failed' }
-$entry = $commands | Where-Object { $_.file -eq "$($root.Replace('\','/'))/src/core/logger.cpp" -and $_.output -match '/wowee_test_common\.dir/' } | Select-Object -First 1
+$entry = $commands | Where-Object { $_.file -eq "$($root.Replace('\','/'))/src/foundation/logger.cpp" -and $_.output -match '/wowee_test_common\.dir/' } | Select-Object -First 1
 $command = [regex]::Replace($entry.command, '-o \S+', '-o glass-lamps-objects/test_logger.cpp.obj')
 & cmd.exe '/d' '/s' '/c' $command
 if ($LASTEXITCODE -ne 0) { throw 'Test logger compile failed' }

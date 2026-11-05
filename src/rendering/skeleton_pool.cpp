@@ -1,6 +1,6 @@
 #include "rendering/skeleton_pool.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "rendering/m2_particle_emission.hpp"
 #include "rendering/retired_pages.hpp"

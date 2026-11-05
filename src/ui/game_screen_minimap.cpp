@@ -7,7 +7,7 @@
 #include "rendering/view_distance.hpp"
 #include "game/group_defines.hpp"
 #include "game/weather_handler.hpp"
-#include "core/zone_tracker.hpp"
+#include "client/zone_tracker.hpp"
 
 #include <set>
 #include "ui/game_screen.hpp"
@@ -18,12 +18,12 @@
 #include "ui/ui_helpers.hpp"
 #include "ui/minimap_projection.hpp"
 #include "rendering/vk_context.hpp"
-#include "core/application.hpp"
-#include "core/window.hpp"
-#include "core/appearance_composer.hpp"
+#include "client/application.hpp"
+#include "platform/window.hpp"
+#include "client/appearance_composer.hpp"
 #include "addons/addon_manager.hpp"
-#include "core/coordinates.hpp"
-#include "core/input.hpp"
+#include "pipeline/coordinates.hpp"
+#include "platform/input.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/post_process_pipeline.hpp"
 #include "rendering/animation_controller.hpp"
@@ -54,7 +54,7 @@
 
 #include "game/expansion_profile.hpp"
 #include "game/character.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <imgui.h>
 #include <imgui_internal.h>
 #include <glm/gtc/constants.hpp>
@@ -70,7 +70,7 @@
 #include <ctime>
 
 #include <unordered_set>
-#include "core/local_time.hpp"
+#include "foundation/local_time.hpp"
 
 namespace {
     using namespace wowee::ui::colors;

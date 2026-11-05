@@ -16,21 +16,21 @@
 #include "pipeline/m2_model_classifier.hpp"
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/camera.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "pipeline/wowee_terrain_loader.hpp"
 #include "pipeline/wowee_model.hpp"
 #include "pipeline/wowee_building.hpp"
 #include "pipeline/wowee_collision.hpp"
-#include "core/memory_monitor.hpp"
-#include "core/thread_pool.hpp"
-#include "core/profiler.hpp"
+#include "platform/memory_monitor.hpp"
+#include "foundation/thread_pool.hpp"
+#include "foundation/profiler.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/adt_loader.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/wmo_group_path.hpp"
 #include "pipeline/terrain_mesh.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtx/euler_angles.hpp>
@@ -1875,7 +1875,7 @@ void TerrainManager::getTileBounds(const TileCoord& coord, float& minX, float& m
                                     float& maxX, float& maxY) const {
     // The tile's extent in render space, which is not the axis its own index
     // counts along: worldToTile takes the tile's X index from renderY and its
-    // Y index from renderX - see core/coordinates.hpp, where the pair is
+    // Y index from renderX - see pipeline/coordinates.hpp, where the pair is
     // written the same way round. So the render-X edge comes from coord.y.
     //
     // These were named for one axis and computed from the other. Everything

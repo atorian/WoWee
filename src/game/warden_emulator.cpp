@@ -1,5 +1,5 @@
 #include "game/warden_emulator.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <cstring>
 #include <chrono>
 #include <iterator>

@@ -4,7 +4,7 @@
 // it: the data folder, the config and the integrity-hash search all live under
 // the home directory, and each was logged in full.
 #include "catch_amalgamated.hpp"
-#include "core/log_privacy.hpp"
+#include "foundation/log_privacy.hpp"
 
 #include <string>
 

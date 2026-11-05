@@ -1,6 +1,6 @@
 #include "rendering/gpu_slot_table.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "rendering/gpu_allocations.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_utils.hpp"

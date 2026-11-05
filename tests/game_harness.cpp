@@ -40,7 +40,7 @@
 #include <catch_amalgamated.hpp>  // test_support.hpp's REQUIRE
 #include "test_support.hpp"
 
-#include "core/env.hpp"
+#include "foundation/env.hpp"
 #include "game/entity.hpp"
 #include "game/world_handler.hpp"
 #include "game/protocol_tables.hpp"

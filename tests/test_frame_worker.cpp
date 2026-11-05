@@ -1,5 +1,5 @@
 #include <catch_amalgamated.hpp>
-#include "core/frame_worker.hpp"
+#include "foundation/frame_worker.hpp"
 #include <future>
 #include <memory>
 #include <vector>

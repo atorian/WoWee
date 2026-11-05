@@ -1,6 +1,6 @@
 #include "guild_bank/services/guild_bank_service.hpp"
 
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 
 namespace wowee::guild_bank {
 

@@ -19,8 +19,8 @@
 #include "game/stationery.hpp"
 #include "game/auction_filters.hpp"
 #include "ui/framexml_takeover.hpp"
-#include "core/logger.hpp"
-#include "core/config_paths.hpp"
+#include "foundation/logger.hpp"
+#include "platform/config_paths.hpp"
 #include <array>
 #include <fstream>
 #include <filesystem>

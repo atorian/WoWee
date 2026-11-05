@@ -17,7 +17,7 @@
 
 #include <openssl/evp.h>
 
-#include "core/realm_patch_sync.hpp"
+#include "client/realm_patch_sync.hpp"
 
 namespace fs = std::filesystem;
 using wowee::core::planRealmPatches;

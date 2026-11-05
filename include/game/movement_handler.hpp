@@ -4,7 +4,7 @@
 
 #include "game/flat_field_map.hpp"
 #include "game/world_packet_data.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "game/opcodes.hpp"
 #include "network/packet.hpp"
 #include <glm/glm.hpp>

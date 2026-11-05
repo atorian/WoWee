@@ -13,10 +13,10 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "rendering/vk_context.hpp"
-#include "core/app_clock.hpp"
-#include "core/env_flag.hpp"
+#include "foundation/app_clock.hpp"
+#include "foundation/env_flag.hpp"
 #include "ui/interface_fonts.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 #include "imgui.h"
 

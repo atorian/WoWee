@@ -1,11 +1,11 @@
 #include "game/world_packets.hpp"
-#include "core/packed_time.hpp"
+#include "game/packed_time.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/opcodes.hpp"
 #include "game/character.hpp"
 #include "game/game_utils.hpp"
 #include "auth/crypto.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "guild/domain/records.hpp"
 #include <algorithm>
 #include <cctype>

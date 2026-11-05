@@ -6,7 +6,7 @@
 #include "game/packet_sender.hpp"
 #include "game/ui_errors.hpp"
 #include "game/game_events.hpp"
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 #include "game/game_utils.hpp"
 #include "game/update_field_table.hpp"
 #include "game/protocol_constants.hpp"
@@ -16,12 +16,12 @@
 #include "game/entity.hpp"
 #include "network/world_connection.hpp"
 #include "network/packet.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "rendering/movement_limits.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
-#include "core/logger.hpp"
-#include "core/env_flag.hpp"
+#include "foundation/logger.hpp"
+#include "foundation/env_flag.hpp"
 #include <glm/gtx/quaternion.hpp>
 #include <algorithm>
 #include <cmath>

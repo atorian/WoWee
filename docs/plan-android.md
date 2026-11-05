@@ -28,7 +28,7 @@ Android support.
 
 | Thing | Evidence | Consequence for Android |
 |---|---|---|
-| Windowing and input | SDL2 (`src/core/window.cpp`, `SDL_Init`, `SDL_CreateWindow`, `SDL_Vulkan_LoadLibrary`) | SDL2 is an official Android backend. Surface, lifecycle and the GL/Vulkan context come free |
+| Windowing and input | SDL2 (`src/platform/window.cpp`, `SDL_Init`, `SDL_CreateWindow`, `SDL_Vulkan_LoadLibrary`) | SDL2 is an official Android backend. Surface, lifecycle and the GL/Vulkan context come free |
 | Graphics | Vulkan throughout, no GL path | Android's native API. No translation layer |
 | Shaders | 81 `.spv` shipped in `assets/shaders/` beside their GLSL | SPIR-V is portable. Nothing to recompile at install time |
 | Build | CMake, already cross-compiling | `CMAKE_CROSSCOMPILING` branches exist for Windows and Darwin; the NDK is a third toolchain file, not a new system |

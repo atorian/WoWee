@@ -2,7 +2,7 @@
 // Extracted from WorldMap::renderPOIMarkers (Phase 8 of refactoring plan).
 #include "rendering/world_map/layers/poi_marker_layer.hpp"
 #include "rendering/world_map/coordinate_projection.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include <imgui.h>
 
 namespace wowee {

@@ -1,6 +1,6 @@
 #include "rendering/particle_pool.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "rendering/retired_pages.hpp"
 #include "rendering/vk_context.hpp"
 

@@ -2,14 +2,14 @@
 #include "ui/ui_texture_load.hpp"
 #include "ui/ui_colors.hpp"
 #include "ui/keybinding_manager.hpp"
-#include "core/input.hpp"
-#include "core/application.hpp"
+#include "platform/input.hpp"
+#include "client/application.hpp"
 #include "rendering/vk_context.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include "pipeline/required_table.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "pipeline/spell_icon_paths.hpp"
 #include <algorithm>
 #include <map>

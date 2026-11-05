@@ -1,6 +1,6 @@
 #include "game/expansion_profile.hpp"
 #include "game/inventory_slots.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <filesystem>
 #include <fstream>
 #include <sstream>

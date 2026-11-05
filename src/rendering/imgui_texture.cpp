@@ -6,7 +6,7 @@
 #include "rendering/vk_context.hpp"
 #include "rendering/texture_loads.hpp"
 #include "rendering/interface_frame.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <unordered_map>
 #include <stdexcept>
 #include <utility>

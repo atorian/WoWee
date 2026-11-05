@@ -3,7 +3,7 @@
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_pipeline.hpp"
 #include "rendering/vk_shader.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 #include <cmath>
 

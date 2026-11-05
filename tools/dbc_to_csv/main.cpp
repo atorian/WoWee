@@ -16,7 +16,7 @@
  */
 
 #include "pipeline/dbc_loader.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <cstdio>
 #include <cstring>
 #include <filesystem>

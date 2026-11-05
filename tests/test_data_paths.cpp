@@ -15,8 +15,8 @@
 #include <iterator>
 #include <string>
 
-#include "core/data_paths.hpp"
-#include "core/env.hpp"
+#include "pipeline/data_paths.hpp"
+#include "foundation/env.hpp"
 
 namespace fs = std::filesystem;
 using namespace wowee::core;

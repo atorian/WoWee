@@ -21,7 +21,7 @@
 #include <string>
 #include <vector>
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "pipeline/asset_manager.hpp"
 
 namespace wowee::audio {

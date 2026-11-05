@@ -1,7 +1,7 @@
 #include "game/query_cache_handler.hpp"
 
-#include "core/event_bus.hpp"
-#include "core/logger.hpp"
+#include "foundation/event_bus.hpp"
+#include "foundation/logger.hpp"
 #include "game/entity.hpp"
 #include "game/game_events.hpp"
 #include "game/opcodes.hpp"

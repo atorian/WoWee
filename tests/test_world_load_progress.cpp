@@ -1,5 +1,5 @@
 #include <catch_amalgamated.hpp>
-#include "core/world_load_progress.hpp"
+#include "client/world_load_progress.hpp"
 
 using namespace wowee::core;
 

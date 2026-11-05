@@ -11,8 +11,8 @@
 // being leaned on.
 #include <catch_amalgamated.hpp>
 
-#include "core/env_flag.hpp"
-#include "core/env.hpp"
+#include "foundation/env_flag.hpp"
+#include "foundation/env.hpp"
 
 using wowee::core::envValueEnables;
 

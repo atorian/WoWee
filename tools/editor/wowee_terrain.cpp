@@ -1,7 +1,7 @@
 #include "wowee_terrain.hpp"
 #include "cli_catalog_paths.hpp"
 #include "pipeline/wowee_terrain_loader.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "stb_image_write.h"
 #include <nlohmann/json.hpp>
 #include <fstream>

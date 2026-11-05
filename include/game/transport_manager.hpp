@@ -1,7 +1,7 @@
 #pragma once
 
 #include "game/transport_path_repository.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "game/transport_clock_sync.hpp"
 #include "game/transport_animator.hpp"
 #include <chrono>

@@ -36,9 +36,9 @@
 // The implementation is already compiled into open_format_emitter.cpp.
 #include "stb_image_write.h"
 
-#include "core/data_paths.hpp"
+#include "pipeline/data_paths.hpp"
 #include "pipeline/asset_inventory.hpp"
-#include "core/local_time.hpp"
+#include "foundation/local_time.hpp"
 #include "ui/imgui_theme.hpp"
 
 #include "casc.hpp"

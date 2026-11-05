@@ -1,6 +1,6 @@
 #include "rendering/vk_render_target.hpp"
 #include "rendering/vk_context.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 namespace wowee {
 namespace rendering {

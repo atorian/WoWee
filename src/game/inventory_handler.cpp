@@ -17,7 +17,7 @@
 #include "game/spell_classification.hpp"
 #include "game/item_text.hpp"
 #include "game/inventory_slots.hpp"
-#include "core/app_clock.hpp"
+#include "foundation/app_clock.hpp"
 #include "game/chat_log.hpp"
 #include "game/flat_field_map.hpp"
 #include "game/frame_xml_events.hpp"
@@ -29,15 +29,15 @@
 #include "game/entity.hpp"
 #include <set>
 #include "game/packet_parsers.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "game/sell_count.hpp"
 #include "network/world_connection.hpp"
 #include "network/packet.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/dbc_layout.hpp"
-#include "core/cvar_store.hpp"
-#include "core/event_bus.hpp"
+#include "foundation/cvar_store.hpp"
+#include "foundation/event_bus.hpp"
 #include "game/game_events.hpp"
 #include <algorithm>
 #include <cmath>

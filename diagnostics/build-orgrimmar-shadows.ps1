@@ -7,7 +7,7 @@ Set-Location "$root\build"
 New-Item -ItemType Directory -Force -Path 'orgrimmar-shadow-objects','orgrimmar-shadow-shaders' | Out-Null
 $commands = Get-Content compile_commands.json -Raw | ConvertFrom-Json
 if (-not $LinkOnly) {
-foreach ($file in @('src/core/application.cpp','src/rendering/wmo_renderer.cpp')) {
+foreach ($file in @('src/client/application.cpp','src/rendering/wmo_renderer.cpp')) {
     $entry = $commands | Where-Object { $_.file -eq "$($root.Replace('\','/'))/$file" -and $_.output -match '/wowee\.dir/' } | Select-Object -First 1
     if (-not $entry) { throw "Missing command: $file" }
     $object = 'orgrimmar-shadow-objects/' + $file + '.obj'
@@ -28,7 +28,7 @@ if ($LASTEXITCODE -ne 0) { throw 'WMO shader compile failed' }
 if ($LASTEXITCODE -ne 0) { throw 'SPIR-V validation failed' }
 $baseline = Get-Content orgrimmar-light-fixed.rsp
 $lines = foreach ($line in $baseline) {
-    if ($line -eq '"orgrimmar-light-v2-objects/src/core/application.cpp.obj"') { '"orgrimmar-shadow-objects/src/core/application.cpp.obj"' }
+    if ($line -eq '"orgrimmar-light-v2-objects/src/client/application.cpp.obj"') { '"orgrimmar-shadow-objects/src/client/application.cpp.obj"' }
     elseif ($line -eq '"fast-session-link/src/rendering/wmo_renderer.cpp.obj"') { '"orgrimmar-shadow-objects/src/rendering/wmo_renderer.cpp.obj"' }
     else { $line }
 }

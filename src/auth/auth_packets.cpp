@@ -1,6 +1,6 @@
 #include "auth/auth_packets.hpp"
 #include "auth/crypto.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "network/net_platform.hpp"
 #include <algorithm>
 #include <cctype>

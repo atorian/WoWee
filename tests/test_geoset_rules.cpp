@@ -5,7 +5,7 @@
 // three faults in one evening: a clean-shaven NPC with a beard, a character
 // wearing an untextured cloak it did not own, and a player with no feet.
 #include <catch_amalgamated.hpp>
-#include "core/geoset_rules.hpp"
+#include "pipeline/geoset_rules.hpp"
 
 using namespace wowee::core;
 

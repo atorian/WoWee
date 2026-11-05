@@ -33,7 +33,7 @@
 #include "game/game_services.hpp"
 #include "game/world_login.hpp"
 #include "network/packet.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <glm/glm.hpp>
 #include <memory>
 #include <string>

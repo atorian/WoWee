@@ -4,7 +4,7 @@
 // averaged over every frame read back rather than the last one.
 #include <catch_amalgamated.hpp>
 
-#include "core/frame_budget.hpp"
+#include "foundation/frame_budget.hpp"
 
 #include <string>
 #include <vector>

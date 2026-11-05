@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/job_group.hpp"
+#include "foundation/job_group.hpp"
 #include <memory>
 
 namespace wowee::rendering {

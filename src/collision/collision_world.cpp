@@ -2,8 +2,8 @@
 
 #include "collision/movement_world.hpp"
 #include "collision/wmo_group_containment.hpp"
-#include "core/coordinates.hpp"
-#include "core/logger.hpp"
+#include "pipeline/coordinates.hpp"
+#include "foundation/logger.hpp"
 #include "pipeline/terrain_mesh.hpp"
 
 #include <algorithm>

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 #include "trade/domain/records.hpp"
 #include "trade/services/ports.hpp"
 

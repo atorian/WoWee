@@ -1,7 +1,7 @@
 #include "game/server_extension.hpp"
 #include "game/server_extension_wire.hpp"
-#include "core/https_get.hpp"
-#include "core/data_paths.hpp"
+#include "network/https_get.hpp"
+#include "pipeline/data_paths.hpp"
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>
 #include <array>

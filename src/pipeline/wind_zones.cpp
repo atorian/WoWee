@@ -1,6 +1,6 @@
 #include "pipeline/wind_zones.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 #include <algorithm>
 #include <fstream>

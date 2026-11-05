@@ -3,7 +3,7 @@
 // the DBC reader to link.
 #include "pipeline/liquid_types.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/required_table.hpp"
 

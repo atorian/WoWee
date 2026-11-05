@@ -78,9 +78,9 @@ JobGroup отправляет map/entity preparation в тот же ioWorkers, �
 
 Следующий шаг: ThreadPool уже записывает по метке задачи время в очереди и выполнения, но frame profile включает это только для frameWorkers. Включить то же для ioWorkers, добавить длину очереди; затем вводить приоритеты и backpressure по общему контракту.
 
-- [include/core/thread_pool.hpp:61](../../include/core/thread_pool.hpp#L61)
-- [include/core/thread_pool.hpp:85](../../include/core/thread_pool.hpp#L85)
-- [include/core/job_group.hpp:116](../../include/core/job_group.hpp#L116)
+- [include/foundation/thread_pool.hpp:61](../../include/foundation/thread_pool.hpp#L61)
+- [include/foundation/thread_pool.hpp:85](../../include/foundation/thread_pool.hpp#L85)
+- [include/foundation/job_group.hpp:116](../../include/foundation/job_group.hpp#L116)
 - [src/audio/music_manager.cpp:136](../../src/audio/music_manager.cpp#L136)
 
 **T2 · Факт → риск · Параллельная работа остаётся на критическом пути кадра**
@@ -99,8 +99,8 @@ Frame pool, terrain pool, preload, normal maps и std::async задают пар
 Следующий шаг: Снять профиль холодного входа в город: runnable threads, загрузка CPU и задержки main; учитывать все активные пулы.
 
 - [src/rendering/terrain_manager.cpp:107](../../src/rendering/terrain_manager.cpp#L107)
-- [include/core/thread_pool.hpp:116](../../include/core/thread_pool.hpp#L116)
-- [src/core/world_loader.cpp:510](../../src/core/world_loader.cpp#L510)
+- [include/foundation/thread_pool.hpp:116](../../include/foundation/thread_pool.hpp#L116)
+- [src/client/world_loader.cpp:510](../../src/client/world_loader.cpp#L510)
 - [src/rendering/character_renderer.cpp:71](../../src/rendering/character_renderer.cpp#L71)
 
 
@@ -176,8 +176,8 @@ flowchart TB
 
 Следующий шаг: При анализе фризов раскрывать Present на terrain finalization, unload, animation и wait; не переносить вызовы без проверки зависимостей.
 
-- [src/core/application.cpp:4660](../../src/core/application.cpp#L4660)
-- [src/core/application.cpp:4690](../../src/core/application.cpp#L4690)
+- [src/client/application.cpp:4660](../../src/client/application.cpp#L4660)
+- [src/client/application.cpp:4690](../../src/client/application.cpp#L4690)
 - [src/rendering/renderer.cpp:2582](../../src/rendering/renderer.cpp#L2582)
 - [src/rendering/terrain_manager.cpp:240](../../src/rendering/terrain_manager.cpp#L240)
 
@@ -187,9 +187,9 @@ publish вызывает подписчиков сразу, например и�
 
 Следующий шаг: Указывать канал и фазу у нового события; синхронные подписчики переходов должны только записывать запрос. Стоимость publish относится к фазе отправителя.
 
-- [include/core/event_bus.hpp:85](../../include/core/event_bus.hpp#L85)
-- [include/core/event_bus.hpp:100](../../include/core/event_bus.hpp#L100)
-- [src/core/client_loop.cpp:341](../../src/core/client_loop.cpp#L341)
+- [include/foundation/event_bus.hpp:85](../../include/foundation/event_bus.hpp#L85)
+- [include/foundation/event_bus.hpp:100](../../include/foundation/event_bus.hpp#L100)
+- [src/client/client_loop.cpp:341](../../src/client/client_loop.cpp#L341)
 - [docs/principles/client-frame-phases.md:34](../../docs/principles/client-frame-phases.md#L34)
 
 **F3 · Факт → риск · Локальные бюджеты не дают общего потолка кадра**
@@ -246,7 +246,7 @@ flowchart TB
     netlib["wowee_net<br/>Auth / WorldSocket / HTTPS"]
     protocol["wowee_protocol<br/>Packet / opcodes / parsers / crypto"]
     pipeline["wowee_pipeline<br/>AssetManager / DBC / ADT / M2 / WMO"]
-    base["wowee_base<br/>EventBus / jobs / logging / CVar / math"]
+    base["wowee_foundation<br/>EventBus / jobs / logging / CVar / math"]
   end
   app --> ui
   app --> presentation
@@ -299,8 +299,8 @@ flowchart TB
 Следующий шаг: При изменении существующего уведомления переходить на типизированное событие и RAII Subscription; FrameXML оставить отдельным контрактом Lua.
 
 - [tools/domain_shape_check.py:47](../../tools/domain_shape_check.py#L47)
-- [src/core/client_loop.cpp:38](../../src/core/client_loop.cpp#L38)
-- [include/core/event_bus.hpp:38](../../include/core/event_bus.hpp#L38)
+- [src/client/client_loop.cpp:38](../../src/client/client_loop.cpp#L38)
+- [include/foundation/event_bus.hpp:38](../../include/foundation/event_bus.hpp#L38)
 
 **C3 · Подтверждённый долг · Граница подсистемы не совпадает с путём файла**
 
@@ -491,10 +491,10 @@ MapScope отменяет jobs, уничтожает load session, остана�
 
 Следующий шаг: Измерять Transitions и возраст отменённых jobs; при требовании ограниченной задержки нужен scheduler с удалением queued cancelled work или эквивалентный контракт fence.
 
-- [src/core/map_scope.cpp:37](../../src/core/map_scope.cpp#L37)
-- [include/core/job_group.hpp:115](../../include/core/job_group.hpp#L115)
-- [src/core/world_loader.cpp:96](../../src/core/world_loader.cpp#L96)
-- [include/core/thread_pool.hpp:85](../../include/core/thread_pool.hpp#L85)
+- [src/client/map_scope.cpp:37](../../src/client/map_scope.cpp#L37)
+- [include/foundation/job_group.hpp:115](../../include/foundation/job_group.hpp#L115)
+- [src/client/world_loader.cpp:96](../../src/client/world_loader.cpp#L96)
+- [include/foundation/thread_pool.hpp:85](../../include/foundation/thread_pool.hpp#L85)
 
 **O2 · Долг → риск · Безопасность borrowed ссылок зависит от ручного teardown order**
 
@@ -502,10 +502,10 @@ Renderer заимствует VkContext у Window; spawner — SpawnState кар
 
 Следующий шаг: Новые подписки хранить RAII-членами; для каждого нового borrowed указателя указать lifetime. Проверять logout, same-map reconnect, superseded load и exit, сохраняя порядок stop/join → release.
 
-- [include/core/window.hpp:85](../../include/core/window.hpp#L85)
+- [include/platform/window.hpp:85](../../include/platform/window.hpp#L85)
 - [include/rendering/renderer.hpp:678](../../include/rendering/renderer.hpp#L678)
-- [src/core/application.cpp:2623](../../src/core/application.cpp#L2623)
-- [src/core/character_session.cpp:67](../../src/core/character_session.cpp#L67)
+- [src/client/application.cpp:2623](../../src/client/application.cpp#L2623)
+- [src/client/character_session.cpp:67](../../src/client/character_session.cpp#L67)
 
 **O3 · Факт → риск · AsyncConnect.cancel оставляет DNS/connect работать до возврата**
 

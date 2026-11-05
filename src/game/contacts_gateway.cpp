@@ -1,7 +1,7 @@
 #include "game/contacts_gateway.hpp"
 
 #include "contacts/services/contacts_service.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "game/chat_log.hpp"
 #include "game/frame_xml_events.hpp"
 #include "game/game_utils.hpp"

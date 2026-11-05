@@ -5,8 +5,8 @@
 #include "rendering/world_map/map_resolver.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/required_table.hpp"
-#include "core/logger.hpp"
-#include "core/application.hpp"
+#include "foundation/logger.hpp"
+#include "client/application.hpp"
 #include "game/expansion_profile.hpp"
 #include "game/game_utils.hpp"
 #include <algorithm>

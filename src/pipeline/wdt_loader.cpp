@@ -1,6 +1,6 @@
 #include "pipeline/wdt_loader.hpp"
 #include <algorithm>
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <cstring>
 
 namespace wowee {

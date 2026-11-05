@@ -15,7 +15,7 @@
 #include <string>
 #include <vector>
 
-#include "core/character_paths.hpp"
+#include "client/character_paths.hpp"
 #include "game/inventory.hpp"
 #include "game/item_text.hpp"
 #include "game/world_packets.hpp"

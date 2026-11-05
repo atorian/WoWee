@@ -18,7 +18,7 @@
 #include "audio/npc_voice_manager.hpp"
 #include "audio/player_voice_manager.hpp"
 #include "audio/ui_sound_manager.hpp"
-#include "core/cvar_store.hpp"
+#include "foundation/cvar_store.hpp"
 #include "ui/settings_panel.hpp"
 
 using wowee::core::CVarStore;

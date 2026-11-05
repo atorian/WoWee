@@ -1,5 +1,5 @@
 #include "pipeline/custom_zone_discovery.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <filesystem>

@@ -1,6 +1,6 @@
 #include "game/ui_errors.hpp"
 
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 #include "game/frame_xml_events.hpp"
 #include "game/game_events.hpp"
 

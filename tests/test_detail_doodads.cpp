@@ -16,7 +16,7 @@
 
 #include <glm/glm.hpp>
 
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "pipeline/adt_loader.hpp"
 #include "pipeline/client_random.hpp"
 #include "pipeline/detail_doodads.hpp"

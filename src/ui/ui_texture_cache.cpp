@@ -1,6 +1,6 @@
 #include "ui/ui_texture_cache.hpp"
-#include "core/logger.hpp"
-#include "core/thread_pool.hpp"
+#include "foundation/logger.hpp"
+#include "foundation/thread_pool.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "rendering/vk_texture.hpp"
 #include <chrono>

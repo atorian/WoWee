@@ -1,6 +1,6 @@
-#include "core/movement_reporting.hpp"
+#include "client/movement_reporting.hpp"
 #include "collision/movement_execution.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "game/opcode_table.hpp"
 #include "network/packet.hpp"
 #include <iostream>

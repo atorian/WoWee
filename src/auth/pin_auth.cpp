@@ -1,6 +1,6 @@
 #include "auth/pin_auth.hpp"
 #include "auth/crypto.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <algorithm>
 #include <optional>
 #include <random>

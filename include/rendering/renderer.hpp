@@ -7,7 +7,7 @@
 #include "rendering/frame_results.hpp"
 
 #include <chrono>
-#include "core/job_group.hpp"
+#include "foundation/job_group.hpp"
 #include <functional>
 #include <memory>
 #include <optional>

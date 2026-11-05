@@ -9,7 +9,7 @@
 #include "collision/model_collision_cache.hpp"
 #include "collision/movement_world.hpp"
 #include "collision/terrain_heights.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "pipeline/adt_loader.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_loader.hpp"

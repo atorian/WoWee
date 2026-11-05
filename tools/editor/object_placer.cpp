@@ -1,8 +1,8 @@
 #include "object_placer.hpp"
 #include "cli_catalog_paths.hpp"
 #include "terrain_biomes.hpp"
-#include "core/coordinates.hpp"
-#include "core/logger.hpp"
+#include "pipeline/coordinates.hpp"
+#include "foundation/logger.hpp"
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cmath>

@@ -1,6 +1,6 @@
 #include "rendering/vk_shader.hpp"
 #include "rendering/vk_utils.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <fstream>
 #include <filesystem>
 #include <cstring>

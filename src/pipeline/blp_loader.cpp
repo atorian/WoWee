@@ -2,7 +2,7 @@
 #include "pipeline/blp_loader.hpp"
 
 #include <span>
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <cstring>
 #include <algorithm>
 

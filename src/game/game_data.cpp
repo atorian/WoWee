@@ -1,6 +1,6 @@
 #include "game/game_data.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "game/expansion_profile.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"

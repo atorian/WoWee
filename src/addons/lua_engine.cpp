@@ -31,12 +31,12 @@
 #include "addons/lua_api_registrations.hpp"
 #include "addons/minimap_zoom.hpp"
 #include "addons/toc_parser.hpp"
-#include "core/window.hpp"
+#include "platform/window.hpp"
 #include <imgui.h>
 #include <fstream>
-#include "core/app_clock.hpp"
-#include "core/config_paths.hpp"
-#include "core/env_flag.hpp"
+#include "foundation/app_clock.hpp"
+#include "platform/config_paths.hpp"
+#include "foundation/env_flag.hpp"
 #include <filesystem>
 
 extern "C" {

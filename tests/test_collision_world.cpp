@@ -8,7 +8,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "collision/collision_world.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 
 #include <glm/gtc/matrix_transform.hpp>
 

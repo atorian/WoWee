@@ -16,8 +16,8 @@
 #include "rendering/wmo_renderer.hpp"
 #include "rendering/m2_renderer.hpp"
 #include "rendering/camera.hpp"
-#include "core/client_shortcuts.hpp"
-#include "core/resource_telemetry.hpp"
+#include "client/client_shortcuts.hpp"
+#include "client/resource_telemetry.hpp"
 #include "ui/ui_colors.hpp"
 #include <imgui.h>
 #include <algorithm>

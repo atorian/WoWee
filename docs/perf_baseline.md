@@ -22,7 +22,7 @@ flies one lap of the route in `WOWEE_BENCHMARK_SECONDS` (60 by default), writes
 its report and closes. Nothing before the flight - loading, streaming, the
 first pipelines being built - is in the numbers.
 
-Routes (`src/core/benchmark_run.cpp`), each a 12-point lap round the centre,
+Routes (`src/client/benchmark_run.cpp`), each a 12-point lap round the centre,
 looking at it:
 
 | route | where | hour | lap |

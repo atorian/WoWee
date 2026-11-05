@@ -1,7 +1,7 @@
-#include "core/local_time.hpp"
+#include "foundation/local_time.hpp"
 #include "server_module_gen.hpp"
 #include "sql_exporter.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <filesystem>

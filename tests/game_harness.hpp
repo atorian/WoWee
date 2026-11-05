@@ -16,8 +16,8 @@
 /// state back out - which is where a copy of the state that one side writes
 /// and the other reads shows up.
 
-#include "core/cvar_store.hpp"
-#include "core/event_bus.hpp"
+#include "foundation/cvar_store.hpp"
+#include "foundation/event_bus.hpp"
 #include "game/emote_table.hpp"
 #include "game/entity.hpp"
 #include "game/expansion_profile.hpp"

@@ -7,7 +7,7 @@
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/wowee_model.hpp"
 #include "pipeline/wowee_building.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <cstring>
 #include <cmath>
 #include <unordered_map>

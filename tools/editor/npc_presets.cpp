@@ -1,7 +1,7 @@
 #include "npc_presets.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/asset_manifest.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <algorithm>
 #include <cctype>
 #include <set>

@@ -3,7 +3,7 @@
 // Ported from: world_packets.cpp, world_packets_entity.cpp, packet_parsers_classic.cpp,
 //              packet_parsers_tbc.cpp, movement_handler.cpp.
 #include "game/spline_packet.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <cmath>
 #include <string>
 

@@ -21,7 +21,7 @@
 // WOWEE_RT_FORCE_SOFTWARE=1 selects the compute tracer on hardware that has
 // ray queries, so both backends can be checked on one machine.
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "rendering/rt_bvh.hpp"
 #include "rendering/rt_lighting.hpp"
 #include "rendering/rt_scene.hpp"

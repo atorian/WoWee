@@ -10,7 +10,7 @@
 #include "rendering/m2_track_sampler.hpp"
 #include "rendering/rt_bvh.hpp"
 #include "rendering/rt_scene.hpp"
-#include "core/env_flag.hpp"
+#include "foundation/env_flag.hpp"
 #include "rendering/m2_renderer_internal.h"
 #include "rendering/m2_blend_mode.hpp"
 #include "rendering/m2_sway.hpp"
@@ -28,7 +28,7 @@
 #include "rendering/frustum.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <array>
 #include <chrono>
 #include <cctype>

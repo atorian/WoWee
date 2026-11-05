@@ -4,9 +4,9 @@
 #include "pet/domain/records.hpp"
 #include "pet/services/pet.hpp"
 #include "game/emote_table.hpp"
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 #include "game/game_events.hpp"
-#include "core/env_flag.hpp"
+#include "foundation/env_flag.hpp"
 #include "game/packet_sender.hpp"
 #include "game/world_state.hpp"
 #include "game/character.hpp"
@@ -20,8 +20,8 @@
 #include "game/transport_manager.hpp"
 #include "game/movement_handler.hpp"
 #include "game/inventory_handler.hpp"
-#include "core/logger.hpp"
-#include "core/coordinates.hpp"
+#include "foundation/logger.hpp"
+#include "pipeline/coordinates.hpp"
 #include "network/world_connection.hpp"
 #include <algorithm>
 #include <bit>

@@ -2,11 +2,11 @@
 #include "rendering/terrain_placement_refs.hpp"
 
 #include <functional>
-#include "core/cache_stats.hpp"
-#include "core/job_group.hpp"
+#include "foundation/cache_stats.hpp"
+#include "foundation/job_group.hpp"
 
 #include "collision/terrain_heights.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "pipeline/adt_loader.hpp"
 #include "pipeline/terrain_mesh.hpp"
 #include "pipeline/m2_loader.hpp"

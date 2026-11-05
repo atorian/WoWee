@@ -2,7 +2,7 @@
 #include <functional>
 #include <vector>
 #include "ui/keybinding_manager.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <fstream>
 #include <sstream>
 

@@ -11,7 +11,7 @@
 // the frame needs a page before the next is made it makes its own, and the
 // pool says so.
 
-#include "core/thread_pool.hpp"
+#include "foundation/thread_pool.hpp"
 
 #include <functional>
 #include <future>

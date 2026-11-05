@@ -30,7 +30,7 @@
 /// and checks the bounds this reproduces against the ones on disk, so the next
 /// change to the order answers to the data rather than to a screenshot.
 
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>

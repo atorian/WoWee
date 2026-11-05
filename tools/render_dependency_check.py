@@ -22,8 +22,8 @@ Takes wowee_render's sources the way CMakeLists.txt does - src/rendering less
 the client's presentation it lists in WOWEE_RENDER_CLIENT_SOURCES and the
 directories it filters out - follows their quoted includes through include/
 and src/, and reports every file reached that belongs to another module of
-the client. core/ is the client's glue except for the header-only pieces of
-infrastructure named below, which wowee_base carries.
+the client. Foundation and Platform are separate engine modules; client/
+holds startup, lifetime management and dependency wiring.
 
 WHAT IT CANNOT SEE
 
@@ -36,21 +36,9 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
-# Modules of the client the renderer must not reach.
-FORBIDDEN = ("game/", "ui/", "audio/", "addons/", "network/", "auth/", "platform/")
-# core/ headers that are infrastructure rather than client: header-only, or
-# compiled into wowee_base.
-CORE_ALLOWED = {
-    "core/logger.hpp", "core/profiler.hpp", "core/env_flag.hpp", "core/thread_pool.hpp",
-    "core/coordinates.hpp", "core/local_time.hpp", "core/data_paths.hpp",
-    "core/memory_monitor.hpp", "core/geoset_rules.hpp",
-    # Header-only: the struct a cache's owner reports its size in.
-    "core/cache_stats.hpp",
-    # Header-only, over thread_pool.hpp: the lifetime fence a map's work and
-    # its terrain workers are tracked by. The renderer is handed a token; it
-    # knows nothing of the client that owns the group.
-    "core/job_group.hpp",
-}
+# Technical engine facilities may depend on Foundation, Platform and Assets,
+# never on the client or WoW protocol/presentation.
+FORBIDDEN = ("game/", "ui/", "audio/", "addons/", "network/", "auth/", "client/")
 
 INCLUDE = re.compile(r'^\s*#\s*include\s+"([^"]+)"', re.M)
 
@@ -97,7 +85,7 @@ def main():
         rel = queue.pop(0)
         text = (ROOT / rel).read_text(errors="ignore")
         for name in INCLUDE.findall(text):
-            if name.startswith(FORBIDDEN) or (name.startswith("core/") and name not in CORE_ALLOWED):
+            if name.startswith(FORBIDDEN):
                 offenders.append((rel, name))
                 continue
             target = resolve(name, rel)

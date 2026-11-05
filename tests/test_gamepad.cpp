@@ -6,7 +6,7 @@
 // job by accident.
 #include <catch_amalgamated.hpp>
 
-#include "core/gamepad.hpp"
+#include "platform/gamepad.hpp"
 #include "ui/gamepad_controls.hpp"
 
 #include <cmath>

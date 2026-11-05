@@ -1,7 +1,7 @@
 #include "rendering/render_graph.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_utils.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <algorithm>
 #include <unordered_map>
 #include <queue>

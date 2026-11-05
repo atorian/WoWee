@@ -1,6 +1,6 @@
 #include "rendering/texture_cache.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "rendering/vk_texture.hpp"
 
 #include <algorithm>

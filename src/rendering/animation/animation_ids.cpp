@@ -4,7 +4,7 @@
 // ============================================================================
 #include "rendering/animation/animation_ids.hpp"
 #include "pipeline/dbc_loader.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 #include <unordered_set>
 

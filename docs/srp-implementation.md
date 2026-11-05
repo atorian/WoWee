@@ -122,7 +122,7 @@ if (srp.verifyServerProof(serverM2)) {
 
 ```cpp
 #include "auth/srp.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 void authenticateWithServer(const std::string& username,
                            const std::string& password) {

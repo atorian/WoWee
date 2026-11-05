@@ -4,7 +4,7 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/required_table.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <unordered_set>
 
 namespace wowee::ui {

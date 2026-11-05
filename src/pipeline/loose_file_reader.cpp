@@ -1,5 +1,5 @@
 #include "pipeline/loose_file_reader.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <fstream>
 #include <filesystem>
 

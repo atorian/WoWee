@@ -23,20 +23,20 @@ LAYERS
 A module may include its own headers and any module on a lower layer. Modules
 on the same layer may not include each other.
 
-    0  base, math, platform, third_party
-    1  <context>/domain
+    0  foundation, third_party
+    1  math, platform, <context>/domain
     2  <context>/services
     3  pipeline, network
     4  auth, collision
     5  game, audio, rendering
     6  ui
     7  addons
-    8  app
+    8  client
     9  main
 
 A bounded context is a top-level directory holding domain/ and services/,
-such as contacts/. Its domain may include only base and itself, its services
-only base, their own domain and themselves, and every module above may use
+such as contacts/. Its domain may include only foundation and itself, its services
+only foundation, their own domain and themselves, and every module above may use
 both. Two contexts do not include each other's services: they share a layer.
 
 game, audio and rendering share a layer on purpose: none of them may include
@@ -45,11 +45,9 @@ it; game, which may not include it either, is handed the queries it needs. What 
 what the game wants drawn or played goes out through an interface that app
 wires up.
 
-`base` and `app` are both under core/ today: base is the infrastructure in
-BASE_HEADERS and BASE_SOURCES (what the wowee_base library provides plus
-dependency-free headers), app is the rest of core - the composition root. The
-split into two directories is issue #34; until then this file is where the
-line is drawn.
+Foundation, Platform and Client have physical directories and separate build
+libraries. A file's owner comes from its path; no per-file infrastructure
+allowlist can turn client code into a lower layer.
 
 WHAT IT CANNOT SEE
 
@@ -68,15 +66,15 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "tools" / "module_boundary_baseline.txt"
 
 LAYERS = [
-    {"base", "math", "platform", "third_party"},
-    {"domain"},
+    {"foundation", "third_party"},
+    {"math", "platform", "domain"},
     {"services"},
     {"pipeline", "network"},
     {"auth", "collision"},
     {"game", "audio", "rendering"},
     {"ui"},
     {"addons"},
-    {"app"},
+    {"client"},
     {"main"},
 ]
 LAYER_OF = {module: i for i, modules in enumerate(LAYERS) for module in modules}
@@ -87,57 +85,23 @@ def layer_of(module: str) -> int:
     """A context module such as "contacts/domain" takes its layer's place."""
     return LAYER_OF[module.split("/", 1)[1] if "/" in module else module]
 
-# core/ headers and sources that belong to base rather than app.
-BASE_HEADERS = {
-    "core/app_clock.hpp",
-    "core/config_paths.hpp",
-    "core/coordinates.hpp",
-    "core/cvar_store.hpp",
-    "core/data_paths.hpp",
-    "core/event_bus.hpp",
-    "core/env.hpp",
-    "core/env_flag.hpp",
-    "core/frame_budget.hpp",
-    "core/local_time.hpp",
-    "core/log_privacy.hpp",
-    "core/logger.hpp",
-    "core/packed_time.hpp",
-    "core/memory_monitor.hpp",
-    "core/profiler.hpp",
-    "core/thread_pool.hpp",
-}
-BASE_SOURCES = {
-    "src/core/app_clock.cpp",
-    "src/core/config_paths.cpp",
-    "src/core/cvar_store.cpp",
-    "src/core/frame_budget.cpp",
-    "src/core/logger.cpp",
-    "src/core/memory_monitor.cpp",
-}
-
 SOURCE_SUFFIXES = {".cpp", ".hpp", ".h", ".mm"}
 INCLUDE_RE = re.compile(r'^\s*#\s*include\s*["<]([^">]+)[">]', re.M)
 
 
 def module_of_header(path: str) -> str | None:
     """Module of an include path such as "game/world.hpp", or None."""
-    if path in BASE_HEADERS:
-        return "base"
     if "/" not in path:
         return None
     parts = path.split("/")
     if len(parts) > 2 and parts[1] in CONTEXT_LAYERS:
         return f"{parts[0]}/{parts[1]}"
     first = parts[0]
-    if first == "core":
-        return "app"
     return first if first in LAYER_OF and first not in CONTEXT_LAYERS else None
 
 
 def module_of_file(rel: str) -> str | None:
     """Module of a file under src/ or include/, given relative to ROOT."""
-    if rel in BASE_SOURCES:
-        return "base"
     top, rest = rel.split("/", 1)
     if top == "include":
         return module_of_header(rest)
@@ -160,7 +124,15 @@ def violations() -> set[str]:
                 target = module_of_header(header)
                 if target is None or target == source:
                     continue
-                if layer_of(target) >= layer_of(source):
+                if "/" in source:
+                    context, part = source.split("/", 1)
+                    allowed = {"foundation", f"{context}/domain"}
+                    if part == "services":
+                        allowed.add(f"{context}/services")
+                    forbidden = target not in allowed
+                else:
+                    forbidden = layer_of(target) >= layer_of(source)
+                if forbidden:
                     found.add(f"{rel} -> {header}")
     return found
 
@@ -184,8 +156,8 @@ def main() -> int:
     args = parser.parse_args()
 
     current = violations()
-    if not current and not (ROOT / "src" / "core").is_dir():
-        print("src/core is not here; finding nothing would mean the scan broke.")
+    if not (ROOT / "src" / "client").is_dir() or not (ROOT / "src" / "foundation").is_dir():
+        print("src/client or src/foundation is missing; the module scan cannot run.")
         return 1
 
     baseline = read_baseline()

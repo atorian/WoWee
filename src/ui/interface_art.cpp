@@ -1,6 +1,6 @@
 #include "ui/interface_art.hpp"
 #include "ui/xml_parser.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <algorithm>
 #include <cctype>
 #include <filesystem>

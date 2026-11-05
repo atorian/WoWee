@@ -2,7 +2,7 @@
 #include "pipeline/wowee_binary_io.hpp"
 #include "pipeline/wowee_building.hpp"
 #include "pipeline/wmo_loader.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <glm/gtc/quaternion.hpp>
 #include <fstream>
 #include <filesystem>

@@ -1,6 +1,6 @@
 #include "game/warden_crypto.hpp"
 #include "auth/crypto.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <cstring>
 #include <algorithm>
 

@@ -80,7 +80,7 @@ None of this is interesting, and all of it is real.
 
 | Work | Where it lands | Note |
 |---|---|---|
-| Split ADTs: `_tex0`, `_obj1`, `_tex1` | `src/rendering/terrain_manager.cpp:426`, `src/core/world_loader.cpp:1337` | Only `_obj0` is read today, and through the same monolithic `ADTLoader::load`. Cata splits terrain properly, so the loader has to learn that a tile is several files with different chunk sets |
+| Split ADTs: `_tex0`, `_obj1`, `_tex1` | `src/rendering/terrain_manager.cpp:426`, `src/client/world_loader.cpp:1337` | Only `_obj0` is read today, and through the same monolithic `ADTLoader::load`. Cata splits terrain properly, so the loader has to learn that a tile is several files with different chunk sets |
 | New ADT chunks | `src/pipeline/adt_loader.cpp:61-80` (top level), `:363-408` (MCNK sub-chunks) | Reads MTEX, MMDX, MWMO, MDDF, MODF, MH2O, MCNK, and MCVT/MCNR/MCLY/MCAL/MCLQ under it. MCCV, MTXP and MAMP are absent |
 | Re-derive 40 DBC layouts for 4.3.4 columns | `Data/expansions/cata/dbc_layouts.json` | Tedious and unavoidable. See `dbc_layout_traps`: a named index is not a checked one, and a wrong column reads as zero forever |
 | A WDB2 reader | `src/pipeline/dbc_loader.cpp:61` rejects anything whose magic is not `WDBC` | 4.3.4 moved `Item` and `Item-sparse` to `.db2`. WDB2 is a fixed-width format with a larger header, so this is small |
@@ -117,7 +117,7 @@ misparsed in the paths that matter rather than failing where the gap is.
 
 It now lists `wotlk` explicitly and answers null otherwise. The header stays free of a logger,
 because ten standalone tests include it, so the decision is at the call site in
-`src/core/application.cpp`: null is reported and then falls back to WotLK anyway, which keeps a
+`src/client/application.cpp`: null is reported and then falls back to WotLK anyway, which keeps a
 hand-written profile working while saying what it is running on.
 
 ---

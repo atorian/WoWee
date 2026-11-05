@@ -1,7 +1,7 @@
 #include "rendering/shelter_map.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_pipeline.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 #include "rendering/vk_shader.hpp"
 

@@ -1,8 +1,8 @@
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "pipeline/wowee_collision.hpp"
 #include "pipeline/wowee_binary_io.hpp"
 #include "pipeline/adt_loader.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <fstream>
 #include <filesystem>
 #include <cstring>

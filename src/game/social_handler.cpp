@@ -1,5 +1,5 @@
 #include "game/group_defines.hpp"
-#include "core/local_time.hpp"
+#include "foundation/local_time.hpp"
 #include "game/item_text.hpp"
 #include "game/social_handler.hpp"
 #include "game/contacts_gateway.hpp"
@@ -41,9 +41,9 @@
 #include "game/update_field_table.hpp"
 #include "game/opcode_table.hpp"
 #include "network/world_connection.hpp"
-#include "core/logger.hpp"
-#include "core/cvar_store.hpp"
-#include "core/event_bus.hpp"
+#include "foundation/logger.hpp"
+#include "foundation/cvar_store.hpp"
+#include "foundation/event_bus.hpp"
 #include "game/game_events.hpp"
 #include <algorithm>
 #include <cstdio>

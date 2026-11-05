@@ -1,7 +1,7 @@
 #include "game/auction_gateway.hpp"
 
 #include "auction/domain/events.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "game/chat_log.hpp"
 #include "game/frame_xml_events.hpp"
 #include "game/game_utils.hpp"

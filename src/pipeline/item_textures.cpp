@@ -6,7 +6,7 @@
 #include <mutex>
 #include <unordered_set>
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/required_table.hpp"

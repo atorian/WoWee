@@ -3,7 +3,7 @@
 // Only wowee_title is linked.
 #include <catch_amalgamated.hpp>
 
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 #include "title/services/title_service.hpp"
 
 #include <string>

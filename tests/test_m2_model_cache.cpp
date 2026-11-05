@@ -4,7 +4,7 @@
 // frame thread, while the world held it parsed already.
 #include <catch_amalgamated.hpp>
 
-#include "core/thread_pool.hpp"
+#include "foundation/thread_pool.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/m2_model_cache.hpp"

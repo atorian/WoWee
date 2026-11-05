@@ -1,7 +1,7 @@
 #include "loot/services/loot_service.hpp"
 
-#include "core/event_bus.hpp"
-#include "core/logger.hpp"
+#include "foundation/event_bus.hpp"
+#include "foundation/logger.hpp"
 #include "loot/domain/records.hpp"
 
 namespace wowee::loot {

@@ -2,7 +2,7 @@
 // WindowManager - extracted from GameScreen
 // Owns all NPC interaction windows, popup dialogs, etc.
 // ============================================================
-#include "core/local_time.hpp"
+#include "foundation/local_time.hpp"
 #include "ui/window_manager.hpp"
 #include "ui/ui_texture_load.hpp"
 #include "game/item_text.hpp"
@@ -14,15 +14,15 @@
 #include "ui/spellbook_screen.hpp"
 #include "ui/inventory_screen.hpp"
 #include "ui/ui_colors.hpp"
-#include "core/application.hpp"
-#include "core/logger.hpp"
+#include "client/application.hpp"
+#include "foundation/logger.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/character_preview.hpp"
 #include "rendering/vk_context.hpp"
-#include "core/window.hpp"
+#include "platform/window.hpp"
 #include "game/game_handler.hpp"
 #include "game/auction_filters.hpp"
-#include "core/packed_time.hpp"
+#include "game/packed_time.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include "pipeline/required_table.hpp"

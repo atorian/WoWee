@@ -1,6 +1,7 @@
 // Native cold-resource test: same workers, cache, Vulkan uploads and widgets
 // as the client, without a realm or a logged-in character.
-#include "core/window.hpp"
+#include "platform/window.hpp"
+#include "rendering/window_surface.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "rendering/imgui_texture.hpp"
 #include "rendering/interface_frame.hpp"
@@ -19,8 +20,10 @@ int main(int argc, char** argv) {
     if (argc != 2) return 2;
     wowee::core::Window window({.title = "Interface prefetch verification", .width = 640, .height = 480});
     if (!window.initialize()) return 2;
+    wowee::rendering::WindowSurface surface(window);
+    if (!surface.initialize()) return 2;
     SDL_HideWindow(window.getSDLWindow());
-    auto* context = window.getVkContext();
+    auto* context = surface.getVkContext();
     ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
     ImGui_ImplSDL3_InitForVulkan(window.getSDLWindow());
@@ -46,7 +49,7 @@ int main(int argc, char** argv) {
     wowee::pipeline::AssetManager assets;
     if (!assets.initialize(argv[1])) return 2;
     wowee::ui::WidgetRenderer renderer;
-    renderer.initialize(&assets, window.getVkContext());
+    renderer.initialize(&assets, surface.getVkContext());
     renderer.preloadInterface(std::string(argv[1]) + "/interface");
     using Clock = std::chrono::steady_clock;
     const auto start = Clock::now();
@@ -128,7 +131,7 @@ int main(int argc, char** argv) {
     const auto bytes = context->textures().stats().form(wowee::rendering::TextureForm::Interface).bytes;
     std::printf("INTERFACE_GPU_MIB %.2f\n", static_cast<double>(bytes) / (1024.0 * 1024.0));
     renderer.resetResources();
-    window.getVkContext()->waitIdle();
+    surface.getVkContext()->waitIdle();
     recorder.shutdown();
     shutdownUi();
     return resident > 100 && loadedBeforeOpen && iconsReady && drewImages && recorderReady ? 0 : 1;

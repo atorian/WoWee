@@ -11,7 +11,7 @@
 #include <cstdint>
 #include <thread>
 
-#include "core/frame_pacer.hpp"
+#include "platform/frame_pacer.hpp"
 
 using wowee::core::FramePacer;
 

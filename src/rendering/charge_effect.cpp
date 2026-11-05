@@ -8,7 +8,7 @@
 #include "rendering/m2_renderer.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/asset_manager.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <random>
 #include <cmath>

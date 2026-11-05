@@ -38,7 +38,7 @@
 #include <cstring>
 #include <string>
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 namespace wowee {
 namespace net {

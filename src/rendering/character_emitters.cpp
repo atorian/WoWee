@@ -3,7 +3,7 @@
 #include "rendering/character_renderer.hpp"
 #include "rendering/cpu_stage_times.hpp"
 #include "rendering/m2_renderer.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 namespace wowee {
 namespace rendering {

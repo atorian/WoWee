@@ -1,7 +1,7 @@
 // The guild service against a recording gateway and the real event bus.
 #include <catch_amalgamated.hpp>
 
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 #include "guild/services/guild_service.hpp"
 #include "guild_event_fixture.hpp"
 

@@ -2,7 +2,7 @@
 // recording gateway and the real event bus. Only wowee_loot is linked.
 #include <catch_amalgamated.hpp>
 
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 #include "loot/services/loot_service.hpp"
 
 #include <algorithm>

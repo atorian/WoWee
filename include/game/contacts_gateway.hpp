@@ -2,7 +2,7 @@
 
 #include "contacts/domain/contact.hpp"
 #include "contacts/services/ports.hpp"
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 
 #include <chrono>
 #include <cstdint>

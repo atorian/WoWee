@@ -1,7 +1,7 @@
 #include "ui/unit_portrait.hpp"
 #include "game/equipment_hash.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "game/game_handler.hpp"
 #include "rendering/character_preview.hpp"
 #include "rendering/renderer.hpp"

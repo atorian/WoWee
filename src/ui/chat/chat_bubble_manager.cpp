@@ -6,8 +6,8 @@
 #include "rendering/renderer.hpp"
 #include "rendering/camera.hpp"
 #include "collision/collision_world.hpp"
-#include "core/coordinates.hpp"
-#include "core/window.hpp"
+#include "pipeline/coordinates.hpp"
+#include "platform/window.hpp"
 #include <imgui.h>
 #include "ui/chat/chat_utils.hpp"
 #include "ui/sight_cache.hpp"

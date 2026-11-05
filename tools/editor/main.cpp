@@ -24,7 +24,7 @@
 #include "pipeline/adt_loader.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/custom_zone_discovery.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <string>
 #include <cstdio>
 #include <cstring>
@@ -40,7 +40,7 @@
 #include <algorithm>
 #include <nlohmann/json.hpp>
 #include "stb_image_write.h"
-#include "stb_image.h"  // implementation in wowee_pipeline (src/pipeline/stb_image_impl.cpp)
+#include "stb_image.h"  // implementation in wowee_pipeline (src/third_party/stb_image_impl.cpp)
 
 // ─── Open-format consistency checks ─────────────────────────────
 // Both validators are called from the per-file CLI commands AND

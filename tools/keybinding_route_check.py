@@ -54,7 +54,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 UI = ROOT / "src/ui"
-APP = ROOT / "src/core/application.cpp"
+APP = ROOT / "src/client/application.cpp"
 
 # Not a real action: the enum's terminator.
 IGNORED = {"ACTION_COUNT"}

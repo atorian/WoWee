@@ -15,8 +15,8 @@
 #include "game/packet_parsers.hpp"
 #include "network/world_connection.hpp"
 #include "pipeline/asset_manager.hpp"
-#include "core/logger.hpp"
-#include "core/event_bus.hpp"
+#include "foundation/logger.hpp"
+#include "foundation/event_bus.hpp"
 #include "game/game_events.hpp"
 #include <algorithm>
 #include <cctype>

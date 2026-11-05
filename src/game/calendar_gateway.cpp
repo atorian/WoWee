@@ -1,8 +1,8 @@
 #include "game/calendar_gateway.hpp"
 
 #include "calendar/domain/records.hpp"
-#include "core/logger.hpp"
-#include "core/packed_time.hpp"
+#include "foundation/logger.hpp"
+#include "game/packed_time.hpp"
 #include "game/chat_log.hpp"
 #include "game/frame_xml_events.hpp"
 #include "game/group_defines.hpp"
@@ -65,8 +65,8 @@ void CalendarGateway::sendUpdate(uint64_t eventId, uint64_t inviteId, const cale
     pkt.writeUInt8(draft.repeatOption);
     pkt.writeUInt32(draft.maxInvites);
     pkt.writeUInt32(static_cast<uint32_t>(draft.dungeonId));
-    pkt.writeUInt32(core::packWowPackedTime(draft.eventTime));
-    pkt.writeUInt32(core::packWowPackedTime(draft.eventTime));
+    pkt.writeUInt32(game::packWowPackedTime(draft.eventTime));
+    pkt.writeUInt32(game::packWowPackedTime(draft.eventTime));
     pkt.writeUInt32(draft.flags);
     sender_.send(pkt);
     LOG_INFO("updateCalendarEvent: ", eventId, " '", draft.title, "'");
@@ -133,8 +133,8 @@ void CalendarGateway::sendAdd(const calendar::CalendarEventDraft& draft) {
     pkt.writeUInt8(draft.repeatOption);
     pkt.writeUInt32(draft.maxInvites);
     pkt.writeUInt32(static_cast<uint32_t>(draft.dungeonId));
-    pkt.writeUInt32(core::packWowPackedTime(draft.eventTime));
-    pkt.writeUInt32(core::packWowPackedTime(draft.eventTime));
+    pkt.writeUInt32(game::packWowPackedTime(draft.eventTime));
+    pkt.writeUInt32(game::packWowPackedTime(draft.eventTime));
     pkt.writeUInt32(draft.flags);
     sender_.send(pkt);
     LOG_INFO("createCalendarEvent: '", draft.title, "' type ", draft.type,

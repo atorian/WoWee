@@ -12,7 +12,7 @@
 #include "pipeline/wmo_loader.hpp"
 #include "sql_exporter.hpp"
 #include "server_module_gen.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <nlohmann/json.hpp>
 #include "rendering/vk_context.hpp"
@@ -20,7 +20,7 @@
 #include "pipeline/adt_loader.hpp"
 #include "pipeline/wdt_loader.hpp"
 #include "pipeline/terrain_mesh.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <imgui.h>
 #include <imgui_impl_sdl3.h>
 #include <imgui_impl_vulkan.h>
@@ -48,6 +48,9 @@ bool EditorApp::initialize(const std::string& dataPath) {
         return false;
     }
 
+    windowSurface_ = std::make_unique<rendering::WindowSurface>(*window_);
+    if (!windowSurface_->initialize()) return false;
+
     assetManager_ = std::make_unique<pipeline::AssetManager>();
     if (!assetManager_->initialize(dataPath)) {
         LOG_ERROR("Failed to initialize asset manager with path: ", dataPath);
@@ -56,7 +59,7 @@ bool EditorApp::initialize(const std::string& dataPath) {
 
     initImGui();
 
-    auto* vkCtx = window_->getVkContext();
+    auto* vkCtx = windowSurface_ ? windowSurface_->getVkContext() : nullptr;
     camera_.getCamera().setAspectRatio(window_->getAspectRatio());
     camera_.setPosition(glm::vec3(0.0f, 0.0f, 300.0f));
     camera_.setYawPitch(0.0f, -30.0f);
@@ -75,7 +78,7 @@ bool EditorApp::initialize(const std::string& dataPath) {
 
 void EditorApp::run() {
     rendering::InterfaceRecorder interfaceRecorder;
-    if (!interfaceRecorder.initialize(*window_->getVkContext(), window_->getVkContext()->getImGuiRenderPass())) {
+    if (!interfaceRecorder.initialize(*windowSurface_->getVkContext(), windowSurface_->getVkContext()->getImGuiRenderPass())) {
         LOG_ERROR("Editor interface pipeline initialization failed");
         return;
     }
@@ -89,7 +92,7 @@ void EditorApp::run() {
 
         processEvents();
 
-        auto* vkCtx = window_->getVkContext();
+        auto* vkCtx = windowSurface_->getVkContext();
         if (vkCtx->isSwapchainDirty()) {
             int w = window_->getWidth();
             int h = window_->getHeight();
@@ -279,7 +282,7 @@ void EditorApp::run() {
 
 void EditorApp::shutdown() {
     if (!window_) return;
-    auto* vkCtx = window_->getVkContext();
+    auto* vkCtx = windowSurface_ ? windowSurface_->getVkContext() : nullptr;
     if (vkCtx) vkCtx->waitIdle();
 
     viewport_.shutdown();
@@ -289,6 +292,7 @@ void EditorApp::shutdown() {
         assetManager_->shutdown();
         assetManager_.reset();
     }
+    windowSurface_.reset();
     window_.reset();
 }
 
@@ -312,7 +316,7 @@ void EditorApp::processEvents() {
         if ((event.type >= SDL_EVENT_WINDOW_FIRST && event.type <= SDL_EVENT_WINDOW_LAST)) {
             if (event.type == SDL_EVENT_WINDOW_RESIZED) {
                 window_->setSize(event.window.data1, event.window.data2);
-                window_->getVkContext()->markSwapchainDirty();
+                windowSurface_->getVkContext()->markSwapchainDirty();
             }
         }
 
@@ -473,7 +477,7 @@ void EditorApp::processEvents() {
                 glm::vec3 pivot = brush.isActive() ? brush.getPosition() : camera_.getCamera().getPosition() + camera_.getCamera().getForward() * 100.0f;
                 camera_.processMiddleMouseMotion(event.motion.xrel, event.motion.yrel, pivot);
             } else if (giz.isDragging()) {
-                auto ext = window_->getVkContext()->getSwapchainExtent();
+                auto ext = windowSurface_->getVkContext()->getSwapchainExtent();
                 giz.updateDrag(glm::vec2(static_cast<float>(event.motion.x),
                                           static_cast<float>(event.motion.y)),
                                camera_.getCamera(),
@@ -550,7 +554,7 @@ void EditorApp::processEvents() {
                     // anywhere on terrain spawns the crater instead of
                     // doing whatever the current mode does.
                     if (pendingCrater_.active) {
-                        auto ext = window_->getVkContext()->getSwapchainExtent();
+                        auto ext = windowSurface_->getVkContext()->getSwapchainExtent();
                         rendering::Ray ray = camera_.getCamera().screenToWorldRay(
                             static_cast<float>(event.button.x),
                             static_cast<float>(event.button.y),
@@ -583,7 +587,7 @@ void EditorApp::processEvents() {
                         }
                     }
                     else if (ui_.getPathCapture() != EditorUI::PathCapture::None) {
-                        auto ext = window_->getVkContext()->getSwapchainExtent();
+                        auto ext = windowSurface_->getVkContext()->getSwapchainExtent();
                         rendering::Ray ray = camera_.getCamera().screenToWorldRay(
                             static_cast<float>(event.button.x),
                             static_cast<float>(event.button.y),
@@ -601,7 +605,7 @@ void EditorApp::processEvents() {
                     // Ctrl+click = select (Ctrl+Shift+click = add to selection)
                     else if ((event.key.mod & SDL_KMOD_CTRL) || (SDL_GetModState() & SDL_KMOD_CTRL)) {
                         bool additive = (SDL_GetModState() & SDL_KMOD_SHIFT) != 0;
-                        auto ext = window_->getVkContext()->getSwapchainExtent();
+                        auto ext = windowSurface_->getVkContext()->getSwapchainExtent();
                         rendering::Ray ray = camera_.getCamera().screenToWorldRay(
                             static_cast<float>(event.button.x),
                             static_cast<float>(event.button.y),
@@ -618,7 +622,7 @@ void EditorApp::processEvents() {
                             objectPlacer_.selectAt(ray, 200.0f);
                         }
                     } else if (mode_ == EditorMode::NPC) {
-                        auto ext = window_->getVkContext()->getSwapchainExtent();
+                        auto ext = windowSurface_->getVkContext()->getSwapchainExtent();
                         rendering::Ray ray = camera_.getCamera().screenToWorldRay(
                             static_cast<float>(event.button.x),
                             static_cast<float>(event.button.y),
@@ -641,7 +645,7 @@ void EditorApp::processEvents() {
                         painting_ = true;
                     } else if (mode_ == EditorMode::PlaceObject) {
                         // Raycast now at click time for accurate placement
-                        auto ext = window_->getVkContext()->getSwapchainExtent();
+                        auto ext = windowSurface_->getVkContext()->getSwapchainExtent();
                         rendering::Ray ray = camera_.getCamera().screenToWorldRay(
                             static_cast<float>(event.button.x),
                             static_cast<float>(event.button.y),
@@ -667,7 +671,7 @@ void EditorApp::processEvents() {
             // Middle click = select object
             if (event.button.button == SDL_BUTTON_MIDDLE && event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
                 if (mode_ == EditorMode::PlaceObject && terrain_.isLoaded()) {
-                    auto ext = window_->getVkContext()->getSwapchainExtent();
+                    auto ext = windowSurface_->getVkContext()->getSwapchainExtent();
                     auto& io2 = ImGui::GetIO();
                     rendering::Ray ray = camera_.getCamera().screenToWorldRay(
                         io2.MousePos.x, io2.MousePos.y,
@@ -710,7 +714,7 @@ void EditorApp::updateTerrainEditing(float dt) {
     if (!io.WantCaptureMouse) {
         float mx = io.MousePos.x;
         float my = io.MousePos.y;
-        auto ext = window_->getVkContext()->getSwapchainExtent();
+        auto ext = windowSurface_->getVkContext()->getSwapchainExtent();
 
         rendering::Ray ray = camera_.getCamera().screenToWorldRay(
             mx, my, static_cast<float>(ext.width), static_cast<float>(ext.height));
@@ -1867,7 +1871,7 @@ int EditorApp::auditSpawnsAgainstTerrain(float threshold) const {
 }
 
 void EditorApp::clearAllObjects() {
-    window_->getVkContext()->waitIdle();
+    windowSurface_->getVkContext()->waitIdle();
     objectPlacer_.clearAll();
     npcSpawner_.clearAll();
     viewport_.clearObjects();
@@ -2058,7 +2062,7 @@ rendering::TerrainRenderer* EditorApp::getTerrainRenderer() {
 }
 
 void EditorApp::initImGui() {
-    auto* vkCtx = window_->getVkContext();
+    auto* vkCtx = windowSurface_->getVkContext();
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();

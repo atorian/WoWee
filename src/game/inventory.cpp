@@ -1,5 +1,5 @@
 #include "game/inventory.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <algorithm>
 #include <unordered_map>
 

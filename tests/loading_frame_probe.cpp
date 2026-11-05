@@ -1,10 +1,10 @@
 #include "loading_frame_probe.hpp"
-#include "core/application.hpp"
-#include "core/window.hpp"
-#include "core/logger.hpp"
-#include "core/input.hpp"
-#include "core/coordinates.hpp"
-#include "core/entity_spawner.hpp"
+#include "client/application.hpp"
+#include "platform/window.hpp"
+#include "foundation/logger.hpp"
+#include "platform/input.hpp"
+#include "pipeline/coordinates.hpp"
+#include "client/entity_spawner.hpp"
 #include "game/game_handler.hpp"
 #include "game/game_events.hpp"
 #include "addons/addon_manager.hpp"
@@ -138,7 +138,7 @@ void LoadingFrameProbe::streamingDone(const FramePlan& plan) {
     if (fired_ && action_ == "resize" && frame_ > actionFrame_ + 2) {
         int width = 0, height = 0;
         SDL_GetWindowSizeInPixels(app_.getWindow()->getSDLWindow(), &width, &height);
-        const auto extent = app_.getWindow()->getVkContext()->getSwapchainExtent();
+        const auto extent = app_.getRenderer()->getVkContext()->getSwapchainExtent();
         if (app_.getWindow()->getWidth() == targetSize_.x && app_.getWindow()->getHeight() == targetSize_.y &&
             extent.width == static_cast<uint32_t>(width) && extent.height == static_cast<uint32_t>(height))
             pass("resize rebuilt the swapchain during loading");

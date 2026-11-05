@@ -2,7 +2,7 @@
 #include "game_harness.hpp"
 #include "game/world_handler.hpp"
 #include "game/game_events.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 
 using namespace wowee;
 

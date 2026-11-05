@@ -4,7 +4,7 @@
 // and nothing before it.
 #include <catch_amalgamated.hpp>
 
-#include "core/benchmark_run.hpp"
+#include "client/benchmark_run.hpp"
 
 #include <cmath>
 #include <filesystem>

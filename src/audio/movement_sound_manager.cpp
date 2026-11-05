@@ -2,7 +2,7 @@
 #include "audio/sample_load.hpp"
 #include "audio/audio_engine.hpp"
 #include "pipeline/asset_manager.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <random>
 
 namespace wowee {

@@ -122,7 +122,7 @@ reply (`0x8cde60`, called at `0x8ca4e5`) so that, on the **login** connection,
 `XFER_RESUME` (0x33, u64 offset). The file then arrives as stock `XFER_DATA`
 (0x31, u16 length, bytes).
 
-`RealmPatchSync` (`src/core/realm_patch_sync.cpp`) does the same over the auth
+`RealmPatchSync` (`src/client/realm_patch_sync.cpp`) does the same over the auth
 connection, which stays open after realm selection. Archives go to
 `<user data>/realm_patches/<realmPatchDirName(login host, port)>/`, download to
 `.partial`, resume from it, and move into place only after the MD5 matches.

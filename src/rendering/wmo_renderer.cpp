@@ -31,8 +31,8 @@
 #include "rendering/water_reflection.hpp"
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/asset_manager.hpp"
-#include "core/logger.hpp"
-#include "core/thread_pool.hpp"
+#include "foundation/logger.hpp"
+#include "foundation/thread_pool.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <algorithm>

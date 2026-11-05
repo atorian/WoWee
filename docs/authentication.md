@@ -45,7 +45,7 @@ This guide demonstrates the complete authentication flow in wowee, from connecti
 #include "auth/auth_handler.hpp"
 #include "game/game_handler.hpp"
 #include "game/game_services.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <iostream>
 #include <thread>
 #include <chrono>

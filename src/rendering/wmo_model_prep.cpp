@@ -3,7 +3,7 @@
 // is buffers, textures and materials: WMORenderer::loadPreparedIncremental.
 #include "wmo_model_prep.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "rendering/wmo_minimap.hpp"
 #include "pipeline/m2_loader.hpp"
 #include "pipeline/wmo_loader.hpp"

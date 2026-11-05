@@ -1,0 +1,100 @@
+#include "client/npc_interaction_callback_handler.hpp"
+#include "client/entity_spawner.hpp"
+#include "pipeline/coordinates.hpp"
+#include "foundation/logger.hpp"
+#include "rendering/renderer.hpp"
+#include "rendering/scene_commands.hpp"
+#include "rendering/character_renderer.hpp"
+#include "rendering/animation/animation_ids.hpp"
+#include "game/game_handler.hpp"
+#include "game/game_events.hpp"
+#include "audio/audio_coordinator.hpp"
+#include "audio/npc_voice_manager.hpp"
+
+namespace wowee { namespace core {
+
+NPCInteractionCallbackHandler::NPCInteractionCallbackHandler(
+    EntitySpawner& entitySpawner,
+    rendering::Renderer* renderer,
+    game::GameHandler& gameHandler,
+    audio::AudioCoordinator* audioCoordinator)
+    : entitySpawner_(entitySpawner)
+    , renderer_(renderer)
+    , gameHandler_(gameHandler)
+    , audioCoordinator_(audioCoordinator)
+{
+}
+
+audio::VoiceType NPCInteractionCallbackHandler::resolveNpcVoiceType(uint64_t guid) const {
+    audio::VoiceType voiceType = audio::VoiceType::GENERIC;
+    auto entity = gameHandler_.getEntityManager().getEntity(guid);
+    if (entity && entity->getType() == game::ObjectType::UNIT) {
+        auto unit = std::static_pointer_cast<game::Unit>(entity);
+        uint32_t displayId = unit->getDisplayId();
+        voiceType = entitySpawner_.detectVoiceTypeFromDisplayId(displayId);
+    }
+    return voiceType;
+}
+
+void NPCInteractionCallbackHandler::setupCallbacks() {
+    // NPC greeting callback - play voice line
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::GossipOpenedOnNpc>(
+        [this](const game::events::GossipOpenedOnNpc& e) {
+        const uint64_t guid = e.npcGuid;
+        const glm::vec3 position(e.x, e.y, e.z);
+        // Play NPC_WELCOME animation on the NPC
+        if (renderer_) {
+            auto* cr = renderer_->getCharacterRenderer();
+            if (cr) {
+                uint32_t instanceId = entitySpawner_.getCreatureInstanceId(guid);
+                if (instanceId != 0) {
+                    renderer_->scene().characters().playAnimation(instanceId, rendering::anim::NPC_WELCOME, false);
+                }
+            }
+        }
+        if (audioCoordinator_ && audioCoordinator_->getNpcVoiceManager()) {
+            // Convert canonical to render coords for 3D audio
+            glm::vec3 renderPos = core::coords::canonicalToRender(position);
+            audio::VoiceType voiceType = resolveNpcVoiceType(guid);
+            audioCoordinator_->getNpcVoiceManager()->playGreeting(guid, voiceType, renderPos);
+        }
+    }));
+
+    // NPC farewell - play farewell voice line
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::GossipClosedOnNpc>(
+        [this](const game::events::GossipClosedOnNpc& e) {
+            if (audioCoordinator_ && audioCoordinator_->getNpcVoiceManager()) {
+                glm::vec3 renderPos = core::coords::canonicalToRender(glm::vec3(e.x, e.y, e.z));
+                audio::VoiceType voiceType = resolveNpcVoiceType(e.npcGuid);
+                audioCoordinator_->getNpcVoiceManager()->playFarewell(e.npcGuid, voiceType, renderPos);
+            }
+        }));
+
+    // NPC vendor callback - play vendor voice line
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::VendorOpened>(
+        [this](const game::events::VendorOpened& e) {
+            if (audioCoordinator_ && audioCoordinator_->getNpcVoiceManager()) {
+                glm::vec3 renderPos = core::coords::canonicalToRender(glm::vec3(e.x, e.y, e.z));
+                audio::VoiceType voiceType = resolveNpcVoiceType(e.vendorGuid);
+                audioCoordinator_->getNpcVoiceManager()->playVendor(e.vendorGuid, voiceType, renderPos);
+            }
+        }));
+
+    // NPC aggro callback - play combat start voice line
+    subscriptions_.push_back(gameHandler_.eventBus().subscribe<game::events::NpcAggroed>(
+        [this](const game::events::NpcAggroed& e) {
+            if (audioCoordinator_ && audioCoordinator_->getNpcVoiceManager()) {
+                glm::vec3 renderPos = core::coords::canonicalToRender(glm::vec3(e.x, e.y, e.z));
+                audio::VoiceType voiceType = resolveNpcVoiceType(e.guid);
+                uint32_t displayId = 0;
+                auto entity = gameHandler_.getEntityManager().getEntity(e.guid);
+                if (entity && entity->getType() == game::ObjectType::UNIT) {
+                    displayId = std::static_pointer_cast<game::Unit>(entity)->getDisplayId();
+                }
+                audioCoordinator_->getNpcVoiceManager()->playAggro(
+                    e.guid, displayId, voiceType, renderPos);
+            }
+        }));
+}
+
+}} // namespace wowee::core

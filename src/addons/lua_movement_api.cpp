@@ -10,7 +10,7 @@
 #include "addons/lua_api_helpers.hpp"
 #include "addons/lua_api_registrations.hpp"
 #include "addons/lua_services.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "rendering/movement_command.hpp"
 
 namespace wowee::addons {

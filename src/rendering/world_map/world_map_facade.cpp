@@ -7,7 +7,7 @@
 #include "rendering/world_map/exploration_state.hpp"
 #include "rendering/world_map/zone_metadata.hpp"
 #include "rendering/world_map/coordinate_projection.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "rendering/world_map/map_resolver.hpp"
 #include "rendering/world_map/overlay_renderer.hpp"
 #include "rendering/world_map/input_handler.hpp"
@@ -25,7 +25,7 @@
 #include "pipeline/asset_manager.hpp"
 #include "ui/ui_colors.hpp"
 #include "game/game_utils.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <imgui.h>
 #include <cmath>
 #include <algorithm>

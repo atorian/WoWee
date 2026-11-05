@@ -15,7 +15,7 @@
 #include <string>
 #include <vector>
 
-// stb_image's implementation is wowee_pipeline's (src/pipeline/stb_image_impl.cpp);
+// stb_image's implementation is wowee_pipeline's (src/third_party/stb_image_impl.cpp);
 // stb_image_write impl lives in texture_exporter.cpp.
 // We just need the function decls here.
 #include "stb_image.h"

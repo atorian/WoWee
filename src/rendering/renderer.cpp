@@ -10,9 +10,9 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
-#include "core/env_flag.hpp"
+#include "foundation/env_flag.hpp"
 #include "rendering/sky_params_from_lighting.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "rendering/camera.hpp"
 #include "rendering/terrain_renderer.hpp"
 #include "rendering/terrain_manager.hpp"
@@ -32,8 +32,8 @@
 #include "rendering/lens_weather.hpp"
 #include "rendering/lightning.hpp"
 #include "rendering/lighting_manager.hpp"
-#include "core/profiler.hpp"
-#include "core/thread_pool.hpp"
+#include "foundation/profiler.hpp"
+#include "foundation/thread_pool.hpp"
 #include "rendering/sky_system.hpp"
 #include "rendering/swim_effects.hpp"
 #include "rendering/mount_dust.hpp"
@@ -65,7 +65,7 @@
 #include "pipeline/adt_loader.hpp"
 #include "pipeline/terrain_mesh.hpp"
 #include "rendering/render_surface.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/vk_frame_data.hpp"
 #include "rendering/vk_shader.hpp"

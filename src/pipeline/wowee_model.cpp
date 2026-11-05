@@ -3,7 +3,7 @@
 #include "pipeline/wowee_model.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/m2_loader.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <fstream>
 #include <filesystem>
 #include <cstring>

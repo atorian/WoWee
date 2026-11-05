@@ -18,7 +18,7 @@
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/required_table.hpp"
 #include "pipeline/m2_loader.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
 #include <cmath>

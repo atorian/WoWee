@@ -8,8 +8,8 @@
 #include "rendering/m2_glow_card.hpp"
 #include "rendering/m2_track_sampler.hpp"
 #include "pipeline/m2_loader.hpp"
-#include "core/profiler.hpp"
-#include "core/logger.hpp"
+#include "foundation/profiler.hpp"
+#include "foundation/logger.hpp"
 #include <mutex>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>

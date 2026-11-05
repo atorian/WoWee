@@ -1,7 +1,7 @@
 #include "collision/movement_state.hpp"
 // Offline original-code comparisons. Collision + packet codec; no device or socket.
-#include "core/movement_reporting.hpp"
-#include "core/logger.hpp"
+#include "client/movement_reporting.hpp"
+#include "foundation/logger.hpp"
 #include "game/opcode_table.hpp"
 #include "network/packet.hpp"
 #include <sstream>

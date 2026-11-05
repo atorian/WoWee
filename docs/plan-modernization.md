@@ -90,7 +90,7 @@ macOS target is not the constraint.
 
 - **No PCH, no unity build** (neither `target_precompile_headers` nor `UNITY_BUILD` in CMake).
 - 413 `.cpp` files.
-- `core/logger.hpp` included by **170** files; `pipeline/wowee_binary_io.hpp` by 144.
+- `foundation/logger.hpp` included by **170** files; `pipeline/wowee_binary_io.hpp` by 144.
 - `<cstdint>` in 330 headers, `<string>` 312, `<vector>` 306.
 - Anchors: **`game_handler.hpp` is 5013 lines, included by 57 files**; `world_packets.hpp` 3387.
 
@@ -121,7 +121,7 @@ One phase per session. Each ends green: `./test.sh` passes (unit + lint), zero v
 
 ### Phase 1 — Precompiled header
 `target_precompile_headers` with the measured-heavy set: `<cstdint>`, `<string>`, `<vector>`,
-`<memory>`, `<unordered_map>`, `<functional>`, plus `core/logger.hpp`. Nothing else
+`<memory>`, `<unordered_map>`, `<functional>`, plus `foundation/logger.hpp`. Nothing else
 project-specific — a PCH pulling in `game_handler.hpp` would make incremental builds worse.
 
 **Exit:** clean-build wall time recorded before/after in §5. Revert if it does not improve.

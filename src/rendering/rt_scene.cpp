@@ -1,6 +1,6 @@
 #include "rendering/rt_scene.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "pipeline/heap_bytes.hpp"
 
 #include <chrono>

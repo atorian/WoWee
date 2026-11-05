@@ -50,13 +50,13 @@ builds it, one cache that holds it. Everyone who needs it asks that producer.
   it as exact, safe from bans, or complete. The current parity work is tracked
   in `tasks/collision-original-parity.md`.
 
-## Disks: everything on D:, nothing on C:
+## Build directories and Windows disk space
 
-- Build only inside `D:\games\WoWee` — the `build-dev` tree (preset `dev`,
-  no LTO) for iteration, `build` (Release, LTO) only for a final release
-  measurement.
-- Never write to drive C:. It is full, and the system and the game need what
-  is left of it.
+- Build on the current platform in the checkout's `build-dev` tree (preset
+  `dev`, no LTO) for iteration. Use `build` (Release, LTO) only for a final
+  release measurement. Local builds and tests on macOS and Linux are allowed.
+- On the Windows machine, keep builds in `D:\games\WoWee` and never write
+  to drive C:. It is full, and the system and the game need what is left of it.
   - Compilers and linkers put their temporaries in `TMP`/`TEMP`/`TMPDIR`,
     which default to `C:\Users\...\AppData\Local\Temp`. Point all three at
     `D:\games\WoWee\build-dev\tmp` (create it if missing) in every shell that
@@ -76,9 +76,9 @@ cover it run on this device before it is merged, and the commit says they did.
 
 ## Building and running
 
-- `ninja -C build-dev wowee` from `D:\games\WoWee`, with `C:\msys64\mingw64\bin`
+- On Windows, `ninja -C build-dev wowee` from `D:\games\WoWee`, with `C:\msys64\mingw64\bin`
   first on `PATH` and `PATHEXT` including `.COM;.EXE;.BAT;.CMD`.
-- A fresh `build-dev\bin` needs the runtime DLLs copied from `build\bin` and a
+- On Windows, a fresh `build-dev\bin` needs the runtime DLLs copied from `build\bin` and a
   junction `build-dev\bin\Data` -> `D:\games\WoWee\Data`.
 - When a change needs the game rebuilt, close any running `wowee.exe`, rebuild
   and relaunch `build-dev\bin\wowee.exe` without asking. A forced close can
@@ -253,13 +253,28 @@ whatever the code looks like inside.
 Dependencies point one way - who may include whom:
 
 ```
-core/       -> game/, rendering/, collision/, audio/, ui/, pipeline/   (the client: owns and wires everything)
+client/     -> game/, rendering/, collision/, audio/, ui/, pipeline/   (the client: owns and wires everything)
 ui/         -> game/, rendering/, collision/, pipeline/
-game/       -> <context>/, pipeline/, network/              (not rendering/, audio/, ui/, core/application)
+game/       -> <context>/, pipeline/, network/              (not rendering/, audio/, ui/, client/application)
 rendering/  -> collision/, pipeline/                       (wowee_render: not game/, ui/, audio/, network/)
 collision/  -> pipeline/                                   (wowee_collision: nothing above it)
-<context>/  -> base only                                   (wowee_<context>: see "Game layer architecture")
+pipeline/   -> foundation/, math/, platform/
+platform/   -> foundation/, third_party/                    (no rendering/ or client/)
+foundation/ -> standard library and its external dependencies only
+<context>/  -> foundation only                             (wowee_<context>: see "Game layer architecture")
 ```
+
+- Foundation, Platform and Client have matching physical directories under
+  `include/` and `src/`. `wowee_foundation` holds reusable infrastructure;
+  `wowee_platform` holds OS services; `wowee_platform_sdl` adds SDL windows
+  and input. A headless consumer does not need SDL to query paths or memory.
+  Existing C++ APIs retain the `wowee::core` namespace; module ownership is
+  determined by header paths and CMake targets, without forwarding headers.
+- Platform facilities never include the renderer. The client's
+  `Application` owns a platform `Window` and a `rendering::WindowSurface`;
+  the latter owns `VkContext` and reacts to the window's display changes.
+  Destroy the renderer first, the surface next, and the window last. Tools
+  use these same producers rather than compiling their own window sources.
 
 - **Every include points down the layers.** `tools/module_boundary_check.py`
   assigns each file under `src/` and `include/` to a module and allows
@@ -298,7 +313,7 @@ collision/  -> pipeline/                                   (wowee_collision: not
   toast or voice line answers an event is the client's choice, not the
   game's. `tools/game_dependency_check.py` holds its includes of the
   presentation at zero.
-- **core/** is the client: it owns everything, subscribes to the game's events
+- **client/** is the client: it owns everything, subscribes to the game's events
   and turns them into pictures and sound (`SpellPresentation`, `PlayerView`,
   the `*CallbackHandler`s), and implements the game's query interfaces over
   the renderer and the collision world (`RendererTransportScene`,
@@ -377,8 +392,8 @@ looks, not the way the old code does.
 | Domain | an area's state and the rules that change it | `<context>/domain/` |
 | Services | use cases, the ports they need, the interface consumers use | `<context>/services/` |
 | Protocol | opcodes, decoding, the socket: the handlers | `game/` |
-| Presentation | chat lines, Lua/FrameXML, sound, drawing | `core/`, `ui/`, `addons/` |
-| Composition root | creates every object and wires implementations to ports | `core/application.cpp` |
+| Presentation | chat lines, Lua/FrameXML, sound, drawing | `client/`, `ui/`, `addons/` |
+| Composition root | creates every object and wires implementations to ports | `client/application.cpp` |
 
 ### Bounded contexts
 
@@ -386,7 +401,7 @@ looks, not the way the old code does.
   directory of its own: `include/<context>/domain/`,
   `include/<context>/services/`, the same under `src/`, namespace
   `wowee::<context>`, and its own static library `wowee_<context>` that links
-  only `wowee_base`.
+  only `wowee_foundation`.
 - `<context>/domain` includes only `base` and its own headers.
   `<context>/services` includes only `base`, its own domain and its own
   headers. Contexts do not include each other's services; two contexts that
@@ -520,7 +535,7 @@ What there is to take:
 | fire a FrameXML event (`"UPDATE_MACROS"`, ...) | `FrameXmlEvents` | `game/frame_xml_events.hpp` |
 | put a line in the chat log ("Received item: ...") | `ChatLog` (ChatHandler is one) | `game/chat_log.hpp` |
 | a refusal on the error line ("That bag is full.") | `raiseUiError(bus, frameXml, text)` | `game/ui_errors.hpp` |
-| say what happened, hear another domain | `core::EventBus&` | `core/event_bus.hpp`, `game/game_events.hpp` |
+| say what happened, hear another domain | `core::EventBus&` | `foundation/event_bus.hpp`, `game/game_events.hpp` |
 | a value from `GameServices` | that field alone (`std::string cacheRoot`, `const EmoteTable&`), not the struct | `game/game_services.hpp` |
 | read a client table (`Spell.dbc`, `TaxiNodes.dbc`, ...) | `const GameData&`: `table(dbc, fields, neededFor)` returns it or stops the game; a `GameHarness` test gives rows with `dbc(...)` | `game/game_data.hpp` |
 | ask something of another part of the game | a small interface of your own, in your header (`ActionBarQueries`) | |

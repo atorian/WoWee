@@ -4,7 +4,7 @@
 // graphics preset logic.
 // ============================================================
 #include "addons/addon_lua_snippets.hpp"
-#include "core/zone_tracker.hpp"
+#include "client/zone_tracker.hpp"
 #include "ui/graphics_choices.hpp"
 #include "ui/graphics_presets.hpp"
 #include "ui/settings_panel.hpp"
@@ -17,12 +17,12 @@
 #include "ui/chat/chat_settings.hpp"
 #include "ui/keybinding_manager.hpp"
 #include "ui/gamepad_controls.hpp"
-#include "core/gamepad.hpp"
-#include "core/application.hpp"
-#include "core/window.hpp"
-#include "core/config_paths.hpp"
-#include "core/logger.hpp"
-#include "core/version.hpp"
+#include "platform/gamepad.hpp"
+#include "client/application.hpp"
+#include "platform/window.hpp"
+#include "platform/config_paths.hpp"
+#include "foundation/logger.hpp"
+#include "client/version.hpp"
 #include "rendering/renderer.hpp"
 #include "rendering/lens_flare.hpp"
 #include "rendering/post_process_pipeline.hpp"
@@ -1207,8 +1207,8 @@ void SettingsPanel::applySettingSideEffects(const std::string& key) {
     } else if (key == "texturefiltering") {
         // Levels rather than a sample count, each step doubling: 0 is off
         // and 4 is the 16x every desktop card stops at.
-        if (services_.window) {
-            if (auto* ctx = services_.window->getVkContext()) {
+        if (renderer) {
+            if (auto* ctx = renderer->getVkContext()) {
                 const int level = std::clamp(pendingTextureFiltering, 0, 4);
                 ctx->setAnisotropyLimit(static_cast<float>(std::min(1 << level, 16)));
             }

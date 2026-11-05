@@ -1,6 +1,6 @@
 // lua_quest_api.cpp - Quest log, skills, talents, glyphs, and achievements Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
-#include "core/local_time.hpp"
+#include "foundation/local_time.hpp"
 #include "game/item_text.hpp"
 #include "achievement/domain/catalog.hpp"
 #include "achievement/services/achievements.hpp"
@@ -13,11 +13,11 @@
 #include "addons/lua_engine.hpp"
 #include "game/auction_filters.hpp"
 #include "game/game_utils.hpp"
-#include "core/packed_time.hpp"
+#include "game/packed_time.hpp"
 #include "game/quest_progress.hpp"
 #include "game/quest_objectives.hpp"
 #include "ui/chat/chat_utils.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -4455,8 +4455,8 @@ void registerQuestLuaAPI(lua_State* L) {  // NOLINT(readability-function-size)
             if (!gh) return 0;
             std::vector<std::pair<uint32_t, uint32_t>> byDate;  // sortKey, id
             for (uint32_t id : achievementsOf(L).getEarnedAchievements()) {
-                const core::WowDate d =
-                    core::unpackWowPackedTime(achievementsOf(L).getAchievementDate(id));
+                const calendar::WowDate d =
+                    game::unpackWowPackedTime(achievementsOf(L).getAchievementDate(id));
                 byDate.emplace_back(
                     (static_cast<uint32_t>(d.yearSince2000) << 9) |
                     (static_cast<uint32_t>(d.month) << 5) |
@@ -4493,7 +4493,7 @@ void registerQuestLuaAPI(lua_State* L) {  // NOLINT(readability-function-size)
                     lua_pushstring(L, achievementsOf(L).getAchievementName(achId).c_str());    // 2: name
                     lua_pushnumber(L, achievementsOf(L).getAchievementPoints(achId));          // 3: points
                     lua_pushboolean(L, done ? 1 : 0);                            // 4: completed
-                    const core::WowDate on = core::unpackWowPackedTime(date);
+                    const calendar::WowDate on = game::unpackWowPackedTime(date);
                     lua_pushnumber(L, done ? on.month : 0);                      // 5: month
                     lua_pushnumber(L, done ? on.day : 0);                        // 6: day
                     // SHORTDATE formats the year "%02d", so it wants the short
@@ -4610,7 +4610,7 @@ void registerQuestLuaAPI(lua_State* L) {  // NOLINT(readability-function-size)
                 lua_pushnumber(L, 0); lua_pushnumber(L, 0); lua_pushnumber(L, 0);
                 return 4;
             }
-            const core::WowDate on = core::unpackWowPackedTime(it->second);
+            const calendar::WowDate on = game::unpackWowPackedTime(it->second);
             lua_pushboolean(L, 1);
             lua_pushnumber(L, on.month);
             lua_pushnumber(L, on.day);
@@ -4701,7 +4701,7 @@ void registerQuestLuaAPI(lua_State* L) {  // NOLINT(readability-function-size)
             uint32_t date = achievementsOf(L).getAchievementDate(id);
             uint32_t points = achievementsOf(L).getAchievementPoints(id);
             const std::string& desc = achievementsOf(L).getAchievementDescription(id);
-            const core::WowDate earned = core::unpackWowPackedTime(date);
+            const calendar::WowDate earned = game::unpackWowPackedTime(date);
             int month = completed ? earned.month : 0;
             int day   = completed ? earned.day : 0;
             // Short form: SHORTDATE is "%2$d/%1$02d/%3$02d".

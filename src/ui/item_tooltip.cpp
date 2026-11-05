@@ -11,11 +11,11 @@
 #include "game/inventory.hpp"
 #include "game/inventory_slots.hpp"
 #include "game/reputation_standing.hpp"
-#include "core/application.hpp"
+#include "client/application.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "game/game_data.hpp"
 #include "ui/item_tables.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <imgui.h>
 #include <algorithm>
 #include <cstdio>

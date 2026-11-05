@@ -24,7 +24,7 @@ extern "C" {
 
 #include "addons/lua_handler_globals.hpp"
 #include "addons/lua_services.hpp"
-#include "core/frame_phase.hpp"
+#include "client/frame_phase.hpp"
 
 using wowee::addons::legacyHandlerGlobals;
 using wowee::addons::pcallScript;

@@ -8,7 +8,7 @@
 #include "rendering/post_process_pipeline.hpp"
 #include "rendering/water_renderer.hpp"
 #include "rendering/vk_context.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <stb_image_write.h>
 #include <algorithm>
 #include <cstring>

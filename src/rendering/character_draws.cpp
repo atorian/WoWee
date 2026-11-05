@@ -1,6 +1,6 @@
 #include "rendering/character_draws.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "rendering/gpu_cull.hpp"
 #include "rendering/skeleton_pool.hpp"
 #include "rendering/vk_context.hpp"

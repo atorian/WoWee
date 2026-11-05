@@ -12,11 +12,11 @@
 #include "game/entity.hpp"
 #include "game/update_field_table.hpp"
 #include "game/opcode_table.hpp"
-#include "core/coordinates.hpp"
-#include "core/logger.hpp"
+#include "pipeline/coordinates.hpp"
+#include "foundation/logger.hpp"
 #include "network/world_connection.hpp"
-#include "core/cvar_store.hpp"
-#include "core/event_bus.hpp"
+#include "foundation/cvar_store.hpp"
+#include "foundation/event_bus.hpp"
 #include "game/game_events.hpp"
 #include <algorithm>
 #include <cmath>

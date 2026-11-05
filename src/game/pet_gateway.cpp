@@ -2,7 +2,7 @@
 
 #include <string>
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "game/chat_log.hpp"
 #include "game/frame_xml_events.hpp"
 #include "game/opcode_table.hpp"

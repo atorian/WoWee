@@ -3,7 +3,7 @@
 // wowee_petition is linked.
 #include <catch_amalgamated.hpp>
 
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 #include "petition/services/petition_service.hpp"
 
 #include <string>

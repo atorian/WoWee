@@ -17,7 +17,7 @@ WHAT IT DOES
 
 Follows the quoted includes of src/collision and include/collision through
 include/ and src/, and reports every file reached outside collision/,
-pipeline/ and the header-only core infrastructure wowee_base carries.
+pipeline/ and the Foundation and Platform facilities below them.
 
 WHAT IT CANNOT SEE
 
@@ -29,8 +29,7 @@ import sys
 # The same reading of includes as the renderer's own check.
 from render_dependency_check import INCLUDE, ROOT, resolve
 
-ALLOWED_PREFIXES = ("collision/", "pipeline/")
-CORE_ALLOWED = {"core/logger.hpp", "core/coordinates.hpp", "core/profiler.hpp"}
+ALLOWED_PREFIXES = ("collision/", "pipeline/", "foundation/", "platform/")
 
 
 def main():
@@ -48,7 +47,7 @@ def main():
         rel = queue.pop(0)
         text = (ROOT / rel).read_text(errors="ignore")
         for name in INCLUDE.findall(text):
-            allowed = name.startswith(ALLOWED_PREFIXES) or name in CORE_ALLOWED
+            allowed = name.startswith(ALLOWED_PREFIXES)
             if not allowed:
                 offenders.append((rel, name))
                 continue

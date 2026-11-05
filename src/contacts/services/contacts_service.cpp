@@ -1,6 +1,6 @@
 #include "contacts/services/contacts_service.hpp"
 
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 
 namespace wowee::contacts {
 

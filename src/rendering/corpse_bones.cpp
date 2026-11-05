@@ -2,8 +2,8 @@
 #include "rendering/m2_renderer.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/m2_loader.hpp"
-#include "core/logger.hpp"
-#include "core/thread_pool.hpp"
+#include "foundation/logger.hpp"
+#include "foundation/thread_pool.hpp"
 #include <chrono>
 #include <unordered_set>
 

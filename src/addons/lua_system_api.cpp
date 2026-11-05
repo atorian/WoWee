@@ -20,10 +20,10 @@
 #include <utility>
 #include <vector>
 #include "game/group_defines.hpp"
-#include "core/open_url.hpp"
-#include "core/version.hpp"
-#include "core/config_paths.hpp"
-#include "core/cvar_store.hpp"
+#include "platform/open_url.hpp"
+#include "client/version.hpp"
+#include "platform/config_paths.hpp"
+#include "foundation/cvar_store.hpp"
 #include "ui/settings_schema.hpp"
 #include "imgui.h"
 #include "achievement/services/achievements.hpp"
@@ -58,14 +58,14 @@
 #include "audio/player_voice_manager.hpp"
 #include "audio/spell_sound_manager.hpp"
 #include "audio/ui_sound_manager.hpp"
-#include "core/app_clock.hpp"
-#include "core/window.hpp"
+#include "foundation/app_clock.hpp"
+#include "platform/window.hpp"
 
 #include <SDL3/SDL.h>
 #include "game/expansion_profile.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "rendering/world_map/coordinate_projection.hpp"
-#include "core/local_time.hpp"
+#include "foundation/local_time.hpp"
 
 namespace wowee::addons {
 

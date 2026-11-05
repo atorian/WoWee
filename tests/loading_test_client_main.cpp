@@ -2,8 +2,8 @@
 // fixture watching its frames (tests/loading_frame_probe.cpp). The same client
 // objects as wowee.exe and this main instead of the client's; wowee.exe has no
 // fixture code at all. Run it through tools/test_loading_frames.ps1.
-#include "core/application.hpp"
-#include "core/client_main.hpp"
+#include "client/application.hpp"
+#include "client/client_main.hpp"
 #include "loading_frame_probe.hpp"
 
 #include <cstdio>

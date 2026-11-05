@@ -61,7 +61,7 @@
 #include "ui/settings_panel.hpp"
 #include "ui/game_screen.hpp"
 #include "ui/chat/chat_settings.hpp"
-#include "core/app_clock.hpp"
+#include "foundation/app_clock.hpp"
 #include "ui/widget_renderer.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
@@ -71,8 +71,8 @@
 #include "ui/link_hit.hpp"
 #include "game/expansion_profile.hpp"
 #include "game/game_handler.hpp"
-#include "core/event_bus.hpp"
-#include "core/cvar_store.hpp"
+#include "foundation/event_bus.hpp"
+#include "foundation/cvar_store.hpp"
 #include "network/world_socket.hpp"
 #include "rendering/movement_command.hpp"
 
@@ -93,7 +93,7 @@
 #include <filesystem>
 #include <cstring>
 #include <cstdlib>
-#include "core/env.hpp"
+#include "foundation/env.hpp"
 #include <string>
 #include <map>
 #include <set>

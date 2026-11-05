@@ -1,6 +1,6 @@
 #include <catch_amalgamated.hpp>
 #include "network/world_socket.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <algorithm>
 
 namespace wowee::network {

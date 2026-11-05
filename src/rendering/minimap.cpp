@@ -11,8 +11,8 @@
 #include "pipeline/minimap_tile_index.hpp"
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/required_table.hpp"
-#include "core/coordinates.hpp"
-#include "core/logger.hpp"
+#include "pipeline/coordinates.hpp"
+#include "foundation/logger.hpp"
 #include <imgui.h>
 #include <backends/imgui_impl_vulkan.h>
 #include <glm/gtc/constants.hpp>

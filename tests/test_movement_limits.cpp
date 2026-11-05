@@ -1,6 +1,6 @@
 #include <catch_amalgamated.hpp>
 #include "rendering/movement_limits.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 
 #include <cmath>
 

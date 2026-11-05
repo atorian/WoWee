@@ -1,4 +1,4 @@
-#include "core/local_time.hpp"
+#include "foundation/local_time.hpp"
 #include "rendering/lighting_manager.hpp"
 #include "rendering/light_coords.hpp"
 #include "rendering/light_band_block.hpp"
@@ -10,7 +10,7 @@
 #include <glm/gtc/constants.hpp>
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/required_table.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>

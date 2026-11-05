@@ -1,6 +1,6 @@
 #include "game/entity.hpp"
-#include "core/logger.hpp"
-#include "core/coordinates.hpp"
+#include "foundation/logger.hpp"
+#include "pipeline/coordinates.hpp"
 #include <algorithm>
 
 namespace wowee {

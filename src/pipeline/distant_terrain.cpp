@@ -1,6 +1,6 @@
 #include "pipeline/distant_terrain.hpp"
-#include "core/coordinates.hpp"
-#include "core/logger.hpp"
+#include "pipeline/coordinates.hpp"
+#include "foundation/logger.hpp"
 #include <algorithm>
 #include <cstring>
 #include <cmath>

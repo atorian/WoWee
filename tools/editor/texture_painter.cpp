@@ -1,5 +1,5 @@
 #include "texture_painter.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <algorithm>
 #include <cmath>
 #include <random>

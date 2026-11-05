@@ -1,13 +1,13 @@
 // zone_highlight_layer.cpp - Continent view zone rectangles + hover effects.
 // Extracted from WorldMap::renderZoneHighlights (Phase 8 of refactoring plan).
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "rendering/imgui_texture.hpp"
 #include "rendering/world_map/layers/zone_highlight_layer.hpp"
 #include "rendering/world_map/coordinate_projection.hpp"
 #include "rendering/vk_texture.hpp"
 #include "rendering/vk_context.hpp"
 #include "pipeline/asset_manager.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <imgui.h>
 #include <backends/imgui_impl_vulkan.h>
 #include <algorithm>

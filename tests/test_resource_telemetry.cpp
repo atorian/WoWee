@@ -4,7 +4,7 @@
 // once per crossing of a threshold, not once a sample.
 #include <catch_amalgamated.hpp>
 
-#include "core/resource_telemetry.hpp"
+#include "client/resource_telemetry.hpp"
 
 #include <optional>
 #include <string>

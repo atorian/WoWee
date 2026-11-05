@@ -3,7 +3,7 @@
 /**
  * gamepad_controls.hpp - what a controller's sticks and buttons mean.
  *
- * The device itself is core/gamepad.hpp. This is the half that decides a push
+ * The device itself is platform/gamepad.hpp. This is the half that decides a push
  * of the left stick is walking forward and a press of A is a jump, and then
  * says so through the channels the client listens on:
  *
@@ -41,7 +41,7 @@
 
 #include <SDL3/SDL.h>
 
-#include "core/gamepad.hpp"
+#include "platform/gamepad.hpp"
 #include <glm/glm.hpp>
 
 #include <algorithm>

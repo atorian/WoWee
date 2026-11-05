@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 #if defined(_WIN32)
 #include <windows.h>

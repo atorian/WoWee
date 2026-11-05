@@ -2,7 +2,7 @@
 #include "ezwow_loader_fixture.hpp"
 #include <catch_amalgamated.hpp>
 #include "game/server_extension.hpp"
-#include "core/env.hpp"
+#include "foundation/env.hpp"
 #include "ezwow_bootstrap_fixture.hpp"
 #include <nlohmann/json.hpp>
 #include <openssl/evp.h>

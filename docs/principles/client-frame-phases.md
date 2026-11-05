@@ -2,7 +2,7 @@
 
 Chosen for WoWee on 2026-10-15. Applies when adding per-frame client work.
 
-`ClientLoop::runFrame` (`include/core/client_loop.hpp`) is the authoritative
+`ClientLoop::runFrame` (`include/client/client_loop.hpp`) is the authoritative
 sequence: Input, Network, Game, Events, Streaming, Interface, Present, Render,
 Transitions, Pace. `framePlanFor(AppState)` chooses the connection, simulation,
 world presentation and view for the frame. Compute one const plan before Input

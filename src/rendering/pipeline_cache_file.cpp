@@ -1,6 +1,6 @@
 #include "rendering/pipeline_cache_file.hpp"
 
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 
 #include <cstring>
 #include <fstream>

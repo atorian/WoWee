@@ -2,7 +2,7 @@
 
 #include <deque>
 
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 #include "game/chat_filters.hpp"
 #include "game/chat_log.hpp"
 

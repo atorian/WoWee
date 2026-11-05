@@ -1,6 +1,6 @@
 #include "auth/srp.hpp"
 #include "auth/crypto.hpp"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include <algorithm>
 #include <cctype>
 #include <sstream>

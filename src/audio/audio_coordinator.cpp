@@ -13,8 +13,8 @@
 #include "audio/movement_sound_manager.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "game/zone_manager.hpp"
-#include "core/env_flag.hpp"
-#include "core/logger.hpp"
+#include "foundation/env_flag.hpp"
+#include "foundation/logger.hpp"
 
 namespace wowee {
 namespace audio {

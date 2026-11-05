@@ -1,4 +1,4 @@
-#include "core/movement_status.hpp"
+#include "client/movement_status.hpp"
 #include "collision/movement_surface.hpp"
 #include "game/world_packets.hpp"
 #include "network/packet.hpp"

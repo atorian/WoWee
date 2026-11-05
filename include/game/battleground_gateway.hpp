@@ -2,7 +2,7 @@
 
 #include "battleground/domain/records.hpp"
 #include "battleground/services/ports.hpp"
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 
 #include <cstdint>
 #include <optional>

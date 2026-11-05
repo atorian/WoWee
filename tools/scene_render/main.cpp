@@ -3,7 +3,7 @@
 //
 //     scene_render <scene.json> <out.png>
 //
-// Links wowee_render, wowee_pipeline and wowee_base and nothing of the client,
+// Links wowee_render, wowee_pipeline and wowee_foundation and nothing of the client,
 // so a change to a shader or a renderer rebuilds the renderer and this, and a
 // frame takes the few seconds it takes to load the models.
 //
@@ -117,15 +117,15 @@
 // recorded in the kept frame, which is what the scene tests registered beside
 // this tool read.
 
-#include "core/coordinates.hpp"
-#include "core/frame_worker.hpp"
-#include "core/frame_budget.hpp"
+#include "pipeline/coordinates.hpp"
+#include "foundation/frame_worker.hpp"
+#include "foundation/frame_budget.hpp"
 #include "rendering/minimap.hpp"
 #include "rendering/lightning.hpp"
 #include "rendering/frame_sink.hpp"
 #include "rendering/frame_scene.hpp"
 #include "stb_image_write.h"
-#include "core/logger.hpp"
+#include "foundation/logger.hpp"
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/dbc_layout.hpp"
 #include "pipeline/dbc_loader.hpp"

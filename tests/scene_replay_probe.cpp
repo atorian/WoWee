@@ -1,7 +1,7 @@
 // Opt-in native capture fixture. The ordinary executable never seeds it.
-#include "core/application.hpp"
-#include "core/frame_observer.hpp"
-#include "core/coordinates.hpp"
+#include "client/application.hpp"
+#include "client/frame_observer.hpp"
+#include "pipeline/coordinates.hpp"
 #include "game/game_handler.hpp"
 #include "game/world_handler.hpp"
 #include "game/game_events.hpp"

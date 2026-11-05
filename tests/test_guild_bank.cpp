@@ -2,7 +2,7 @@
 // gateway and the real event bus. Only wowee_guild_bank is linked.
 #include <catch_amalgamated.hpp>
 
-#include "core/event_bus.hpp"
+#include "foundation/event_bus.hpp"
 #include "guild_bank/services/guild_bank_service.hpp"
 
 #include <algorithm>

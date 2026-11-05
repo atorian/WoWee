@@ -3,7 +3,7 @@
 #include <cmath>
 #include <utility>
 
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "pipeline/terrain_mesh.hpp"
 
 // Which render axis a tile index counts along.

@@ -5,7 +5,7 @@
 #include "battleground/services/battlegrounds.hpp"
 #include "ui/chat/i_chat_command.hpp"
 #include "audio/audio_coordinator.hpp"
-#include "core/zone_tracker.hpp"
+#include "client/zone_tracker.hpp"
 #include "ui/chat_panel.hpp"
 #include "game/game_handler.hpp"
 #include "game/transport_manager.hpp"

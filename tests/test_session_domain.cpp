@@ -1,7 +1,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "game_harness.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "game/game_events.hpp"
 #include "group/services/group.hpp"
 #include "game/entity.hpp"
@@ -9,7 +9,7 @@
 #include "game/movement_flags.hpp"
 #include "game/world_handler.hpp"
 #include "game/update_field_table.hpp"
-#include "core/world_transition_queue.hpp"
+#include "client/world_transition_queue.hpp"
 
 #include <algorithm>
 #include <vector>

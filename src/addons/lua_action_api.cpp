@@ -21,7 +21,7 @@
 #include "ui/gamepad_controls.hpp"
 
 #include <span>
-#include "core/config_paths.hpp"
+#include "platform/config_paths.hpp"
 #include <array>
 #include <cctype>
 #include <filesystem>

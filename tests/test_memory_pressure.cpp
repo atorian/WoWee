@@ -3,7 +3,7 @@
 // so the second must be the stricter: a machine severely short is short.
 #include <catch_amalgamated.hpp>
 
-#include "core/memory_monitor.hpp"
+#include "platform/memory_monitor.hpp"
 
 #include <cstddef>
 

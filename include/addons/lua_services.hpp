@@ -2,7 +2,7 @@
 // Replaces Application::getInstance() calls in domain API files (§5.2).
 #pragma once
 
-#include "core/frame_plan.hpp"
+#include "client/frame_plan.hpp"
 #include "rendering/movement_command.hpp"
 
 #include <functional>

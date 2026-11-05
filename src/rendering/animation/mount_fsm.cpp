@@ -1,5 +1,5 @@
 #include "rendering/animation/mount_fsm.hpp"
-#include "core/coordinates.hpp"
+#include "pipeline/coordinates.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include <algorithm>
 #include <cmath>
