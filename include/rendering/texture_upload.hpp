@@ -22,17 +22,6 @@ class VkTexture;
 /// renderer shares the same image.
 bool giveCachedSampler(VkContext& ctx, VkTexture& texture);
 
-/// Upload a file in the form the cache keeps files (TextureForm::Stored) and
-/// hand it to the cache under `path`, normalized. Its transparency is read
-/// once here, so every renderer sees the same answer whoever loaded it first.
-///
-/// When the whole image does not fit the budget, a smaller mip of it is
-/// tried - a quarter of the memory each - before it is refused; the first
-/// such texture of a stretch is said in the log. Empty, said once per path,
-/// when it fails to upload or is refused: the caller draws its fallback.
-[[nodiscard]] TextureRef cacheStoredTexture(VkContext& ctx, const std::string& path,
-                                            const pipeline::BLPImage& image);
-
 /// A texture made and its copy recorded, not yet in the cache: what goes in
 /// once the copy has run (TextureCache::insert). No texture when it could
 /// not be made, which is said.
@@ -41,11 +30,13 @@ struct PreparedTexture {
     std::shared_ptr<VkTexture> texture;
     uint64_t bytes = 0;
     TextureInfo info;
+    /// Failed preparation can still have recorded copies into this image.
+    /// Keep it alive until the batch fences, then discard it.
+    bool publish = true;
 };
 
-/// cacheStoredTexture's making, without the insert: inside an upload batch
-/// the copy is only recorded, and the texture goes in the cache after the
-/// batch has run (TextureLoads).
+/// Record a stored texture upload. Publication waits for the batch fence.
+/// Under memory pressure, tries smaller existing mips before admission.
 [[nodiscard]] PreparedTexture prepareStoredTexture(VkContext& ctx, const std::string& path,
                                                    const pipeline::BLPImage& image);
 
@@ -53,17 +44,12 @@ struct PreparedTexture {
 /// where it cannot.
 [[nodiscard]] NormalMapFormat normalMapFormatFor(const VkContext& ctx);
 
-/// Upload a normal/height map encoded on a worker, every level as it was
-/// made, and hand it to the cache under `key` with its height variance.
-/// Empty, said once per key, on failure or refusal.
-[[nodiscard]] TextureRef cacheNormalMap(VkContext& ctx, const TextureKey& key, const EncodedNormalMap& map);
-/// Its making, without the insert (prepareStoredTexture).
+/// Record the upload of a normal map encoded on a worker, without publishing.
 [[nodiscard]] PreparedTexture prepareNormalMap(VkContext& ctx, const TextureKey& key, const EncodedNormalMap& map);
 
-/// Upload RGBA8 pixels with generated mips and hand them to the cache under
-/// `key`. Empty, said once per key, on failure or refusal.
-[[nodiscard]] TextureRef cachePixels(VkContext& ctx, const TextureKey& key, const uint8_t* rgba,
-                                     uint32_t width, uint32_t height, TextureInfo info);
+/// Record RGBA8 pixels and generated mips, without publishing.
+[[nodiscard]] PreparedTexture preparePixels(VkContext& ctx, const TextureKey& key, const uint8_t* rgba,
+                                             uint32_t width, uint32_t height, TextureInfo info);
 
 /// The same, for a texture only its owner will find (TextureForm::Owned and
 /// the like): never refused, and sampled however its owner says, since

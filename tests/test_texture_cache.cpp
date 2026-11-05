@@ -6,6 +6,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "rendering/texture_cache.hpp"
+#include "rendering/texture_dependencies.hpp"
 
 #include <cstddef>
 #include <functional>
@@ -85,6 +86,127 @@ TextureCache::Config budget(uint64_t bytes) {
 }
 
 } // namespace
+
+// Realistic bugs: a model copy stays white after publication, a stale frame
+// starts sampling the new image, or an idle-cache eviction frees the image
+// still held by the model through its deferred reference.
+TEST_CASE("an arriving texture updates model bindings while an older frame keeps its image", "[texture_cache]") {
+    FakeDevice device;
+    Images images;
+    TextureCache cache(device, budget(12 * kMiB));
+    TextureRef white = cache.insert(stored("fallback"), images.make("white"), 4 * kMiB);
+    const auto whiteHandle = white.tableHandle();
+    TextureRef request = cache.defer(stored("skin"), white);
+    TextureRef model = request;
+    TextureRef oldFrame = model.snapshot();
+    CHECK(model.loading());
+    CHECK(model.tableHandle() == whiteHandle);
+
+    TextureRef uploaded = cache.insert(stored("skin"), images.make("skin"), 4 * kMiB,
+                                       {.hasAlpha = true, .heightVariance = 0.25f});
+    const auto* skin = uploaded.get();
+    // The upload owner publishes only after its fence. Cache admission alone
+    // must not change what a bound model samples.
+    CHECK(model.tableHandle() == whiteHandle);
+    cache.complete(request, uploaded);
+    uploaded.reset();
+    request.reset();
+    white.reset();
+
+    CHECK_FALSE(model.loading());
+    CHECK_FALSE(model.failed());
+    REQUIRE(device.table.contains(model.tableHandle()));
+    CHECK(device.table.at(model.tableHandle()) == skin);
+    CHECK(model.info().hasAlpha);
+    CHECK(model.info().heightVariance == 0.25f);
+    CHECK(oldFrame.tableHandle() == whiteHandle);
+    CHECK_FALSE(oldFrame.info().hasAlpha);
+
+    // Both images are still sampled, so neither is an eviction candidate.
+    CHECK_FALSE(cache.insert(stored("pressure"), images.make("pressure"), 8 * kMiB));
+    device.fencesPassed();
+    CHECK_FALSE(images.destroyed.contains("skin"));
+    CHECK_FALSE(images.destroyed.contains("white"));
+    TextureRef newFrame = model.snapshot();
+    model.reset();
+    oldFrame.reset();
+    // The old fallback can now be evicted; the new frame pins the skin.
+    REQUIRE(cache.insert(stored("replacement"), images.make("replacement"), 8 * kMiB));
+    device.fencesPassed();
+    CHECK(images.destroyed.contains("white"));
+    CHECK_FALSE(images.destroyed.contains("skin"));
+    CHECK(device.table.at(newFrame.tableHandle()) == skin);
+
+    // A realm/expansion change may reuse the path. An old frame keeps its
+    // original image, while a new consumer sees only the new dataset.
+    cache.invalidateNamed();
+    CHECK_FALSE(cache.find(stored("skin")));
+    TextureRef nextDataset = cache.insert(stored("skin"), images.make("next-skin"), 4 * kMiB);
+    REQUIRE(nextDataset);
+    CHECK_FALSE(nextDataset.info().hasAlpha);
+    CHECK(newFrame.info().hasAlpha);
+    CHECK(device.table.at(newFrame.tableHandle()) == skin);
+}
+
+// Realistic bugs: one completed skin dirties an unrelated character, a shared
+// skin updates only one wearer, or a hidden/re-dressed/removed wearer loses
+// or keeps the wrong dependency. Normal maps can arrive through another
+// renderer's reference to the same resident image.
+TEST_CASE("texture changes invalidate only the material lists that read them", "[texture_cache][dependencies]") {
+    FakeDevice device;
+    Images images;
+    TextureCache cache(device, budget(64 * kMiB));
+    auto white = cache.insert(stored("white"), images.make("white"), kMiB);
+    auto first = cache.defer(stored("first"), white);
+    auto second = cache.defer(stored("second"), white);
+    wowee::rendering::TextureDependencies dependencies;
+    dependencies.replace(10, std::vector{first});
+    dependencies.replace(11, std::vector{first});
+    dependencies.replace(20, std::vector{second});
+    dependencies.poll();
+    CHECK_FALSE(dependencies.changed(10));
+    CHECK_FALSE(dependencies.changed(11));
+    CHECK_FALSE(dependencies.changed(20));
+
+    auto resident = cache.insert(stored("first"), images.make("first"), kMiB);
+    cache.complete(first, resident);
+    dependencies.poll();
+    CHECK(dependencies.changed(10));
+    CHECK(dependencies.changed(11));
+    CHECK_FALSE(dependencies.changed(20));
+    // Rebuild one visible wearer. The hidden wearer's old list still needs
+    // its update when it next becomes visible.
+    dependencies.replace(10, std::vector{first});
+    dependencies.poll();
+    CHECK_FALSE(dependencies.changed(10));
+    CHECK(dependencies.changed(11));
+    // A new dress stops depending on the first skin.
+    dependencies.replace(11, std::vector{second});
+    auto normal = cache.insert({"first", TextureForm::NormalHeight, 1}, images.make("normal"), kMiB);
+    cache.setNormalMap(resident, normal);
+    dependencies.poll();
+    CHECK(dependencies.changed(10));
+    CHECK_FALSE(dependencies.changed(11));
+    CHECK_FALSE(dependencies.changed(20));
+    dependencies.replace(10, std::vector{first});
+    // Attaching the existing normal again does not change the material.
+    cache.setNormalMap(resident, normal);
+    dependencies.poll();
+    CHECK_FALSE(dependencies.changed(10));
+
+    dependencies.remove(10);
+    auto nextNormal = cache.insert({"first", TextureForm::NormalHeight, 2}, images.make("next-normal"), kMiB);
+    cache.setNormalMap(resident, nextNormal);
+    cache.complete(second, {});
+    dependencies.poll();
+    CHECK_FALSE(dependencies.changed(10));
+    CHECK(dependencies.changed(11));
+    CHECK(dependencies.changed(20));
+    dependencies.clear();
+    dependencies.poll();
+    CHECK_FALSE(dependencies.changed(11));
+    CHECK_FALSE(dependencies.changed(20));
+}
 
 TEST_CASE("one path asked for by two renderers is one texture", "[texture_cache]") {
     FakeDevice device;

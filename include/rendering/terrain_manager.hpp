@@ -123,7 +123,7 @@ struct PendingTile {
         uint32_t doodadId = 0;
         bool failed = false;
         pipeline::DetailDoodadModel model;
-        std::vector<std::pair<std::string, pipeline::BLPImage>> images;
+        std::vector<std::pair<std::string, TextureRef>> images;
     };
     std::vector<DetailModel> detailModels;
 
@@ -162,12 +162,9 @@ struct PendingTile {
     };
     std::vector<AmbientEmitter> ambientEmitters;
 
-    // Pre-loaded terrain texture BLP data (loaded on background thread to avoid
-    // blocking file I/O on the main thread during finalizeTile)
-    std::unordered_map<std::string, pipeline::BLPImage> preloadedTextures;
-    // Their relief (TerrainRenderer::deriveNormalMap), keyed alike; none for
-    // a texture whose relief was already in the cache.
-    std::unordered_map<std::string, EncodedNormalMap> preloadedTerrainNormalMaps;
+    /// Requests keep both the diffuse and its relief resident until chunks
+    /// have taken their own references. No pixel buffers reach finalization.
+    std::vector<TextureRef> terrainTextures;
 };
 
 /**
@@ -207,15 +204,11 @@ struct FinalizingTile {
     std::vector<uint32_t> wmoPlacementInstances;
 
     // Incremental terrain upload state (splits TERRAIN phase across frames)
-    bool terrainPreloaded = false;  // True after preloaded textures uploaded
+    bool terrainPreloaded = false;  // True once the texture requests have completed
+    bool waitingForTextures = false;
     int terrainChunkNext = 0;       // Next chunk index to upload (0-255, row-major)
     bool terrainMeshDone = false;   // True when all chunks uploaded
     bool terrainWaterDone = false;  // True once the tile's water is in
-    // The tile's textures, uploaded a few at a time rather than all at once:
-    // the whole set in one call took 35-41 ms on Northrend tiles.
-    std::vector<std::string> terrainTexKeys;
-    size_t terrainTexNext = 0;
-    bool terrainTexKeysCollected = false;
 
     // Accumulated results (built up across phases)
     std::vector<uint32_t> m2InstanceIds;
@@ -309,7 +302,6 @@ public:
     void setM2Renderer(M2Renderer* renderer) { m2Renderer = renderer; }
     /// Where the workers start a tile's model textures, ahead of its
     /// finalize: the renderer's one loader. Set before a tile is loaded.
-    void setTextureLoads(TextureLoads* loads) { textureLoads_ = loads; }
     /// Also fixes how the workers encode the normal maps they prepare for it.
     void setWMORenderer(WMORenderer* renderer);
     /// Where a committed tile's sound emitters go - fires, torches, fountains,

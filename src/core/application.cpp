@@ -2885,6 +2885,7 @@ void Application::shutdown() {
     LOG_DEBUG("Resetting authHandler...");
     authHandler.reset();
     LOG_DEBUG("Resetting assetManager...");
+    if (window) window->getVkContext()->drainTextures();
     assetManager.reset();
     LOG_DEBUG("Resetting uiManager...");
     uiManager.reset();
@@ -3026,6 +3027,8 @@ void Application::reloadExpansionData() {
     LOG_INFO("Reloading expansion data for: ", profile->name);
 
     widgetRenderer_.resetResources();
+    if (renderer && renderer->getCharacterRenderer()) renderer->getCharacterRenderer()->resetTexturePreparation();
+    if (window) window->getVkContext()->resetTextureDataset();
     loadExpansionTables();
 
     // Update expansion data path for CSV DBC lookups and clear DBC cache
@@ -4465,7 +4468,10 @@ void Application::followRendererUpdate(float deltaTime) {
 void Application::beginFrameUploads() {
     if (frameUploads_ || !window) return;
     frameUploads_ = window->getVkContext();
-    if (frameUploads_) frameUploads_->beginUploadBatch();
+    if (frameUploads_) {
+        frameUploads_->publishTextures();
+        frameUploads_->beginUploadBatch();
+    }
 }
 
 void Application::endFrameUploads() {
@@ -6747,6 +6753,8 @@ void Application::applyRealmPatchLayer(std::shared_ptr<const pipeline::ArchiveLa
                                        RealmPatchSet set) {
     const bool mounting = layer != nullptr;
     widgetRenderer_.resetResources();
+    if (renderer && renderer->getCharacterRenderer()) renderer->getCharacterRenderer()->resetTexturePreparation();
+    if (window) window->getVkContext()->resetTextureDataset();
     assetManager->setArchiveLayer(std::move(layer));
     mountedRealmPatches_ = std::move(set);
     widgetRenderer_.initialize(assetManager.get(), window ? window->getVkContext() : nullptr);

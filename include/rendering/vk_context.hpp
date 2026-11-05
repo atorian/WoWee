@@ -32,7 +32,9 @@
 #include <mutex>
 
 namespace wowee {
+namespace pipeline { class AssetManager; }
 namespace rendering {
+class TextureLoads;
 
 struct FrameData {
     VkCommandPool commandPool = VK_NULL_HANDLE;
@@ -69,6 +71,13 @@ public:
 
     VkContext();
     ~VkContext();
+
+    /// One texture producer for this device, shared by world and UI renderers.
+    /// Created during renderer/interface initialization, before workers use it.
+    TextureLoads& textureLoads(pipeline::AssetManager& assets);
+    void publishTextures();
+    void drainTextures();
+    void resetTextureDataset();
 
     VkContext(const VkContext&) = delete;
     VkContext& operator=(const VkContext&) = delete;
@@ -634,6 +643,7 @@ private:
     class ContextTextureDevice;
     std::unique_ptr<ContextTextureDevice> textureDevice_;
     std::unique_ptr<TextureCache> textureCache_;
+    std::unique_ptr<TextureLoads> textureLoads_;
     PFN_vkCopyMemoryToImageEXT copyMemoryToImage_ = nullptr;
     PFN_vkTransitionImageLayoutEXT transitionImageLayoutHost_ = nullptr;
 

@@ -108,7 +108,7 @@ private:
     rendering::Camera* camera_ = nullptr;
 
     std::unique_ptr<rendering::TerrainRenderer> terrainRenderer_;
-    std::unique_ptr<rendering::TextureLoads> textureLoads_;
+    rendering::TextureLoads* textureLoads_ = nullptr;
     std::unique_ptr<rendering::M2Renderer> m2Renderer_;
     std::unique_ptr<rendering::WMORenderer> wmoRenderer_;
     EditorWater waterRenderer_;

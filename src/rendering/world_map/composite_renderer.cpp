@@ -3,6 +3,7 @@
 // loadOverlayTextures, destroyZoneTextures (Phase 7 of refactoring plan).
 #include "rendering/world_map/composite_renderer.hpp"
 #include "rendering/vk_context.hpp"
+#include "rendering/texture_loads.hpp"
 #include "rendering/vk_texture.hpp"
 #include "rendering/vk_render_target.hpp"
 #include "rendering/vk_pipeline.hpp"
@@ -33,7 +34,7 @@ void CompositeRenderer::ensureTextureSlots(size_t zoneCount, const std::vector<Z
             slots.overlays.resize(zones[i].overlays.size());
             for (size_t oi = 0; oi < zones[i].overlays.size(); oi++) {
                 const auto& ov = zones[i].overlays[oi];
-                slots.overlays[oi].tiles.resize(static_cast<size_t>(ov.tileCols) * static_cast<size_t>(ov.tileRows), nullptr);
+                slots.overlays[oi].tiles.resize(static_cast<size_t>(ov.tileCols) * static_cast<size_t>(ov.tileRows));
             }
         }
     }
@@ -43,6 +44,7 @@ bool CompositeRenderer::initialize(VkContext* ctx, pipeline::AssetManager* am) {
     if (initialized) return true;
     vkCtx = ctx;
     assetManager = am;
+    (void)vkCtx->textureLoads(*am);
     VkDevice device = vkCtx->getDevice();
 
     // --- Composite render target (1024x768) ---
@@ -247,10 +249,6 @@ void CompositeRenderer::shutdown() {
     destroy(device, samplerSetLayout);
     destroy(alloc, quadVB, quadVBAlloc);
 
-    for (auto& tex : zoneTextures) {
-        if (tex) tex->destroy(device, alloc);
-    }
-    zoneTextures.clear();
     zoneTextureSlots_.clear();
 
     if (fogTexture_) { fogTexture_->destroy(device, alloc); fogTexture_.reset(); }
@@ -275,104 +273,38 @@ void CompositeRenderer::loadZoneTextures(int zoneIdx, std::vector<Zone>& zones,
     LOG_INFO("loadZoneTextures: zone[", zoneIdx, "] areaName='", zone.areaName,
              "' areaID=", zone.areaID, " mapName='", mapName, "'");
 
-    VkDevice device = vkCtx->getDevice();
-    int loaded = 0;
-
-    for (int i = 0; i < 12; i++) {
-        std::string path = "Interface\\WorldMap\\" + folder + "\\" +
-                           folder + std::to_string(i + 1) + ".blp";
-        auto blpImage = assetManager->loadTexture(path);
-        if (!blpImage.isValid()) {
-            slots.tileTextures[i] = nullptr;
-            continue;
-        }
-
-        auto tex = std::make_unique<VkTexture>();
-        tex->upload(*vkCtx, blpImage.data.data(), blpImage.width, blpImage.height,
-                    VK_FORMAT_R8G8B8A8_UNORM, false);
-        tex->createSampler(device, VK_FILTER_LINEAR, VK_FILTER_LINEAR,
-                           VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 1.0f);
-
-        slots.tileTextures[i] = tex.get();
-        zoneTextures.push_back(std::move(tex));
-        loaded++;
+    auto& loads = vkCtx->textureLoads(*assetManager);
+    for (int i = 0; i < 12; ++i) {
+        const std::string path = "Interface\\WorldMap\\" + folder + "\\" + folder + std::to_string(i + 1) + ".blp";
+        slots.tileTextures[i] = loads.interfaceTexture(path);
     }
-
-    LOG_INFO("CompositeRenderer: loaded ", loaded, "/12 tiles for '", folder, "'");
 }
 
 void CompositeRenderer::loadOverlayTextures(int zoneIdx, std::vector<Zone>& zones) {
     if (zoneIdx < 0 || zoneIdx >= static_cast<int>(zones.size())) return;
     ensureTextureSlots(zones.size(), zones);
-
     const auto& zone = zones[zoneIdx];
+    if (zone.areaName.empty()) return;
     auto& slots = zoneTextureSlots_[zoneIdx];
-    if (zone.overlays.empty()) return;
-
-    const std::string& folder = zone.areaName;
-    if (folder.empty()) return;
-
-    VkDevice device = vkCtx->getDevice();
-    int totalLoaded = 0;
-
-    for (size_t oi = 0; oi < zone.overlays.size(); oi++) {
-        const auto& ov = zone.overlays[oi];
-        auto& ovSlots = slots.overlays[oi];
-        if (ovSlots.tilesLoaded) continue;
-        ovSlots.tilesLoaded = true;
-
-        int tileCount = ov.tileCols * ov.tileRows;
-        for (int t = 0; t < tileCount; t++) {
-            std::string tileName = ov.textureName + std::to_string(t + 1);
-            std::string path = "Interface\\WorldMap\\" + folder + "\\" + tileName + ".blp";
-            auto blpImage = assetManager->loadTexture(path);
-            if (!blpImage.isValid()) {
-                ovSlots.tiles[t] = nullptr;
-                continue;
-            }
-
-            auto tex = std::make_unique<VkTexture>();
-            tex->upload(*vkCtx, blpImage.data.data(), blpImage.width, blpImage.height,
-                        VK_FORMAT_R8G8B8A8_UNORM, false);
-            tex->createSampler(device, VK_FILTER_LINEAR, VK_FILTER_LINEAR,
-                               VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 1.0f);
-
-            ovSlots.tiles[t] = tex.get();
-            zoneTextures.push_back(std::move(tex));
-            totalLoaded++;
+    auto& loads = vkCtx->textureLoads(*assetManager);
+    for (size_t oi = 0; oi < zone.overlays.size(); ++oi) {
+        const auto& overlay = zone.overlays[oi];
+        auto& target = slots.overlays[oi];
+        if (target.tilesLoaded) continue;
+        target.tilesLoaded = true;
+        for (size_t t = 0; t < target.tiles.size(); ++t) {
+            const std::string path = "Interface\\WorldMap\\" + zone.areaName + "\\" +
+                                     overlay.textureName + std::to_string(t + 1) + ".blp";
+            target.tiles[t] = loads.interfaceTexture(path);
         }
     }
-
-    LOG_INFO("CompositeRenderer: loaded ", totalLoaded, " overlay tiles for '", folder, "'");
 }
 
 void CompositeRenderer::detachZoneTextures() {
-    if (!zoneTextures.empty() && vkCtx) {
-        // Defer destruction until all in-flight frames have completed.
-        // This avoids calling vkDeviceWaitIdle mid-frame, which can trigger
-        // driver TDR (GPU device lost) under heavy rendering load.
-        VkDevice device = vkCtx->getDevice();
-        VmaAllocator alloc = vkCtx->getAllocator();
-        auto captured = std::make_shared<std::vector<std::unique_ptr<VkTexture>>>(
-            std::move(zoneTextures));
-        vkCtx->deferAfterAllFrameFences([device, alloc, captured]() {
-            for (auto& tex : *captured) {
-                if (tex) tex->destroy(device, alloc);
-            }
-        });
-    }
-    zoneTextures.clear();
-
-    // Clear CPU-side tracking immediately so new zones get fresh loads
-    for (auto& slots : zoneTextureSlots_) {
-        for (auto& tex : slots.tileTextures) tex = nullptr;
-        slots.tilesLoaded = false;
-        for (auto& ov : slots.overlays) {
-            for (auto& t : ov.tiles) t = nullptr;
-            ov.tilesLoaded = false;
-        }
-    }
+    // Frames hold frozen references of their own. Releasing the producer's
+    // references cannot free an image under a recorded or submitted frame.
     zoneTextureSlots_.clear();
+    prepared_.reset();
 }
 
 void CompositeRenderer::requestComposite(int zoneIdx) {
@@ -384,8 +316,8 @@ bool CompositeRenderer::hasAnyTile(int zoneIdx) const {
     if (zoneIdx < 0 || zoneIdx >= static_cast<int>(zoneTextureSlots_.size()))
         return false;
     const auto& slots = zoneTextureSlots_[zoneIdx];
-    for (auto tileTexture : slots.tileTextures) {
-        if (tileTexture != nullptr) return true;
+    for (const auto& tileTexture : slots.tileTextures) {
+        if (tileTexture && !tileTexture.failed()) return true;
     }
     return false;
 }
@@ -403,6 +335,11 @@ std::shared_ptr<const CompositeRenderer::Frame> CompositeRenderer::extract(
         const std::vector<Zone>& zones, const std::unordered_set<int>& exploredOverlays,
         bool hasServerMask) {
     if (!initialized || pendingCompositeIdx_ < 0 || !compositeTarget) return {};
+    const uint64_t revision = vkCtx->textureLoads(*assetManager).revision(TextureForm::Interface);
+    if (textureRevision_ != revision) {
+        textureRevision_ = revision;
+        prepared_.reset();
+    }
     if (prepared_) return prepared_;
     if (pendingCompositeIdx_ >= static_cast<int>(zones.size())) {
         LOG_WARNING("World map composite requested invalid zone ", pendingCompositeIdx_,
@@ -415,6 +352,9 @@ std::shared_ptr<const CompositeRenderer::Frame> CompositeRenderer::extract(
     frame->zoneIdx = pendingCompositeIdx_;
     frame->zone = zones[frame->zoneIdx];
     frame->slots = zoneTextureSlots_[frame->zoneIdx];
+    for (auto& texture : frame->slots.tileTextures) texture = texture.snapshot();
+    for (auto& overlay : frame->slots.overlays)
+        for (auto& texture : overlay.tiles) texture = texture.snapshot();
     frame->explored = exploredOverlays;
     frame->hasServerMask = hasServerMask;
     frame->revision = ++requestRevision_;
@@ -434,7 +374,7 @@ void CompositeRenderer::record(VkCommandBuffer cmd, const Frame& frame) {
 
     // Update tile descriptor sets for this frame
     for (int i = 0; i < 12; i++) {
-        VkTexture* tileTex = slots.tileTextures[i];
+        VkTexture* tileTex = slots.tileTextures[i].get();
         if (!tileTex || !tileTex->isValid()) continue;
 
         VkDescriptorImageInfo imgInfo = tileTex->descriptorInfo();

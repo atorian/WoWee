@@ -17,19 +17,7 @@ namespace wowee {
 namespace rendering {
 namespace world_map {
 
-ZoneHighlightLayer::~ZoneHighlightLayer() {
-    // At shutdown vkDeviceWaitIdle has been called, so immediate cleanup is safe.
-    if (vkCtx_) {
-        VkDevice device = vkCtx_->getDevice();
-        VmaAllocator alloc = vkCtx_->getAllocator();
-        for (auto& [name, entry] : highlights_) {
-            removeImGuiTexture(entry.imguiDS);
-            if (entry.texture) entry.texture->destroy(device, alloc);
-        }
-    }
-    highlights_.clear();
-    missingHighlights_.clear();
-}
+ZoneHighlightLayer::~ZoneHighlightLayer() = default;
 
 void ZoneHighlightLayer::initialize(VkContext* ctx, pipeline::AssetManager* am) {
     vkCtx_ = ctx;
@@ -37,40 +25,17 @@ void ZoneHighlightLayer::initialize(VkContext* ctx, pipeline::AssetManager* am) 
 }
 
 void ZoneHighlightLayer::clearTextures() {
-    if (vkCtx_ && !highlights_.empty()) {
-        // Defer destruction until all in-flight frames complete.
-        // The previous frame's command buffer may still reference these ImGui
-        // descriptor sets and texture image views from highlight draw commands.
-        VkDevice device = vkCtx_->getDevice();
-        VmaAllocator alloc = vkCtx_->getAllocator();
-
-        struct DeferredHighlight {
-            std::unique_ptr<VkTexture> texture;
-            VkDescriptorSet imguiDS;
-        };
-        auto captured = std::make_shared<std::vector<DeferredHighlight>>();
-        for (auto& [name, entry] : highlights_) {
-            DeferredHighlight dh;
-            dh.texture = std::move(entry.texture);
-            dh.imguiDS = entry.imguiDS;
-            captured->push_back(std::move(dh));
-        }
-        vkCtx_->deferAfterAllFrameFences([device, alloc, captured]() {
-            for (auto& dh : *captured) {
-                removeImGuiTexture(dh.imguiDS);
-                if (dh.texture) dh.texture->destroy(device, alloc);
-            }
-        });
-    }
     highlights_.clear();
-    missingHighlights_.clear();
 }
 
 void ZoneHighlightLayer::ensureHighlight(const std::string& key,
                                           const std::string& customPath) {
     if (!vkCtx_ || !assetManager_) return;
     if (key.empty()) return;
-    if (highlights_.count(key) || missingHighlights_.count(key)) return;
+    if (auto it = highlights_.find(key); it != highlights_.end()) {
+        it->second.poll();
+        return;
+    }
 
     // Determine BLP path
     std::string path;
@@ -83,51 +48,18 @@ void ZoneHighlightLayer::ensureHighlight(const std::string& key,
         path = "Interface\\WorldMap\\" + key + "\\" + lower + "highlight.blp";
     }
 
-    auto blpImage = assetManager_->loadTexture(path);
-    if (!blpImage.isValid()) {
-        LOG_WARNING("ZoneHighlightLayer: highlight not found for key='", key, "' path='", path, "'");
-        missingHighlights_.insert(key);
-        return;
-    }
-
-    LOG_INFO("ZoneHighlightLayer: loaded highlight key='", key, "' path='", path,
-             "' ", blpImage.width, "x", blpImage.height, " dataSize=", blpImage.data.size());
-
-    // WoW highlight BLPs with alphaDepth=0 use additive blending (white=glow, black=invisible).
-    // Convert to alpha-blend compatible: set alpha = max(R,G,B) for fully opaque textures.
-    {
-        bool allOpaque = true;
-        for (size_t i = 3; i < blpImage.data.size(); i += 4) {
-            if (blpImage.data[i] < 255) { allOpaque = false; break; }
-        }
-        if (allOpaque) {
-            for (size_t i = 0; i < blpImage.data.size(); i += 4) {
-                uint8_t r = blpImage.data[i], g = blpImage.data[i + 1], b = blpImage.data[i + 2];
-                blpImage.data[i + 3] = std::max({r, g, b});
-            }
-        }
-    }
-
-    auto loaded = makeImGuiTexture(*vkCtx_, blpImage);
-    if (!loaded) {
-        missingHighlights_.insert(key);
-        return;
-    }
-    auto tex = std::move(loaded.texture);
-    VkDescriptorSet ds = loaded.descriptorSet;
-
-    HighlightEntry entry;
-    entry.texture = std::move(tex);
-    entry.imguiDS = ds;
-    highlights_[key] = std::move(entry);
+    auto [it, inserted] = highlights_.try_emplace(key,
+        requestImGuiTexture(*assetManager_, *vkCtx_, path, InterfaceAlpha::Highlight));
+    (void)inserted;
+    it->second.poll();
 }
 
 ImTextureID ZoneHighlightLayer::getHighlightTexture(const std::string& key,
                                                      const std::string& customPath) {
     ensureHighlight(key, customPath);
     auto it = highlights_.find(key);
-    if (it != highlights_.end() && it->second.imguiDS) {
-        return reinterpret_cast<ImTextureID>(it->second.imguiDS);
+    if (it != highlights_.end() && it->second.descriptorSet) {
+        return reinterpret_cast<ImTextureID>(it->second.descriptorSet);
     }
     return 0;
 }
@@ -238,18 +170,18 @@ void ZoneHighlightLayer::render(const LayerContext& ctx) {
 
             // Draw the highlight BLP texture within the zone's bounding rectangle.
             auto it = highlights_.find(z.areaName);
-            if (it == highlights_.end()) ensureHighlight(z.areaName, "");
+            ensureHighlight(z.areaName, "");
             it = highlights_.find(z.areaName);
-            if (it != highlights_.end() && it->second.imguiDS) {
+            if (it != highlights_.end() && it->second.descriptorSet) {
                 uint8_t imgAlpha = static_cast<uint8_t>(255.0f * hoverHighlightAlpha_);
                 // Draw twice for a very bright glow effect
                 ctx.drawList->AddImage(
-                    reinterpret_cast<ImTextureID>(it->second.imguiDS),
+                    reinterpret_cast<ImTextureID>(it->second.descriptorSet),
                     ImVec2(sx0, sy0), ImVec2(sx1, sy1),
                     ImVec2(0, 0), ImVec2(1, 1),
                     IM_COL32(255, 255, 255, imgAlpha));
                 ctx.drawList->AddImage(
-                    reinterpret_cast<ImTextureID>(it->second.imguiDS),
+                    reinterpret_cast<ImTextureID>(it->second.descriptorSet),
                     ImVec2(sx0, sy0), ImVec2(sx1, sy1),
                     ImVec2(0, 0), ImVec2(1, 1),
                     IM_COL32(255, 255, 200, imgAlpha));

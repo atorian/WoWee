@@ -35,9 +35,9 @@ bool EditorViewport::initialize(rendering::VkContext* ctx, pipeline::AssetManage
     terrainRenderer_->setFogEnabled(false);
 
     // Where the models' and buildings' textures are made, off the frame.
-    textureLoads_ = std::make_unique<rendering::TextureLoads>(*ctx, *am);
+    textureLoads_ = &ctx->textureLoads(*am);
     m2Renderer_ = std::make_unique<rendering::M2Renderer>();
-    m2Renderer_->setTextureLoads(textureLoads_.get());
+    m2Renderer_->setTextureLoads(textureLoads_);
     if (!m2Renderer_->initialize(ctx, perFrameSetLayout_, am)) {
         LOG_WARNING("M2 renderer init failed - object rendering disabled");
         m2Renderer_.reset();
@@ -46,7 +46,7 @@ bool EditorViewport::initialize(rendering::VkContext* ctx, pipeline::AssetManage
     }
 
     wmoRenderer_ = std::make_unique<rendering::WMORenderer>();
-    wmoRenderer_->setTextureLoads(textureLoads_.get());
+    wmoRenderer_->setTextureLoads(textureLoads_);
     if (!wmoRenderer_->initialize(ctx, perFrameSetLayout_, am)) {
         LOG_WARNING("WMO renderer init failed - building rendering disabled");
         wmoRenderer_.reset();
@@ -73,7 +73,7 @@ void EditorViewport::shutdown() {
     if (wmoRenderer_) { wmoRenderer_->shutdown(); wmoRenderer_.reset(); }
     if (m2Renderer_) { m2Renderer_->shutdown(); m2Renderer_.reset(); }
     // Its last loads finish into the texture cache, which outlives it.
-    textureLoads_.reset();
+    textureLoads_ = nullptr;
     if (terrainRenderer_) { terrainRenderer_->shutdown(); terrainRenderer_.reset(); }
 
     destroyPerFrameResources();

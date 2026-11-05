@@ -1318,8 +1318,9 @@ void Renderer::shutdown() {
         skyLayers_.clear();
         loadedSkyModels_.clear();
     }
-    // Its last loads finish into the texture cache, which outlives it.
-    textureLoads_.reset();
+    // Workers must stop reading before the renderer's asset dataset can go.
+    if (textureLoads_) textureLoads_->drain();
+    textureLoads_ = nullptr;
 
     // Cleanup selection circle + overlay resources
     if (overlaySystem_) {
@@ -2272,6 +2273,8 @@ bool Renderer::texturesSettled() const {
     if (m2Renderer && m2Renderer->modelsAwaitingTextures() > 0) return false;
     if (wmoRenderer && wmoRenderer->modelsAwaitingTextures() > 0) return false;
     if (skyboxModelRenderer_ && skyboxModelRenderer_->modelsAwaitingTextures() > 0) return false;
+    if (characterRenderer && !characterRenderer->texturesSettled()) return false;
+    if (terrainRenderer && !terrainRenderer->texturesSettled()) return false;
     return !(characterEmitters_ && characterEmitters_->loading() > 0);
 }
 
@@ -3979,10 +3982,10 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
 
     // Create M2, WMO, and Character renderers, and the one place their
     // textures are made.
-    if (!textureLoads_) textureLoads_ = std::make_unique<TextureLoads>(*vkCtx, *assetManager);
+    if (!textureLoads_) textureLoads_ = &vkCtx->textureLoads(*assetManager);
     if (!m2Renderer) {
         m2Renderer = std::make_unique<M2Renderer>();
-        m2Renderer->setTextureLoads(textureLoads_.get());
+        m2Renderer->setTextureLoads(textureLoads_);
         if (!m2Renderer->initialize(vkCtx, perFrameSetLayout, assetManager))
             LOG_ERROR("M2Renderer initialization failed");
         m2Renderer->setRtScene(rtScene_.get());
@@ -4007,7 +4010,7 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
     if (!skyboxModelRenderer_) {
         skyboxModelRenderer_ = std::make_unique<M2Renderer>();
         skyboxModelRenderer_->setSkyMode(true);
-        skyboxModelRenderer_->setTextureLoads(textureLoads_.get());
+        skyboxModelRenderer_->setTextureLoads(textureLoads_);
         if (!skyboxModelRenderer_->initialize(vkCtx, perFrameSetLayout, assetManager)) {
             LOG_WARNING("Sky M2 renderer initialization failed");
             skyboxModelRenderer_.reset();
@@ -4016,7 +4019,7 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
 
     if (!wmoRenderer) {
         wmoRenderer = std::make_unique<WMORenderer>();
-        wmoRenderer->setTextureLoads(textureLoads_.get());
+        wmoRenderer->setTextureLoads(textureLoads_);
         if (!wmoRenderer->initialize(vkCtx, perFrameSetLayout, assetManager))
             LOG_ERROR("WMORenderer initialization failed");
         wmoRenderer->setRtScene(rtScene_.get());
@@ -4070,7 +4073,6 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
         if (m2Renderer) {
             terrainManager->setM2Renderer(m2Renderer.get());
         }
-        terrainManager->setTextureLoads(textureLoads_.get());
         // Set WMO renderer for building loading during streaming
         if (wmoRenderer) {
             terrainManager->setWMORenderer(wmoRenderer.get());

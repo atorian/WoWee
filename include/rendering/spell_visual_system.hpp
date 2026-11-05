@@ -2,6 +2,7 @@
 
 #include "pipeline/blp_loader.hpp"
 #include "rendering/spell_visual_kit.hpp"
+#include "rendering/texture_cache.hpp"
 
 #include <cstdint>
 #include <future>
@@ -119,6 +120,18 @@ private:
         float duration = 0.0f;
         bool spin = false;
     };
+    struct DeferredProjectile {
+        std::string modelPath, texturePath;
+        glm::vec3 start{0.0f}, end{0.0f};
+        float duration = 0.0f, age = 0.0f;
+        bool spin = false;
+        TextureRef texture;
+    };
+    /// False only while resources are pending. Failures are logged once and
+    /// handled, so a missing projectile is never retried every frame.
+    bool startProjectile(DeferredProjectile& projectile);
+    std::vector<DeferredProjectile> deferredProjectiles_;
+    std::unordered_set<std::string> failedProjectiles_, expiredProjectiles_;
 
     void loadSpellVisualDbc();
 

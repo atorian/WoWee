@@ -7,6 +7,7 @@
 
 #include "pipeline/asset_manager.hpp"
 #include "rendering/vk_texture.hpp"
+#include "rendering/texture_cache.hpp"
 
 namespace wowee {
 namespace rendering {
@@ -55,8 +56,25 @@ ImGuiTexture makeImGuiTexture(VkContext& ctx, const pipeline::BLPImage& image);
 /// The same, for the common case of a BLP named by path. An image that will
 /// not load answers an empty result exactly as a failed upload does; the
 /// caller decides whether that is worth a log line.
-ImGuiTexture loadImGuiTexture(pipeline::AssetManager& assets, VkContext& ctx,
-                              const std::string& path);
+class ImGuiTextureRequest {
+public:
+    explicit ImGuiTextureRequest(TextureRef image = {}) : texture(std::move(image)) {}
+    ~ImGuiTextureRequest();
+    ImGuiTextureRequest(ImGuiTextureRequest&& other) noexcept;
+    ImGuiTextureRequest& operator=(ImGuiTextureRequest&& other) noexcept;
+    ImGuiTextureRequest(const ImGuiTextureRequest&) = delete;
+    ImGuiTextureRequest& operator=(const ImGuiTextureRequest&) = delete;
+    bool poll();
+    void reset();
+    explicit operator bool() const { return descriptorSet != VK_NULL_HANDLE; }
+    TextureRef texture;
+    VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+};
+
+/// No file or GPU preparation in the caller. poll() registers the resident
+/// image with ImGui once its upload has fenced; failures stay unavailable.
+ImGuiTextureRequest requestImGuiTexture(pipeline::AssetManager& assets, VkContext& ctx,
+                                        const std::string& path, InterfaceAlpha alpha = InterfaceAlpha::Original);
 
 /// Producer only, after ImGui::Render. Upload font changes and resolve every
 /// texture indirection before copying the frame; retained pages survive atlas

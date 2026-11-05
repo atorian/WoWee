@@ -26,23 +26,17 @@ void PlayerMarkerLayer::initialize(VkContext* ctx, pipeline::AssetManager* am) {
 }
 
 void PlayerMarkerLayer::clearTexture() {
-    if (vkCtx_) marker_.destroy(vkCtx_->getDevice(), vkCtx_->getAllocator());
+    marker_.reset();
     loadAttempted_ = false;
 }
 
 void PlayerMarkerLayer::ensureTexture() {
-    if (loadAttempted_ || !vkCtx_ || !assetManager_) return;
-    loadAttempted_ = true;
-
-    auto loaded = loadImGuiTexture(*assetManager_, *vkCtx_,
-                                   "Interface\\Minimap\\MinimapArrow.blp");
-    if (!loaded) {
-        LOG_WARNING("PlayerMarkerLayer: icon texture unavailable");
-        return;
+    if (!vkCtx_ || !assetManager_) return;
+    if (!loadAttempted_) {
+        loadAttempted_ = true;
+        marker_ = requestImGuiTexture(*assetManager_, *vkCtx_, "Interface\\Minimap\\MinimapArrow.blp");
     }
-    marker_ = std::move(loaded);
-    LOG_INFO("PlayerMarkerLayer: loaded MinimapArrow.blp ", marker_.texture->getWidth(), "x",
-             marker_.texture->getHeight());
+    marker_.poll();
 }
 
 void PlayerMarkerLayer::render(const LayerContext& ctx) {

@@ -34,12 +34,6 @@ bool giveCachedSampler(VkContext& ctx, VkTexture& texture) {
                                  VK_SAMPLER_ADDRESS_MODE_REPEAT);
 }
 
-TextureRef cacheStoredTexture(VkContext& ctx, const std::string& path, const pipeline::BLPImage& image) {
-    PreparedTexture prepared = prepareStoredTexture(ctx, path, image);
-    if (!prepared.texture) return {};
-    return ctx.textures().insert(prepared.key, std::move(prepared.texture), prepared.bytes, prepared.info);
-}
-
 PreparedTexture prepareStoredTexture(VkContext& ctx, const std::string& path, const pipeline::BLPImage& image) {
     TextureCache& cache = ctx.textures();
     const TextureKey key{normalizeTexturePath(path), TextureForm::Stored, 0};
@@ -65,7 +59,7 @@ PreparedTexture prepareStoredTexture(VkContext& ctx, const std::string& path, co
             LOG_WARNING("Texture cache: '", key.path, "' (", image.width, "x", image.height,
                         ") did not upload to the GPU; drawn with its fallback");
         }
-        return {.key = key};
+        return {.key = key, .texture = std::move(texture), .publish = false};
     }
     if (skip > 0 && firstFailure("skip:" + key.path)) {
         LOG_WARNING("Texture cache: no room for '", key.path, "' at ", image.width, "x", image.height,
@@ -89,12 +83,6 @@ NormalMapFormat normalMapFormatFor(const VkContext& ctx) {
     return NormalMapFormat::Rgba8;
 }
 
-TextureRef cacheNormalMap(VkContext& ctx, const TextureKey& key, const EncodedNormalMap& map) {
-    PreparedTexture prepared = prepareNormalMap(ctx, key, map);
-    if (!prepared.texture) return {};
-    return ctx.textures().insert(prepared.key, std::move(prepared.texture), prepared.bytes, prepared.info);
-}
-
 PreparedTexture prepareNormalMap(VkContext& ctx, const TextureKey& key, const EncodedNormalMap& map) {
     if (!map.valid()) return {.key = key};
     std::vector<const uint8_t*> levels;
@@ -113,15 +101,15 @@ PreparedTexture prepareNormalMap(VkContext& ctx, const TextureKey& key, const En
             LOG_WARNING("Texture cache: the normal map of '", key.path, "' (", map.width, "x", map.height,
                         ") did not upload to the GPU; drawn without one");
         }
-        return {.key = key};
+        return {.key = key, .texture = std::move(texture), .publish = false};
     }
     const uint64_t bytes = texture->allocatedBytes();
     return {.key = key, .texture = std::move(texture), .bytes = bytes,
             .info = {.hasAlpha = false, .alphaIsSilhouette = false, .heightVariance = map.heightVariance}};
 }
 
-TextureRef cachePixels(VkContext& ctx, const TextureKey& key, const uint8_t* rgba, uint32_t width,
-                       uint32_t height, TextureInfo info) {
+PreparedTexture preparePixels(VkContext& ctx, const TextureKey& key, const uint8_t* rgba, uint32_t width,
+                               uint32_t height, TextureInfo info) {
     auto texture = std::make_shared<VkTexture>();
     if (!texture->upload(ctx, rgba, width, height, VK_FORMAT_R8G8B8A8_UNORM, true) ||
         !giveCachedSampler(ctx, *texture)) {
@@ -129,10 +117,10 @@ TextureRef cachePixels(VkContext& ctx, const TextureKey& key, const uint8_t* rgb
             LOG_WARNING("Texture cache: ", textureFormName(key.form), " '", key.path, "' (", width,
                         "x", height, ") did not upload to the GPU; drawn with its fallback");
         }
-        return {};
+        return {.key = key, .texture = std::move(texture), .publish = false};
     }
     const uint64_t bytes = texture->allocatedBytes();
-    return ctx.textures().insert(key, std::move(texture), bytes, info);
+    return {.key = key, .texture = std::move(texture), .bytes = bytes, .info = info};
 }
 
 TextureRef adoptPixels(VkContext& ctx, TextureForm form, const uint8_t* pixels, uint32_t width,

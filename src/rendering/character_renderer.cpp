@@ -17,6 +17,7 @@
 #include <atomic>
 #include "pipeline/heap_bytes.hpp"
 #include "rendering/character_renderer.hpp"
+#include "rendering/texture_loads.hpp"
 #include <stdexcept>
 #include "rendering/m2_blend_mode.hpp"
 #include "rendering/m2_combiner.hpp"
@@ -395,6 +396,7 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
         skeletons_.initialize(*vkCtx_);
     }
     assetManager = am;
+    if (am) (void)vkCtx_->textureLoads(*am);
     renderPassOverride_ = renderPassOverride;
     msaaSamplesOverride_ = msaaSamples;
 
@@ -444,6 +446,20 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
 
     createFallbackTextures();
 
+    resetTexturePreparation();
+
+    core::Logger::getInstance().info("Character renderer initialized (Vulkan)");
+    return true;
+}
+
+void CharacterRenderer::resetTexturePreparation() {
+    // The worker's destructor joins a running source before the caller may
+    // replace the asset dataset. Old encoded results are not reused there.
+    normalMapBuilder_.reset();
+    normalMapsUploading_.clear();
+    normalMapsFailed_.clear();
+    framesSinceNormalMapScan_ = 0;
+
     // Two workers, sixty-four waiting: a crowd's worth of surfaces nearest
     // first, rather than a thread for each of them.
     normalMapBuilder_ = std::make_unique<NormalMapBuilder>(
@@ -459,8 +475,6 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
             return encodeNormalMap(std::move(normals), width, height, format, variance);
         });
 
-    core::Logger::getInstance().info("Character renderer initialized (Vulkan)");
-    return true;
 }
 
 void CharacterRenderer::shutdown() {
@@ -472,6 +486,7 @@ void CharacterRenderer::shutdown() {
 
     // Its workers finish the map in hand and stop; nothing they made is used.
     normalMapBuilder_.reset();
+    normalMapsUploading_.clear();
 
     VkDevice device = vkCtx_->getDevice();
     DeferredResources retired(*vkCtx_);
@@ -481,9 +496,7 @@ void CharacterRenderer::shutdown() {
         destroyModelGPU(*pair.second);
     }
 
-    failedTextureRetryAt_.clear();
     normalMapsFailed_.clear();
-    textureLookupSerial_ = 0;
 
     // The models and instances give their textures back to the shared cache,
     // which retires them after the frames that may still read them.
@@ -507,6 +520,7 @@ void CharacterRenderer::shutdown() {
     // skeletons themselves.
     layout_.clear();
     listsBuilt_.clear();
+    textureDependencies_.clear();
     drawPass_.destroy();
     skeletonPass_.destroy();
     skeletons_.destroy();
@@ -535,9 +549,6 @@ void CharacterRenderer::clear() {
     // The models' and instances' textures go back to the shared cache with
     // them. Maps still being built are attached to whatever asks for the same
     // texture next, or dropped if nothing does.
-    loggedTextureLoadFails_.clear();
-    failedTextureRetryAt_.clear();
-    textureLookupSerial_ = 0;
 
     // Fallback textures, ring offsets and per-frame pools stay alive. Their
     // per-slot reset happens only after beginFrame has fenced that slot.
@@ -548,6 +559,7 @@ void CharacterRenderer::clearInstances() {
     *scene_ = InstanceState{};
     layout_.clear();
     listsBuilt_.clear();
+    textureDependencies_.clear();
 }
 
 void CharacterRenderer::createFallbackTextures() {
@@ -587,7 +599,8 @@ void CharacterRenderer::requestNormalMaps() {
         if (texture.normalMap() != nullptr) return;
         const VkTexture* image = texture.get();
         if (!image || image->getWidth() < kMinNormalMapSize || image->getHeight() < kMinNormalMapSize) return;
-        if (normalMapsFailed_.count(texture.key().path) != 0) return;
+        if (normalMapsFailed_.count(texture.key().path) != 0 ||
+            normalMapsUploading_.count(texture.key().path) != 0) return;
         auto [it, inserted] = wanted.emplace(&texture, distance);
         if (!inserted) it->second = std::min(it->second, distance);
     };
@@ -619,8 +632,6 @@ void CharacterRenderer::requestNormalMaps() {
         // Built before, and kept while the texture was away: no need to again.
         if (TextureRef built = cache.find({path, TextureForm::NormalHeight, kCharacterNormalMapStrengthKey})) {
             cache.setNormalMap(*texture, std::move(built));
-            // The lists that draw with it take its relief.
-            ++textureSerial_;
             continue;
         }
         pipeline::AssetManager* assets = assetManager;
@@ -639,76 +650,46 @@ void CharacterRenderer::requestNormalMaps() {
     }
 }
 
+bool CharacterRenderer::texturesSettled() const {
+    for (const auto& [id, model] : models)
+        for (const auto& texture : model->textureIds)
+            if (texture.loading()) return false;
+    for (const auto& [id, instance] : scene_->instances) {
+        const auto pending = [](const auto& textures) {
+            return std::any_of(textures.begin(), textures.end(),
+                               [](const auto& pair) { return pair.second.loading(); });
+        };
+        if (instance.dress->displaySkin && pending(*instance.dress->displaySkin)) return false;
+        if (pending(instance.dress->textureSlotOverrides) || pending(instance.dress->groupTextureOverrides)) return false;
+    }
+    return true;
+}
+
 TextureRef CharacterRenderer::loadTexture(const std::string& path) {
-    constexpr uint64_t kFailedTextureRetryLookups = 512;
-    // Skip empty or whitespace-only paths (type-0 textures have no filename)
-    if (path.empty()) return whiteTexture_;
-    bool allWhitespace = true;
-    for (char c : path) {
-        if (c != ' ' && c != '\t' && c != '\0' && c != '\n') { allWhitespace = false; break; }
-    }
-    if (allWhitespace) return whiteTexture_;
-
-    std::string key = normalizeTexturePathKey(path);
-    const uint64_t lookupSerial = ++textureLookupSerial_;
-
-    // The shared cache, in the form characters draw a file in: decoded, with
-    // the magenta key applied - not the blocks the world's models share.
-    TextureCache& cache = vkCtx_->textures();
-    const TextureKey cacheKey{key, TextureForm::Decoded, 0};
-    if (TextureRef cached = cache.find(cacheKey)) return cached;
-    auto failIt = failedTextureRetryAt_.find(key);
-    if (failIt != failedTextureRetryAt_.end() && lookupSerial < failIt->second) {
-        return whiteTexture_;
-    }
-
-    if (!assetManager || !assetManager->isInitialized()) {
-        return whiteTexture_;
-    }
-
-    // Check pre-decoded BLP cache first (populated by background threads)
-    pipeline::BLPImage blpImage;
-    if (predecodedBLPCache_) {
-        auto pit = predecodedBLPCache_->find(key);
-        if (pit != predecodedBLPCache_->end()) {
-            blpImage = pit->second;
+    if (path.find_first_not_of(" \t\0\n", 0, 4) == std::string::npos) return whiteTexture_;
+    if (!assetManager || !assetManager->isInitialized()) return whiteTexture_;
+    const TextureKey key{normalizeTexturePathKey(path), TextureForm::Decoded, 0};
+    auto& loads = vkCtx_->textureLoads(*assetManager);
+    return loads.reference(key, whiteTexture_, [this, key]() -> TextureLoads::Make {
+        // Taking a prepared image moves its vectors; it never copies pixels
+        // on the frame. The factory is only called for the first request.
+        std::shared_ptr<pipeline::BLPImage> prepared;
+        if (predecodedBLPCache_) {
+            auto it = predecodedBLPCache_->find(key.path);
+            if (it != predecodedBLPCache_->end() && it->second.isValid())
+                prepared = std::make_shared<pipeline::BLPImage>(std::move(it->second));
         }
-    }
-    if (preparedTexturesOnly_ && predecodedBLPCache_ && !predecodedBLPCache_->count(key)) {
-        LOG_ERROR("Unprepared character texture reached GPU consumer: ", key);
-    }
-    if (!blpImage.isValid() && !preparedTexturesOnly_) {
-        blpImage = assetManager->loadTexture(key);
-    }
-    if (!blpImage.isValid()) {
-        // Cache misses briefly to avoid repeated expensive MPQ/disk probes.
-        failedTextureRetryAt_[key] = lookupSerial + kFailedTextureRetryLookups;
-        if (loggedTextureLoadFails_.insert(key).second) {
-            core::Logger::getInstance().warning("Failed to load texture: ", path,
-                                                " - drawn white until a retry finds it");
-        }
-        return whiteTexture_;
-    }
-
-    if (!preparedTexturesOnly_) applyMagentaKeyIfNeeded(blpImage, key);
-
-    // Into the shared cache under one budget. Its normal map is asked for by
-    // processPendingNormalMaps once something is drawn with it, nearest first.
-    TextureRef uploaded = cachePixels(*vkCtx_, cacheKey, blpImage.data.data(),
-                                      static_cast<uint32_t>(blpImage.width),
-                                      static_cast<uint32_t>(blpImage.height),
-                                      {.hasAlpha = hasNonOpaqueAlpha(blpImage.data),
-                                       .alphaIsSilhouette = false,
-                                       .heightVariance = 0.0f});
-    if (!uploaded) {
-        // Refused or failed, as the cache has said; asked for again after the
-        // retry interval rather than decoded every frame meanwhile.
-        failedTextureRetryAt_[key] = lookupSerial + kFailedTextureRetryLookups;
-        return whiteTexture_;
-    }
-    failedTextureRetryAt_.erase(key);
-    core::Logger::getInstance().debug("Loaded character texture: ", path, " (", blpImage.width, "x", blpImage.height, ")");
-    return uploaded;
+        return [ctx = vkCtx_, assets = assetManager, key, prepared]() -> std::vector<PreparedTexture> {
+            auto image = prepared ? std::move(*prepared) : prepareTexture(assets, key.path);
+            if (!image.isValid()) {
+                LOG_WARNING("Character texture '", key.path, "' could not be prepared; drawn white");
+                return {};
+            }
+            return {preparePixels(*ctx, key, image.data.data(), static_cast<uint32_t>(image.width),
+                                   static_cast<uint32_t>(image.height),
+                                   {.hasAlpha = hasNonOpaqueAlpha(image.data)})};
+        };
+    });
 }
 
 void CharacterRenderer::processPendingNormalMaps(int budget) {
@@ -718,23 +699,29 @@ void CharacterRenderer::processPendingNormalMaps(int budget) {
     // Upload what the workers finished and hang each map on its texture, if
     // the texture is still resident; if it is not, the map has nothing to go
     // with and is dropped.
-    const auto finished = normalMapBuilder_->takeFinished(static_cast<size_t>(std::max(budget, 0)));
-    if (!finished.empty()) vkCtx_->beginUploadBatch();
-    for (const auto& result : finished) {
+    auto& loads = vkCtx_->textureLoads(*assetManager);
+    auto finished = normalMapBuilder_->takeFinished(static_cast<size_t>(std::max(budget, 0)));
+    for (auto& result : finished) {
         if (result.failed) {
-            normalMapsFailed_.insert(result.key);  // the builder said why
+            normalMapsFailed_.insert(result.key);
             continue;
         }
-        TextureRef texture = cache.find({result.key, TextureForm::Decoded, 0});
-        if (!texture) continue;
-        TextureRef normals = cacheNormalMap(
-            *vkCtx_, {result.key, TextureForm::NormalHeight, kCharacterNormalMapStrengthKey}, result.map);
-        if (normals) {
-            cache.setNormalMap(texture, std::move(normals));
-            ++textureSerial_;
-        }
+        const TextureKey key{result.key, TextureForm::NormalHeight, kCharacterNormalMapStrengthKey};
+        auto map = std::make_shared<EncodedNormalMap>(std::move(result.map));
+        normalMapsUploading_[result.key] = loads.reference(key, {}, [ctx = vkCtx_, key, map]() -> TextureLoads::Make {
+            return [ctx, key, map]() -> std::vector<PreparedTexture> {
+                return {prepareNormalMap(*ctx, key, *map)};
+            };
+        });
     }
-    if (!finished.empty()) vkCtx_->endUploadBatch();
+    for (auto it = normalMapsUploading_.begin(); it != normalMapsUploading_.end();) {
+        if (it->second.loading()) { ++it; continue; }
+        if (it->second.failed()) normalMapsFailed_.insert(it->first);
+        else if (TextureRef texture = cache.find({it->first, TextureForm::Decoded, 0})) {
+            cache.setNormalMap(texture, it->second);
+        }
+        it = normalMapsUploading_.erase(it);
+    }
 
     // Ask for what is still missing, nearest first. Not every frame: it walks
     // every instance's textures.
@@ -1441,74 +1428,53 @@ void CharacterRenderer::prepareCompositeWithRegions(pipeline::AssetManager* asse
 }
 
 TextureRef CharacterRenderer::compositeTextures(const std::vector<std::string>& layerPaths) {
-    if (layerPaths.empty() || !assetManager || !assetManager->isInitialized()) {
-        return whiteTexture_;
-    }
-
-    // Composite key is deterministic from layer set; if it is resident - for
-    // this character or another dressed the same - it is shared.
-    const std::string cacheKey = compositeLayersKey(layerPaths);
-    TextureCache& cache = vkCtx_->textures();
-    if (TextureRef cached = cache.find({cacheKey, TextureForm::Composite, 0})) return cached;
-
-    pipeline::BLPImage image;
-    if (predecodedBLPCache_) {
-        auto ready = predecodedBLPCache_->find(cacheKey);
-        if (ready != predecodedBLPCache_->end()) image = std::move(ready->second);
-    }
-    if (preparedTexturesOnly_ && predecodedBLPCache_ && !predecodedBLPCache_->count(cacheKey)) {
-        LOG_ERROR("Unprepared character composite reached GPU consumer: ", cacheKey);
-    }
-    if (!image.isValid() && !preparedTexturesOnly_) image = buildCompositeLayersCPU(assetManager, layerPaths, predecodedBLPCache_);
-    if (!image.isValid()) return whiteTexture_;
-
-    // No derived normal map for a composited body, and this is why: the
-    // derivation reads luminance as height, which holds for stone and bark and
-    // does not hold for skin. Every freckle, every painted shadow under a
-    // collarbone, becomes a ridge - and on a character that reads as stretch
-    // marks. Art authored as a surface gets one; art authored as a person does
-    // not.
-    TextureRef composite = cachePixels(*vkCtx_, {cacheKey, TextureForm::Composite, 0}, image.data.data(),
-                                       static_cast<uint32_t>(image.width), static_cast<uint32_t>(image.height),
-                                       {.hasAlpha = hasNonOpaqueAlpha(image.data), .alphaIsSilhouette = false,
-                                        .heightVariance = 0.0f});
-    if (!composite) return whiteTexture_;  // refused or failed, as the cache said
-    core::Logger::getInstance().info("Composite texture created: ", image.width, "x", image.height, " from ",
-                                     layerPaths.size(), " layers");
-    return composite;
+    if (layerPaths.empty() || !assetManager || !assetManager->isInitialized()) return whiteTexture_;
+    const TextureKey key{compositeLayersKey(layerPaths), TextureForm::Composite, 0};
+    return vkCtx_->textureLoads(*assetManager).reference(key, whiteTexture_, [this, &layerPaths, key]() -> TextureLoads::Make {
+        std::shared_ptr<pipeline::BLPImage> prepared;
+        if (predecodedBLPCache_) {
+            auto it = predecodedBLPCache_->find(key.path);
+            if (it != predecodedBLPCache_->end() && it->second.isValid())
+                prepared = std::make_shared<pipeline::BLPImage>(std::move(it->second));
+        }
+        return [ctx = vkCtx_, assets = assetManager, layers = layerPaths, key, prepared]() -> std::vector<PreparedTexture> {
+            auto image = prepared ? std::move(*prepared) : buildCompositeLayersCPU(assets, layers, nullptr);
+            if (!image.isValid()) {
+                LOG_WARNING("Character composite '", key.path, "' could not be prepared; drawn white");
+                return {};
+            }
+            return {preparePixels(*ctx, key, image.data.data(), static_cast<uint32_t>(image.width),
+                                   static_cast<uint32_t>(image.height),
+                                   {.hasAlpha = hasNonOpaqueAlpha(image.data)})};
+        };
+    });
 }
 
 TextureRef CharacterRenderer::compositeWithRegions(const std::string& basePath,
-                                                   const std::vector<std::string>& baseLayers,
-                                                   const std::vector<std::pair<int, std::string>>& regionLayers) {
-    // Build cache key from all inputs to avoid redundant compositing; a
-    // resident composite of the same inputs is shared.
-    const std::string cacheKey = compositeRegionsKey(basePath, baseLayers, regionLayers);
-    std::string storageKey = "__compositeRegions__" + cacheKey;
-    TextureCache& cache = vkCtx_->textures();
-    if (TextureRef cached = cache.find({storageKey, TextureForm::Composite, 0})) return cached;
-
-    pipeline::BLPImage image;
-    if (predecodedBLPCache_) {
-        auto ready = predecodedBLPCache_->find(storageKey);
-        if (ready != predecodedBLPCache_->end()) image = std::move(ready->second);
-    }
-    if (preparedTexturesOnly_ && predecodedBLPCache_ && !predecodedBLPCache_->count(storageKey)) {
-        LOG_ERROR("Unprepared character composite reached GPU consumer: ", storageKey);
-    }
-    if (!image.isValid() && !preparedTexturesOnly_) image = buildCompositeRegionsCPU(assetManager, basePath, baseLayers, regionLayers, predecodedBLPCache_);
-    if (!image.isValid()) return whiteTexture_;
-
-    // Skin again, with armour composited onto it: no normal map, for the
-    // reason compositeTextures gives.
-    TextureRef composite = cachePixels(*vkCtx_, {storageKey, TextureForm::Composite, 0}, image.data.data(),
-                                       static_cast<uint32_t>(image.width), static_cast<uint32_t>(image.height),
-                                       {.hasAlpha = hasNonOpaqueAlpha(image.data), .alphaIsSilhouette = false,
-                                        .heightVariance = 0.0f});
-    if (!composite) return whiteTexture_;  // refused or failed, as the cache said
-    core::Logger::getInstance().debug("compositeWithRegions: created ", image.width, "x", image.height,
-        " texture with ", regionLayers.size(), " equipment regions");
-    return composite;
+        const std::vector<std::string>& baseLayers,
+        const std::vector<std::pair<int, std::string>>& regionLayers) {
+    if (!assetManager || !assetManager->isInitialized()) return whiteTexture_;
+    const TextureKey key{"__compositeRegions__" + compositeRegionsKey(basePath, baseLayers, regionLayers),
+                         TextureForm::Composite, 0};
+    return vkCtx_->textureLoads(*assetManager).reference(key, whiteTexture_, [this, &basePath, &baseLayers, &regionLayers, key]() -> TextureLoads::Make {
+        std::shared_ptr<pipeline::BLPImage> prepared;
+        if (predecodedBLPCache_) {
+            auto it = predecodedBLPCache_->find(key.path);
+            if (it != predecodedBLPCache_->end() && it->second.isValid())
+                prepared = std::make_shared<pipeline::BLPImage>(std::move(it->second));
+        }
+        return [ctx = vkCtx_, assets = assetManager, base = basePath, layers = baseLayers,
+                regions = regionLayers, key, prepared]() -> std::vector<PreparedTexture> {
+            auto image = prepared ? std::move(*prepared) : buildCompositeRegionsCPU(assets, base, layers, regions, nullptr);
+            if (!image.isValid()) {
+                LOG_WARNING("Character composite '", key.path, "' could not be prepared; drawn white");
+                return {};
+            }
+            return {preparePixels(*ctx, key, image.data.data(), static_cast<uint32_t>(image.width),
+                                   static_cast<uint32_t>(image.height),
+                                   {.hasAlpha = hasNonOpaqueAlpha(image.data)})};
+        };
+    });
 }
 
 void CharacterRenderer::setModelTexture(uint32_t modelId, uint32_t textureSlot, TextureRef texture) {
@@ -1532,8 +1498,8 @@ void CharacterRenderer::setModelTexture(uint32_t modelId, uint32_t textureSlot, 
     }
 
     gpuModel.textureIds[textureSlot] = std::move(texture);
-    // The lists that draw with it are built again.
-    ++textureSerial_;
+    // Only instances of this model need their lists built again.
+    ++gpuModel.textureRevision;
     core::Logger::getInstance().debug("Replaced model ", modelId, " texture slot ", textureSlot, " with composited texture");
 }
 bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
@@ -2244,9 +2210,18 @@ std::optional<PosedSkeletons::Pose> CharacterRenderer::Frame::poseOf(uint32_t id
     return Pose{.request = at->second, .boneBase = request.outBase, .boneCount = next - request.outBase};
 }
 
+namespace {
+
+void rememberTexture(std::vector<TextureRef>& reads, const TextureRef& texture) {
+    if (texture && std::find(reads.begin(), reads.end(), texture) == reads.end()) reads.push_back(texture);
+}
+
+} // namespace
+
 std::optional<CharacterRenderer::BatchLook> CharacterRenderer::lookOf(const CharacterInstance& instance,
                                                                       const M2ModelGPU& gpuModel,
-                                                                      size_t bi) {
+                                                                      size_t bi,
+                                                                      std::vector<TextureRef>& reads) {
     const CharacterDress& dress = *instance.dress;
     const auto& batch = gpuModel.data->batches[bi];
     const auto batchUsesTextureType = [&](uint32_t wantedType) {
@@ -2322,8 +2297,10 @@ std::optional<CharacterRenderer::BatchLook> CharacterRenderer::lookOf(const Char
     const bool hairMaterial = !instance.isSceneModel &&
                               (hairTexture || (hairGeoset && (blendMode != 0 || batch.textureCount > 1)));
 
+    rememberTexture(reads, *texRef);
+
     // For body/equipment parts with white/fallback texture, use skin (type 1) texture.
-    if (*texRef == whiteTexture_ && !instance.isSceneModel) {
+    if (texRef->get() == whiteTexture_.get() && !instance.isSceneModel) {
         const uint16_t group = batchGroup;
         const bool isSkinGroup = (group == 0 || group == 3 || group == 4 || group == 5 || group == 8 ||
                                   group == 9 || group == 13);
@@ -2343,9 +2320,10 @@ std::optional<CharacterRenderer::BatchLook> CharacterRenderer::lookOf(const Char
                     }
                     const auto itO = dress.textureSlotOverrides.find(static_cast<uint16_t>(ti));
                     if (itO != dress.textureSlotOverrides.end() && itO->second) candidate = &itO->second;
-                    if (*candidate != whiteTexture_ && *candidate) {
-                        if (ti < gpuModel.data->textures.size() &&
-                            (gpuModel.data->textures[ti].type == 1 || gpuModel.data->textures[ti].type == 11)) {
+                    if (ti < gpuModel.data->textures.size() &&
+                        (gpuModel.data->textures[ti].type == 1 || gpuModel.data->textures[ti].type == 11)) {
+                        rememberTexture(reads, *candidate);
+                        if (candidate->get() != whiteTexture_.get() && candidate->get()) {
                             texRef = candidate;
                             wrapFlags = static_cast<uint8_t>(gpuModel.data->textures[ti].flags & 0x3);
                             break;
@@ -2362,7 +2340,7 @@ std::optional<CharacterRenderer::BatchLook> CharacterRenderer::lookOf(const Char
     // inferring a cutout from "the texture has alpha" discards the whole
     // building and leaves the sky showing through it. Only an alpha-key
     // material (blendMode 1) cuts out here.
-    const bool alphaCutout = texPtr != nullptr && *texRef != whiteTexture_ && texRef->info().hasAlpha;
+    const bool alphaCutout = texPtr != nullptr && texPtr != whiteTexture_.get() && texRef->info().hasAlpha;
     const bool blendNeedsCutout =
         characterBatchNeedsAlphaTest(blendMode, alphaCutout, hairMaterial, instance.isSceneModel);
     const bool unlit = characterBatchUnlit(blendMode, materialFlags);
@@ -2393,7 +2371,7 @@ std::optional<CharacterRenderer::BatchLook> CharacterRenderer::lookOf(const Char
     const VkTexture* normalMap = nullptr;
     TextureHandle normalImage = kNoTextureHandle;
     float batchHeightVariance = 0.0f;
-    if (texPtr && *texRef != whiteTexture_) {
+    if (texPtr && texPtr != whiteTexture_.get()) {
         if (VkTexture* derived = texRef->normalMap()) {
             normalMap = derived;
             normalImage = texRef->normalMapTableHandle();
@@ -2423,9 +2401,10 @@ std::optional<CharacterRenderer::BatchLook> CharacterRenderer::lookOf(const Char
     if (shading.stages == 2 && m2CombinerUsesSecondStage(shading.combiner)) {
         look.secondStage = true;
         const BatchTexture second = resolveBatchTexture(dress, gpuModel, batch, 1);
+        rememberTexture(reads, *second.texture);
         secondWrapFlags = second.wrapFlags;
         VkTexture* image = second.texture->get();
-        if (image && image->isValid() && *second.texture != whiteTexture_) {
+        if (image && image->isValid() && image != whiteTexture_.get()) {
             secondTex = image;
             secondImage = second.texture->tableHandle();
             m.hasSecondTexture = 1;
@@ -2546,7 +2525,8 @@ CharPipeline charPipelineOf(CharacterBlendPipeline pipeline) {
 }  // namespace
 
 std::vector<CharListEntry> CharacterRenderer::describeDraws(const CharacterInstance& instance,
-                                                            const M2ModelGPU& gpuModel) {
+                                                            const M2ModelGPU& gpuModel,
+                                                            std::vector<TextureRef>& reads) {
     std::vector<CharListEntry> out;
     // A model with no batches draws nothing, as in the client: an invisible
     // stalker's skin is exactly that.
@@ -2614,7 +2594,7 @@ std::vector<CharListEntry> CharacterRenderer::describeDraws(const CharacterInsta
                 const uint16_t grp = batch.submeshId / 100;
                 if (grp == 17 || grp == 18 || grp == 15) continue;
             }
-            if (auto look = lookOf(instance, gpuModel, bi)) drawn.push_back({bi, *look});
+            if (auto look = lookOf(instance, gpuModel, bi, reads)) drawn.push_back({bi, *look});
         }
     }
 
@@ -2685,7 +2665,8 @@ std::vector<CharListEntry> CharacterRenderer::describeDraws(const CharacterInsta
         entry.casts = true;
         if (blendMode == 1) {
             const TextureRef& tex = *resolveBatchTexture(dress, gpuModel, batch).texture;
-            if (tex && tex != whiteTexture_ && tex->isValid() && tex.tableHandle() != kNoTextureHandle) {
+            rememberTexture(reads, tex);
+            if (tex.get() && tex.get() != whiteTexture_.get() && tex->isValid() && tex.tableHandle() != kNoTextureHandle) {
                 entry.entry.casterTexture = tex.tableHandle();
                 entry.entry.flags |= CharEntryGPU::kCasterSample | CharEntryGPU::kCasterAlphaTest;
             }
@@ -2696,25 +2677,31 @@ std::vector<CharListEntry> CharacterRenderer::describeDraws(const CharacterInsta
 
 void CharacterRenderer::refreshList(uint32_t id, const CharacterInstance& instance) {
     const M2ModelGPU& model = *instance.cachedModel;
-    const ListBuilt now{.dress = instance.dress.get(), .model = &model, .textures = textureSerial_,
+    const ListBuilt now{.dress = instance.dress, .model = model.loadSerial,
+                        .modelTextures = model.textureRevision, .settings = materialSettingsRevision_,
                         .sceneModel = instance.isSceneModel};
     auto [built, made] = listsBuilt_.try_emplace(id);
     if (!made && built->second.dress == now.dress && built->second.model == now.model &&
-        built->second.textures == now.textures && built->second.sceneModel == now.sceneModel) {
+        built->second.modelTextures == now.modelTextures && built->second.settings == now.settings &&
+        built->second.sceneModel == now.sceneModel && !textureDependencies_.changed(id)) {
         return;
     }
+    std::vector<TextureRef> reads;
+    auto entries = describeDraws(instance, model, reads);
+    layout_.setList(id, model.geometry.page, std::move(entries));
+    textureDependencies_.replace(id, reads);
     built->second = now;
-    layout_.setList(id, model.geometry.page, describeDraws(instance, model));
 }
 
 std::shared_ptr<const CharacterRenderer::Frame> CharacterRenderer::extract(const Camera& camera) {
     auto frame = framePool_.acquire();
+    textureDependencies_.poll();
     // The normal settings are in every material row; changed, every list is
     // built again.
     if (listNormalMapping_ != normalMappingEnabled_ || listNormalStrength_ != normalMapStrength_) {
         listNormalMapping_ = normalMappingEnabled_;
         listNormalStrength_ = normalMapStrength_;
-        ++textureSerial_;
+        ++materialSettingsRevision_;
     }
     frame->skeleton.view = boneView_.value_or(glm::mat4(1.0f));
     frame->skeleton.pages = skeletons_.pageBuffers();
@@ -3351,6 +3338,7 @@ void CharacterRenderer::removeInstance(uint32_t instanceId) {
     scene_->instances.erase(it);
     layout_.remove(instanceId);
     listsBuilt_.erase(instanceId);
+    textureDependencies_.remove(instanceId);
 }
 
 bool CharacterRenderer::getAnimationState(uint32_t instanceId, uint32_t& animationId,

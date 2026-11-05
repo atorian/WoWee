@@ -3,6 +3,7 @@
 #include <thread>
 #include <mutex>
 #include "rendering/vk_context.hpp"
+#include "rendering/texture_loads.hpp"
 
 #include <fstream>
 #include "rendering/vk_utils.hpp"
@@ -69,6 +70,23 @@ private:
 TextureCache& VkContext::textures() { return *textureCache_; }
 const TextureCache& VkContext::textures() const { return *textureCache_; }
 TextureTable& VkContext::textureTable() { return *textureTable_; }
+
+TextureLoads& VkContext::textureLoads(pipeline::AssetManager& assets) {
+    if (!textureLoads_) textureLoads_ = std::make_unique<TextureLoads>(*this, assets);
+    return *textureLoads_;
+}
+
+void VkContext::publishTextures() {
+    if (textureLoads_) textureLoads_->publish();
+}
+
+void VkContext::drainTextures() {
+    if (textureLoads_) textureLoads_->drain();
+}
+
+void VkContext::resetTextureDataset() {
+    if (textureLoads_) textureLoads_->resetDataset();
+}
 
 bool VkContext::createTextureTable() {
     VkPhysicalDeviceVulkan12Properties properties12{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES};
@@ -179,6 +197,7 @@ bool VkContext::initialize(SDL_Window* window) {
 void VkContext::shutdown() {
     if (!device && !instance) return;  // Already shut down or never initialized
 
+    textureLoads_.reset();
     LOG_DEBUG("VkContext::shutdown - vkDeviceWaitIdle...");
     if (device) {
         waitIdle();

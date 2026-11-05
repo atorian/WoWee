@@ -14,7 +14,16 @@ namespace rendering {
 
 namespace detail {
 
+// A revision names an appearance, not a cache-wide generation. Giving every
+// new image and every changed normal link its own value also prevents reuse
+// of an entry's address from looking like an unchanged binding.
+uint64_t nextAppearanceRevision() {
+    static std::atomic<uint64_t> next{1};
+    return next.fetch_add(1, std::memory_order_relaxed);
+}
+
 struct TextureEntry {
+    std::atomic<uint64_t> revision{nextAppearanceRevision()};
     TextureCache* cache = nullptr;
     TextureKey key;
     bool named = false;
@@ -34,6 +43,16 @@ struct TextureEntry {
     /// Its place in the texture table, given when admitted and given back
     /// with the texture, after the frames that may sample it.
     TextureHandle tableHandle = kNoTextureHandle;
+};
+
+// Written once, after the upload fence. The fallback and the resident image
+// stay alive together: an older frame may still hold the fallback's pointer.
+struct TextureFuture {
+    std::atomic<uint64_t> revision{nextAppearanceRevision()};
+    TextureKey key;
+    TextureRef resident;
+    std::atomic<TextureEntry*> ready{nullptr};
+    std::atomic<bool> failed{false};
 };
 
 } // namespace detail
@@ -76,18 +95,20 @@ std::string normalizeTexturePath(std::string_view path) {
 
 TextureRef::TextureRef(TextureEntry* entry) : entry_(entry) {}
 
-TextureRef::TextureRef(const TextureRef& other) : entry_(other.entry_) {
+TextureRef::TextureRef(const TextureRef& other) : entry_(other.entry_), future_(other.future_) {
     if (!entry_) return;
     if (entry_->cache) entry_->cache->addRef(entry_);
     else ++entry_->refs;  // outlived its cache: nobody else touches it
 }
 
-TextureRef::TextureRef(TextureRef&& other) noexcept : entry_(std::exchange(other.entry_, nullptr)) {}
+TextureRef::TextureRef(TextureRef&& other) noexcept
+    : entry_(std::exchange(other.entry_, nullptr)), future_(std::move(other.future_)) {}
 
 TextureRef& TextureRef::operator=(const TextureRef& other) {
     if (this != &other) {
         TextureRef copy(other);
         std::swap(entry_, copy.entry_);
+        future_.swap(copy.future_);
     }
     return *this;
 }
@@ -96,6 +117,7 @@ TextureRef& TextureRef::operator=(TextureRef&& other) noexcept {
     if (this != &other) {
         reset();
         entry_ = std::exchange(other.entry_, nullptr);
+        future_ = std::move(other.future_);
     }
     return *this;
 }
@@ -104,40 +126,111 @@ TextureRef::~TextureRef() { reset(); }
 
 void TextureRef::reset() {
     if (TextureEntry* entry = std::exchange(entry_, nullptr)) TextureCache::release(entry);
+    future_.reset();
 }
 
-VkTexture* TextureRef::get() const { return entry_ ? entry_->texture.get() : nullptr; }
+TextureRef TextureRef::pending(const TextureKey& key, TextureRef fallback) {
+    TextureRef ref = fallback.snapshot();
+    ref.future_ = std::make_shared<detail::TextureFuture>();
+    ref.future_->key = key;
+    return ref;
+}
+
+TextureRef TextureRef::withFallback(TextureRef fallback) const {
+    if (!future_) return *this;
+    TextureRef ref = fallback.snapshot();
+    ref.future_ = future_;
+    return ref;
+}
+
+void TextureRef::complete(TextureRef resident) {
+    if (!future_ || !loading()) return;
+    if (!resident || resident.loading() || resident.failed()) {
+        future_->failed.store(true, std::memory_order_release);
+        future_->revision.store(detail::nextAppearanceRevision(), std::memory_order_release);
+        return;
+    }
+    future_->resident = std::move(resident);
+    future_->ready.store(future_->resident.resolved(), std::memory_order_release);
+}
+
+bool TextureRef::loading() const {
+    return future_ && !future_->ready.load(std::memory_order_acquire) &&
+           !future_->failed.load(std::memory_order_acquire);
+}
+
+bool TextureRef::failed() const {
+    return future_ && future_->failed.load(std::memory_order_acquire);
+}
+
+uint64_t TextureRef::revision() const {
+    if (future_) {
+        if (const TextureEntry* ready = future_->ready.load(std::memory_order_acquire))
+            return ready->revision.load(std::memory_order_acquire);
+        return future_->revision.load(std::memory_order_acquire);
+    }
+    return entry_ ? entry_->revision.load(std::memory_order_acquire) : 0;
+}
+
+TextureEntry* TextureRef::resolved() const {
+    if (!future_) return entry_;
+    if (TextureEntry* ready = future_->ready.load(std::memory_order_acquire)) return ready;
+    return entry_;
+}
+
+VkTexture* TextureRef::get() const {
+    const TextureEntry* entry = resolved();
+    return entry ? entry->texture.get() : nullptr;
+}
+
+TextureRef TextureRef::snapshot() const {
+    TextureEntry* entry = resolved();
+    if (!entry) return {};
+    if (entry->cache) entry->cache->addRef(entry);
+    else ++entry->refs;
+    return TextureRef(entry);
+}
 
 VkTexture* TextureRef::normalMap() const {
-    if (!entry_) return nullptr;
-    const TextureEntry* normal = entry_->normalMap.load(std::memory_order_acquire);
+    const TextureEntry* entry = resolved();
+    if (!entry) return nullptr;
+    const TextureEntry* normal = entry->normalMap.load(std::memory_order_acquire);
     return normal ? normal->texture.get() : nullptr;
 }
 
 TextureInfo TextureRef::normalMapInfo() const {
-    if (!entry_) return {};
-    const TextureEntry* normal = entry_->normalMap.load(std::memory_order_acquire);
+    const TextureEntry* entry = resolved();
+    if (!entry) return {};
+    const TextureEntry* normal = entry->normalMap.load(std::memory_order_acquire);
     return normal ? normal->info : TextureInfo{};
 }
 
-TextureHandle TextureRef::tableHandle() const { return entry_ ? entry_->tableHandle : kNoTextureHandle; }
+TextureHandle TextureRef::tableHandle() const {
+    const TextureEntry* entry = resolved();
+    return entry ? entry->tableHandle : kNoTextureHandle;
+}
 
 TextureHandle TextureRef::normalMapTableHandle() const {
-    if (!entry_) return kNoTextureHandle;
-    const TextureEntry* normal = entry_->normalMap.load(std::memory_order_acquire);
+    const TextureEntry* entry = resolved();
+    if (!entry) return kNoTextureHandle;
+    const TextureEntry* normal = entry->normalMap.load(std::memory_order_acquire);
     return normal ? normal->tableHandle : kNoTextureHandle;
 }
 
 const TextureInfo& TextureRef::info() const {
     static const TextureInfo kNone{};
-    return entry_ ? entry_->info : kNone;
+    const TextureEntry* entry = resolved();
+    return entry ? entry->info : kNone;
 }
 
-uint64_t TextureRef::bytes() const { return entry_ ? entry_->bytes : 0; }
+uint64_t TextureRef::bytes() const {
+    const TextureEntry* entry = resolved();
+    return entry ? entry->bytes : 0;
+}
 
 const TextureKey& TextureRef::key() const {
     static const TextureKey kNone{};
-    return entry_ ? entry_->key : kNone;
+    return future_ ? future_->key : entry_ ? entry_->key : kNone;
 }
 
 // ---- TextureCache -------------------------------------------------------------
@@ -322,6 +415,27 @@ TextureRef TextureCache::find(const TextureKey& key) {
     return TextureRef(entry);
 }
 
+TextureRef TextureCache::defer(const TextureKey& key, TextureRef fallback) {
+    return TextureRef::pending(key, std::move(fallback));
+}
+
+void TextureCache::complete(TextureRef request, TextureRef resident) {
+    request.complete(std::move(resident));
+}
+
+void TextureCache::invalidateNamed() {
+    std::lock_guard lock(mutex_);
+    for (auto& [key, entry] : named_) {
+        if (entry->refs == 0) retireLocked(entry.get());
+        else {
+            entry->named = false;
+            TextureEntry* raw = entry.get();
+            owned_.emplace(raw, std::move(entry));
+        }
+    }
+    named_.clear();
+}
+
 TextureRef TextureCache::insert(const TextureKey& key, std::shared_ptr<VkTexture> texture,
                                 uint64_t bytes, TextureInfo info) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -414,14 +528,17 @@ void TextureCache::releaseLocked(TextureEntry* entry) {
 }
 
 void TextureCache::setNormalMap(const TextureRef& texture, TextureRef normalMap) {
-    if (!texture.entry_ || !normalMap.entry_) return;
+    if (texture.loading() || texture.failed() || normalMap.loading() || normalMap.failed()) return;
+    TextureEntry* entry = texture.resolved();
+    TextureEntry* normal = normalMap.resolved();
+    if (!entry || !normal) return;
     std::lock_guard<std::mutex> lock(mutex_);
-    // The reference moves into the texture's entry rather than being counted
-    // again.
-    TextureEntry* normal = std::exchange(normalMap.entry_, nullptr);
-    if (TextureEntry* old = texture.entry_->normalMap.exchange(normal, std::memory_order_acq_rel)) {
+    if (entry->normalMap.load(std::memory_order_relaxed) == normal) return;
+    if (normal->refs++ == 0) unlinkIdleLocked(normal);
+    if (TextureEntry* old = entry->normalMap.exchange(normal, std::memory_order_acq_rel)) {
         releaseLocked(old);
     }
+    entry->revision.store(detail::nextAppearanceRevision(), std::memory_order_release);
 }
 
 TextureCacheStats TextureCache::stats() const {

@@ -52,7 +52,7 @@ public:
 
     /// A doodad's model, and the decoded images of the textures it names.
     void addModel(uint32_t doodadId, pipeline::DetailDoodadModel model,
-                  std::vector<std::pair<std::string, pipeline::BLPImage>> images);
+                  std::vector<std::pair<std::string, TextureRef>> images);
     /// A doodad whose model could not be read: its clutter is left out of the
     /// chunks that plant it rather than waited for.
     void modelFailed(uint32_t doodadId);

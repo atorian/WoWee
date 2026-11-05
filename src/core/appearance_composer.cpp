@@ -488,7 +488,7 @@ void AppearanceComposer::applyEquipment(PreparedEquipment& prepared) {
     // Everything below from what the worker made ready, and to the GPU in one
     // batch.
     applying_ = &prepared;
-    charRenderer->setPredecodedBLPCache(&prepared.textures, true);
+    charRenderer->setPredecodedBLPCache(&prepared.textures);
     auto* uploadCtx = renderer_->getVkContext();
     if (uploadCtx) uploadCtx->beginUploadBatch();
     struct Guard {

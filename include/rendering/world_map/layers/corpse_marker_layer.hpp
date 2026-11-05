@@ -37,7 +37,7 @@ private:
 
     VkContext* vkCtx_ = nullptr;
     pipeline::AssetManager* assetManager_ = nullptr;
-    ImGuiTexture marker_;
+    ImGuiTextureRequest marker_;
     bool loadAttempted_ = false;
     bool hasCorpse_ = false;
     glm::vec3 corpseRenderPos_ = {};

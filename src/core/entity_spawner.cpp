@@ -448,7 +448,7 @@ bool EntitySpawner::tryAttachCreatureVirtualWeapons(uint64_t guid, uint32_t inst
         }
 
         if (!loadWeaponM2(m2Path, weaponModel, texturePath)) return false;
-        charRenderer->setPredecodedBLPCache(&spawns_->preparedAttachmentTextures_, true);
+        charRenderer->setPredecodedBLPCache(&spawns_->preparedAttachmentTextures_);
         auto* uploadCtx = renderer_->getVkContext();
         if (uploadCtx) uploadCtx->beginUploadBatch();
         struct AttachmentGuard {
@@ -1706,7 +1706,7 @@ void EntitySpawner::applyCreatureDisplayTextures(uint32_t displayId, uint32_t mo
     auto itPreDec = spawns_->displayIdPredecodedTextures_.find(displayId);
     bool hasPreDec = (itPreDec != spawns_->displayIdPredecodedTextures_.end());
     if (hasPreDec) {
-        charRenderer->setPredecodedBLPCache(&itPreDec->second, true);
+        charRenderer->setPredecodedBLPCache(&itPreDec->second);
     }
     // Every texture below goes to the GPU in one batch, not a submit and a
     // wait each.
