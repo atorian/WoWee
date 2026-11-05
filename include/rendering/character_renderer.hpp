@@ -9,6 +9,7 @@
 
 #include "rendering/normal_map_builder.hpp"
 #include "rendering/texture_cache.hpp"
+#include "rendering/texture_dependencies.hpp"
 #include "rendering/vk_shader.hpp"
 #include "rendering/interior_light.hpp"
 #include "rendering/local_lights.hpp"
@@ -397,6 +398,9 @@ public:
     [[nodiscard]] ModelMemory modelMemory() const;
     /// Normal maps queued, being derived, or derived and not yet uploaded.
     [[nodiscard]] size_t pendingNormalMapJobs() const;
+    [[nodiscard]] bool texturesSettled() const;
+    /// Dataset changes only: stop old CPU recipes before their assets change.
+    void resetTexturePreparation();
 
     // Normal mapping settings. There are no parallax settings: characters are
     // drawn without parallax whatever the world uses (see the material setup).
@@ -409,7 +413,8 @@ public:
     void setShadowMap(VkTexture*, const glm::mat4&) {}
     void clearShadowMap() {}
 
-    // Pre-decoded BLP cache: set before calling loadModel() to skip main-thread BLP decode
+    // CPU texture recipes shared with the spawn workers. Their pixel vectors
+    // move into the texture producer; the frame never decodes or uploads them.
     static pipeline::BLPImage prepareTexture(pipeline::AssetManager* assets, const std::string& path);
     // CPU-only preparation: safe on workers; no renderer/GPU state is accessed.
     static void prepareCompositeTextures(pipeline::AssetManager* assets,
@@ -419,10 +424,8 @@ public:
         const std::string& base, const std::vector<std::string>& layers,
         const std::vector<std::pair<int, std::string>>& regions,
         std::unordered_map<std::string, pipeline::BLPImage>& decoded);
-    void setPredecodedBLPCache(std::unordered_map<std::string, pipeline::BLPImage>* cache,
-                              bool preparedOnly = false) {
+    void setPredecodedBLPCache(std::unordered_map<std::string, pipeline::BLPImage>* cache) {
         predecodedBLPCache_ = cache;
-        preparedTexturesOnly_ = cache && preparedOnly;
     }
 
     /// Append the point lights of the units animated this frame - those in
@@ -431,7 +434,6 @@ public:
 
 private:
     std::unordered_map<std::string, pipeline::BLPImage>* predecodedBLPCache_ = nullptr;
-    bool preparedTexturesOnly_ = false;
     // GPU representation of M2 model
     struct M2ModelGPU {
         /// Where its vertices and indices live (geometry_); unplaced for a
@@ -466,6 +468,7 @@ private:
         // Textures loaded from BLP (indexed by texture array position), held
         // for as long as the model is.
         std::vector<TextureRef> textureIds;
+        uint64_t textureRevision = 1;
 
         // Cached batch render order sorted by (priorityPlane, materialLayer).
         // Built once at load time - the sort only depends on the model's static
@@ -603,20 +606,24 @@ private:
     /// What an instance's draw list was built from: rebuilt when any of it
     /// changes.
     struct ListBuilt {
-        const CharacterDress* dress = nullptr;
-        const M2ModelGPU* model = nullptr;
-        uint64_t textures = 0;
+        /// Keep the identity alive until rebuild; allocator reuse of an old
+        /// dress address must not hide an equipment change while off screen.
+        std::shared_ptr<const CharacterDress> dress;
+        uint64_t model = 0;
+        uint64_t modelTextures = 0;
+        uint64_t settings = 0;
         bool sceneModel = false;
     };
     std::unordered_map<uint32_t, ListBuilt> listsBuilt_;
-    /// Bumped whenever a texture the lists name may draw otherwise: a normal
-    /// map attached, a model's texture replaced, the normal settings changed.
-    uint64_t textureSerial_ = 1;
+    TextureDependencies textureDependencies_;
+    /// Only a renderer-wide material setting invalidates every list.
+    uint64_t materialSettingsRevision_ = 1;
     bool listNormalMapping_ = true;
     float listNormalStrength_ = 0.8f;
     /// The instance's batches as the CPU drew them, in the order it drew
     /// them: each one's material, the places its draws go and what it casts.
-    std::vector<CharListEntry> describeDraws(const CharacterInstance& instance, const M2ModelGPU& model);
+    std::vector<CharListEntry> describeDraws(const CharacterInstance& instance, const M2ModelGPU& model,
+                                            std::vector<TextureRef>& reads);
     /// The material row of one batch of `instance`, or nothing when the batch
     /// is not drawn; its depth bias layer and pipelines alongside.
     struct BatchLook {
@@ -627,7 +634,8 @@ private:
         CharacterBlendPipeline partial = CharacterBlendPipeline::Opaque;
         CharacterBlendPipeline faded = CharacterBlendPipeline::Opaque;
     };
-    std::optional<BatchLook> lookOf(const CharacterInstance& instance, const M2ModelGPU& model, size_t batch);
+    std::optional<BatchLook> lookOf(const CharacterInstance& instance, const M2ModelGPU& model, size_t batch,
+                                   std::vector<TextureRef>& reads);
     /// The instance's list built again where what it was built from changed.
     void refreshList(uint32_t id, const CharacterInstance& instance);
     /// The rows and places of every instance's lists.
@@ -737,10 +745,6 @@ private:
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
 
 
-    /// When a path that would not load, or found no room, is next worth a read.
-    std::unordered_map<std::string, uint64_t> failedTextureRetryAt_;
-    std::unordered_set<std::string> loggedTextureLoadFails_;  // dedup warning logs
-    uint64_t textureLookupSerial_ = 0;
     // Fallbacks, held in the shared cache like any other texture.
     TextureRef whiteTexture_;
     TextureRef flatNormalTexture_;
@@ -754,6 +758,7 @@ private:
     /// with, on two workers of its own from a bounded queue, nearest first.
     /// Asked by processPendingNormalMaps from what the instances draw.
     std::unique_ptr<NormalMapBuilder> normalMapBuilder_;
+    std::unordered_map<std::string, TextureRef> normalMapsUploading_;
     /// Keys whose map could not be built; not asked for again.
     std::unordered_set<std::string> normalMapsFailed_;
     /// Where the camera was at the last update: what "nearest" is measured from.

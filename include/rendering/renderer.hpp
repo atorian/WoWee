@@ -234,7 +234,7 @@ public:
     CharacterRenderer* getCharacterRenderer() const { return characterRenderer.get(); }
     CharacterEmitters* getCharacterEmitters() const { return characterEmitters_.get(); }
     /// Where the world's model textures are made, off the frame.
-    TextureLoads* getTextureLoads() const { return textureLoads_.get(); }
+    TextureLoads* getTextureLoads() const { return textureLoads_; }
     /// No model placed, and no creature's emitters, wait for a texture: what
     /// a wait for a settled scene (the loading screen, scene_render) waits
     /// for.
@@ -520,7 +520,7 @@ private:
     std::unique_ptr<CharacterEmitters> characterEmitters_;
     /// Where the world's models' textures are made, off the frame: one for
     /// every renderer that samples them, outliving each.
-    std::unique_ptr<TextureLoads> textureLoads_;
+    TextureLoads* textureLoads_ = nullptr;
     std::unique_ptr<WMORenderer> wmoRenderer;
     std::unique_ptr<M2Renderer> m2Renderer;
     std::unique_ptr<M2Renderer> skyboxModelRenderer_;

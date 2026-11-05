@@ -6,6 +6,7 @@
 #include "pipeline/asset_manager.hpp"
 #include "pipeline/blp_loader.hpp"
 #include "rendering/vk_context.hpp"
+#include "rendering/texture_loads.hpp"
 #include "rendering/vk_texture.hpp"
 #include <algorithm>
 #include <chrono>
@@ -87,76 +88,17 @@ void WidgetRenderer::initialize(pipeline::AssetManager* assets, rendering::VkCon
     assets_ = assets;
     vkCtx_ = context;
     if (!assets || !context) return;
-    // Asset generations must not find the previous realm/expansion's image
-    // under the same virtual path in the process-wide GPU cache.
-    static std::atomic<uint64_t> generation{0};
-    const std::string prefix = "interface-generation/" + std::to_string(++generation) + "/";
+    auto& loads = context->textureLoads(*assets);
+    loads.beginInterfaceDataset();
     auto descriptors = std::make_shared<InterfaceDescriptors>(*context);
     textureCache_ = std::make_unique<UiTextureCache>(
-        [this, prefix](const std::string& path, bool add) -> PreparedUiTexture {
-            std::string resolved;
-            const auto bytes = readTextureFile(path, resolved);
-            if (bytes.empty()) return {.failure = "BLP file not found or empty"};
-            // As the file keeps it: a DXT file's blocks go to the GPU as they
-            // are, a quarter to an eighth of the RGBA8 every image was decoded
-            // to. An additive image is decoded, since its alpha is remade from
-            // its colour; so are the files with nothing to keep (palette,
-            // ARGB8888). One level, as the interface has always drawn them.
-            auto image = pipeline::BLPLoader::load(bytes, /*keepCompressed=*/!add);
-            if (!image.isValid()) return {.failure = "BLP decoding failed"};
-            if (image.isBlockCompressed()) image.mipmaps.resize(1);
-            if (add) for (size_t i = 0; i + 3 < image.data.size(); i += 4) {
-                const auto luminance = std::max({image.data[i], image.data[i+1], image.data[i+2]});
-                image.data[i+3] = static_cast<uint8_t>((image.data[i+3] * luminance) / 255);
-            }
-            auto& cache = vkCtx_->textures();
-            const rendering::TextureKey key{prefix + path, rendering::TextureForm::Interface,
-                                            static_cast<uint8_t>(add)};
-            if (auto existing = cache.find(key)) return {std::move(existing), image.width, image.height, {}};
-            const uint64_t cost = image.isBlockCompressed() ? image.mipmaps[0].size()
-                                                            : static_cast<uint64_t>(image.width) * image.height * 4;
-            if (!cache.reserve(cost)) return {.failure = "no room in the shared GPU texture budget"};
-            auto texture = std::make_shared<rendering::VkTexture>();
-            auto completion = std::make_shared<std::atomic<int>>(0);
-            PreparedUiTexture result;
-            result.pendingImage = texture;
-            result.key = key;
-            result.uploaded = completion;
-            vkCtx_->beginUploadBatch();
-            try {
-                bool uploaded = false;
-                if (image.isBlockCompressed()) {
-                    uploaded = texture->uploadBLP(*vkCtx_, image, 0);
-                    // A device that cannot sample the block format says so
-                    // before an image is made: the file goes up decoded.
-                    if (!uploaded) {
-                        static core::LogBudget said(16, "interface textures that went up decoded");
-                        if (said.take())
-                            LOG_WARNING("Interface texture '", path, "' did not go up as blocks; it goes up "
-                                        "decoded to RGBA8, at four to eight times the memory");
-                        image = pipeline::BLPLoader::load(bytes);
-                    }
-                }
-                if (!image.isBlockCompressed())
-                    uploaded = texture->upload(*vkCtx_, image.data.data(), image.width, image.height,
-                                               VK_FORMAT_R8G8B8A8_UNORM, false);
-                const bool sampled = uploaded && texture->createSampler(vkCtx_->getDevice(), VK_FILTER_LINEAR,
-                    VK_FILTER_LINEAR, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, 1.0f);
-                if (sampled) { result.width = image.width; result.height = image.height; }
-                else result.failure = uploaded ? "sampler creation failed" : "GPU image upload failed";
-            } catch (const std::exception& error) {
-                result.failure = error.what();
-            }
-            // Close even after a failed preparation; keep any recorded image
-            // alive in the result until teardown has joined its GPU work.
-            vkCtx_->endUploadBatch(completion);
-            return result;
+        [&loads](const std::string& path, bool add) -> PreparedUiTexture {
+            PreparedUiTexture ready;
+            ready.image = loads.interfaceTexture(path, add ? rendering::InterfaceAlpha::Additive
+                                                           : rendering::InterfaceAlpha::Original);
+            return ready;
         },
-        [context, descriptors](PreparedUiTexture& ready) {
-            if (!ready.image && ready.pendingImage) {
-                const auto cost = ready.pendingImage->allocatedBytes();
-                ready.image = context->textures().insert(ready.key, std::move(ready.pendingImage), cost);
-            }
+        [descriptors](PreparedUiTexture& ready) {
             return ready.image ? descriptors->add(*ready.image.get()) : VK_NULL_HANDLE;
         },
         [](VkDescriptorSet& descriptor) { descriptor = VK_NULL_HANDLE; });
@@ -171,7 +113,7 @@ void WidgetRenderer::resetResources() {
         registerUiTextureCache(assets_, nullptr);
         textureCache_->join();
         // Only dataset changes/shutdown join work; ordinary frames never wait.
-        if (vkCtx_) vkCtx_->waitAllUploads();
+        if (vkCtx_) vkCtx_->drainTextures();
         textureCache_.reset();
     }
     textureSizes_.clear();
@@ -208,7 +150,7 @@ void WidgetRenderer::pumpResources() {
         }
     }
     const auto discovered = std::chrono::steady_clock::now();
-    vkCtx_->pollUploadBatches();
+    vkCtx_->publishTextures();
     const auto retired = std::chrono::steady_clock::now();
     textureCache_->pump();
     const auto published = std::chrono::steady_clock::now();

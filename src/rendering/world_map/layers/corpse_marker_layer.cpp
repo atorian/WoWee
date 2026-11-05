@@ -24,23 +24,17 @@ void CorpseMarkerLayer::initialize(VkContext* ctx, pipeline::AssetManager* am) {
 }
 
 void CorpseMarkerLayer::clearTexture() {
-    if (vkCtx_) marker_.destroy(vkCtx_->getDevice(), vkCtx_->getAllocator());
+    marker_.reset();
     loadAttempted_ = false;
 }
 
 void CorpseMarkerLayer::ensureTexture() {
-    if (loadAttempted_ || !vkCtx_ || !assetManager_) return;
-    loadAttempted_ = true;
-
-    auto loaded = loadImGuiTexture(*assetManager_, *vkCtx_,
-                                   "Interface\\Minimap\\Rotating-MinimapCorpseArrow.blp");
-    if (!loaded) {
-        LOG_WARNING("CorpseMarkerLayer: icon texture unavailable");
-        return;
+    if (!vkCtx_ || !assetManager_) return;
+    if (!loadAttempted_) {
+        loadAttempted_ = true;
+        marker_ = requestImGuiTexture(*assetManager_, *vkCtx_, "Interface\\Minimap\\Rotating-MinimapCorpseArrow.blp");
     }
-    marker_ = std::move(loaded);
-    LOG_INFO("CorpseMarkerLayer: loaded corpse icon ", marker_.texture->getWidth(), "x",
-             marker_.texture->getHeight());
+    marker_.poll();
 }
 
 void CorpseMarkerLayer::render(const LayerContext& ctx) {

@@ -3,6 +3,7 @@
 #include "rendering/world_map/overlay_renderer.hpp"
 #include "rendering/world_map/zone_metadata.hpp"
 #include "rendering/vk_texture.hpp"
+#include "rendering/imgui_texture.hpp"
 #include <vulkan/vulkan.h>
 #include <unordered_map>
 #include <memory>
@@ -38,12 +39,7 @@ private:
     VkContext* vkCtx_ = nullptr;
     pipeline::AssetManager* assetManager_ = nullptr;
 
-    struct HighlightEntry {
-        std::unique_ptr<VkTexture> texture;
-        VkDescriptorSet imguiDS = VK_NULL_HANDLE;  // ImGui texture ID
-    };
-    std::unordered_map<std::string, HighlightEntry> highlights_;
-    std::unordered_set<std::string> missingHighlights_;  // areas with no highlight file
+    std::unordered_map<std::string, ImGuiTextureRequest> highlights_;
 
     int hoveredZone_ = -1;
     int prevHoveredZone_ = -1;

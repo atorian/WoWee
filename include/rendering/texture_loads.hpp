@@ -46,11 +46,9 @@ public:
         Resident,
         /// Being made on a worker; ask again.
         Loading,
-        /// It could not be made, as the worker said; tried again only after
-        /// this many more requests for it.
+        /// It could not be made, as the worker said. No per-frame retry.
         Failed,
     };
-    static constexpr uint32_t kRetryAfterRequests = 512;
 
     /// Runs on a worker inside its upload batch: the textures it made, the
     /// first the one asked for (none when it could not be made, having said
@@ -68,6 +66,18 @@ public:
     /// starts) queued for a worker. Any thread.
     State request(const TextureKey& key, TextureRef& out, const std::function<Make()>& make);
 
+    /// Bind once, including while loading. All copies resolve together after
+    /// the upload fence. The maker factory only captures small job metadata;
+    /// reading, decoding, derived pixels and GPU preparation run on a worker.
+    TextureRef reference(const TextureKey& key, TextureRef fallback, const std::function<Make()>& make);
+    TextureRef stored(const std::string& path, TextureRef fallback = {});
+    TextureRef interfaceTexture(const std::string& path, InterfaceAlpha alpha = InterfaceAlpha::Original);
+    /// Dataset changes happen outside gameplay, after UI consumers join work.
+    void beginInterfaceDataset() { ++interfaceGeneration_; }
+    [[nodiscard]] uint64_t revision(TextureForm form) const {
+        return revisions_[static_cast<size_t>(form)].load();
+    }
+
     /// A stored texture - DXT blocks as the file keeps them, what models
     /// sample - by its normalized path (normalizeTexturePath). A loader
     /// thread that knows a model is coming asks for its textures ahead of it.
@@ -77,6 +87,10 @@ public:
     /// that has run in the cache, and says the loads of one that failed
     /// failed. Once a frame, on the thread that asks, before it asks again.
     void publish();
+    /// Loading screens, teardown and dataset changes only. Joins CPU work,
+    /// waits for uploads and publishes their answers before assets may change.
+    void drain();
+    void resetDataset();
 
     [[nodiscard]] VkContext& context() const { return context_; }
     [[nodiscard]] pipeline::AssetManager& assets() const { return assets_; }
@@ -88,7 +102,7 @@ private:
         State state = State::Loading;
         /// Resident: the key the worker's texture is cached under.
         TextureKey madeAs;
-        uint32_t requestsSinceFailure = 0;
+        TextureRef reference;
     };
     struct Job {
         TextureKey key;
@@ -102,6 +116,8 @@ private:
     };
 
     void work();
+    State requestLocked(const TextureKey& key, TextureRef& out, const std::function<Make()>& make);
+    Make makeStored(const TextureKey& key);
     /// With the lock held.
     void finish(const TextureKey& key, const TextureRef& made);
 
@@ -110,11 +126,15 @@ private:
     std::mutex mutex_;
     /// Signalled as a job is queued, and to stop.
     std::condition_variable queued_;
+    std::condition_variable idle_;
+    size_t working_ = 0;
     std::unordered_map<TextureKey, Load, TextureKeyHash> loads_;
     std::deque<Job> queue_;
     std::vector<Sent> sent_;
     bool stopping_ = false;
     std::vector<std::thread> workers_;
+    std::array<std::atomic<uint64_t>, kTextureFormCount> revisions_{};
+    std::atomic<uint64_t> interfaceGeneration_{0};
 };
 
 }  // namespace wowee::rendering

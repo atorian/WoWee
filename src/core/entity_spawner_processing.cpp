@@ -136,7 +136,7 @@ void EntitySpawner::processAsyncCreatureResults(bool unlimited) {
             // Use pre-decoded BLP cache to skip main-thread texture decode.
             // The cache's parse, shared with the portrait rather than copied.
             auto uploadStart = std::chrono::steady_clock::now();
-            charRenderer->setPredecodedBLPCache(&result.predecodedTextures, true);
+            charRenderer->setPredecodedBLPCache(&result.predecodedTextures);
             if (!charRenderer->loadModel(result.model, result.modelId)) {
                 charRenderer->setPredecodedBLPCache(nullptr);
                 assets_.unloadableCreaturePaths_.insert(result.modelKey);
@@ -234,7 +234,7 @@ void EntitySpawner::processAsyncNpcCompositeResults(bool unlimited) {
         const auto& info = result.info;
 
         // Set pre-decoded cache so texture loads skip synchronous BLP decode
-        charRenderer->setPredecodedBLPCache(&result.predecodedTextures, true);
+        charRenderer->setPredecodedBLPCache(&result.predecodedTextures);
 
         // --- Apply skin to type-1 slots ---
         rendering::TextureRef skinTex;
@@ -762,7 +762,7 @@ void EntitySpawner::processPlayerSpawnQueue() {
             }
         }
         spawns_->preparedPlayerSpawn_ = &ready;
-        cr->setPredecodedBLPCache(&ready.textures, true);
+        cr->setPredecodedBLPCache(&ready.textures);
         struct AppearanceGuard {
             EntitySpawner* spawner;
             rendering::CharacterRenderer* renderer;
@@ -865,7 +865,7 @@ void EntitySpawner::processAsyncEquipmentResults() {
             appearance->second.instanceId != result.instanceId ||
             !spawns_->jobs_.accepts(result.token)) continue;
         spawns_->preparedEquipmentUpdate_ = &result;
-        charRenderer->setPredecodedBLPCache(&result.predecodedTextures, true);
+        charRenderer->setPredecodedBLPCache(&result.predecodedTextures);
         struct EquipmentGuard {
             EntitySpawner* spawner;
             rendering::CharacterRenderer* renderer;
@@ -1961,7 +1961,7 @@ EntitySpawner::ModelLoad EntitySpawner::loadRemoteMountModel(uint32_t displayId,
             if (!attachmentModel(modelPath, path)) ready = false;
         }
         if (!ready) return ModelLoad::Pending;
-        cr->setPredecodedBLPCache(&spawns_->preparedAttachmentTextures_, true);
+        cr->setPredecodedBLPCache(&spawns_->preparedAttachmentTextures_);
         struct TextureGuard {
             rendering::CharacterRenderer* renderer;
             ~TextureGuard() { renderer->setPredecodedBLPCache(nullptr); }

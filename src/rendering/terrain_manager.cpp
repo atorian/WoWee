@@ -145,6 +145,8 @@ bool TerrainManager::initialize(pipeline::AssetManager* assets, TerrainRenderer*
         return false;
     }
 
+    textureLoads_ = &terrainRenderer->getVkContext()->textureLoads(*assetManager);
+
     // Before the workers: each reads these tables while it prepares a tile.
     // Loaded by whichever worker came first, the others read the maps while
     // it was still filling them, and the client crashed entering the world.
@@ -879,24 +881,13 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
 
     if (!workerRunning.load() || !mapToken_.current()) return nullptr;
 
-    // Pre-load terrain texture BLP data on background thread so finalizeTile
-    // doesn't block the main thread with file I/O.
-    // Their relief is derived here too, from a decoded copy, unless a tile
-    // loaded earlier already left it in the cache.
-    TextureCache* textureCache = terrainRenderer && terrainRenderer->getVkContext()
-        ? &terrainRenderer->getVkContext()->textures() : nullptr;
-    if (!landmarks) for (const auto& texPath : pending->terrain.textures) {
-        if (pending->preloadedTextures.find(texPath) != pending->preloadedTextures.end()) continue;
-        // Terrain tilesets and M2 skins stay in their blocks - both are only
-        // sampled, and M2's transparency now comes from the blocks too. The
-        // normal-map source below still decodes: it reads the pixels.
-        pipeline::BLPImage blp = assetManager->loadTexture(texPath, true);
-        if (blp.isValid() && !(textureCache && textureCache->find(TerrainRenderer::normalMapKey(texPath)))) {
-            EncodedNormalMap normals = TerrainRenderer::deriveNormalMap(blp, terrainNormalMapFormat_);
-            if (normals.valid()) pending->preloadedTerrainNormalMaps[texPath] = std::move(normals);
-        }
-        if (blp.isValid()) blp.analyzeAlpha();
-        pending->preloadedTextures[texPath] = std::move(blp);
+    // The shared producer owns reading, deriving and uploading. These
+    // references pin its answers until the chunks bind them, including under
+    // a cache budget that would evict unreferenced preloads.
+    if (!landmarks && textureLoads_) for (const auto& path : pending->terrain.textures) {
+        pending->terrainTextures.push_back(textureLoads_->stored(path));
+        pending->terrainTextures.push_back(
+            TerrainRenderer::requestNormalMap(*textureLoads_, path, terrainNormalMapFormat_));
     }
 
     LOG_DEBUG("Prepared tile [", x, ",", y, "]: ",
@@ -904,7 +895,7 @@ std::shared_ptr<PendingTile> TerrainManager::prepareTile(int x, int y, TileDetai
              pending->m2Placements.size(), " M2 placements, ",
              pending->wmoModels.size(), " WMOs, ",
              pending->wmoDoodads.size(), " WMO doodads, ",
-             pending->preloadedTextures.size(), " textures");
+             pending->terrainTextures.size(), " textures");
 
     if (landmarks) {
         // Placement ownership is retained in the finalized instance lists.
@@ -926,6 +917,7 @@ void TerrainManager::logMissingAdtOnce(const std::string& adtPath) {
 }
 
 bool TerrainManager::advanceFinalization(FinalizingTile& ft) {  // NOLINT(readability-function-size)
+    ft.waitingForTextures = false;
     auto& pending = ft.pending;
     int x = pending->coord.x;
     int y = pending->coord.y;
@@ -948,35 +940,10 @@ bool TerrainManager::advanceFinalization(FinalizingTile& ft) {  // NOLINT(readab
             return true;
         }
 
-        // Upload pre-loaded textures, as many as the step budget allows.
         if (!ft.terrainPreloaded) {
-            if (!ft.terrainTexKeysCollected) {
-                LOG_DEBUG("Finalizing tile [", x, ",", y, "] (incremental)");
-                ft.terrainTexKeys.reserve(pending->preloadedTextures.size());
-                for (const auto& entry : pending->preloadedTextures) ft.terrainTexKeys.push_back(entry.first);
-                ft.terrainTexKeysCollected = true;
-            }
-            const auto stepStart = std::chrono::steady_clock::now();
-            std::unordered_map<std::string, pipeline::BLPImage> one;
-            while (ft.terrainTexNext < ft.terrainTexKeys.size()) {
-                const auto it = pending->preloadedTextures.find(ft.terrainTexKeys[ft.terrainTexNext++]);
-                if (it == pending->preloadedTextures.end()) continue;
-                one.clear();
-                one.emplace(it->first, std::move(it->second));
-                terrainRenderer->uploadPreloadedTextures(one);
-                if (auto normals = pending->preloadedTerrainNormalMaps.find(it->first);
-                    normals != pending->preloadedTerrainNormalMaps.end()) {
-                    terrainRenderer->uploadPreloadedNormalMap(normals->first, normals->second);
-                    pending->preloadedTerrainNormalMaps.erase(normals);
-                }
-                if (std::chrono::duration<float, std::milli>(
-                        std::chrono::steady_clock::now() - stepStart).count() >= stepBudgetMs_) break;
-            }
-            finalizePartMs_[kPartTerrainTextures] += std::chrono::duration<float, std::milli>(
-                std::chrono::steady_clock::now() - stepStart).count();
-            if (ft.terrainTexNext < ft.terrainTexKeys.size()) return false;
+            for (const auto& texture : pending->terrainTextures)
+                if (texture.loading()) { ft.waitingForTextures = true; return false; }
             ft.terrainPreloaded = true;
-            return false;
         }
 
         // Upload terrain chunks incrementally (16 per call to spread across frames)
@@ -1592,11 +1559,22 @@ void TerrainManager::processReadyTiles() {
     // rendererUpdate/terrain - one entry a phase, however many steps it took.
     std::array<float, static_cast<size_t>(FinalizationPhase::DONE) + 1> phaseMs{};
 
+    size_t blocked = 0;
     while (!finalizingTiles_.empty()) {
         auto& ft = finalizingTiles_.front();
         const auto phaseBefore = ft.phase;
         const auto stepStart = std::chrono::steady_clock::now();
         bool done = advanceFinalization(ft);
+        if (ft.waitingForTextures) {
+            // Every blocked tile is tried at most once without progress.
+            // Waiting for workers must not burn the frame's entire budget.
+            FinalizingTile waiting = std::move(finalizingTiles_.front());
+            finalizingTiles_.pop_front();
+            finalizingTiles_.push_back(std::move(waiting));
+            if (++blocked >= finalizingTiles_.size()) break;
+            continue;
+        }
+        blocked = 0;
         const float stepMs = std::chrono::duration<float, std::milli>(
             std::chrono::steady_clock::now() - stepStart).count();
         phaseMs[static_cast<size_t>(phaseBefore)] += stepMs;
@@ -1734,7 +1712,12 @@ void TerrainManager::processOneReadyTile() {
         if (vkCtx) vkCtx->beginUploadBatch();
 
         auto& ft = finalizingTiles_.front();
-        while (!advanceFinalization(ft)) {}
+        while (!advanceFinalization(ft)) {
+            // Only this loading-screen API may wait. The gameplay path
+            // returns to the next frame while a texture is still loading.
+            vkCtx->publishTextures();
+            if (!ft.terrainPreloaded) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
         finalizingTiles_.pop_front();
 
         if (vkCtx) vkCtx->endUploadBatchSync();  // Sync - load screen needs data ready
@@ -2004,12 +1987,8 @@ void TerrainManager::prepareDetailDoodadModels(PendingTile& pending) {
             const bool have = std::any_of(out.images.begin(), out.images.end(),
                                           [&](const auto& i) { return i.first == batch.texture; });
             if (have) continue;
-            pipeline::BLPImage image = assetManager->loadTexture(batch.texture, true);
-            if (!image.isValid()) {
-                LOG_WARNING("Ground clutter: texture ", batch.texture, " of ", path,
-                            " did not load; that part of the clutter is not drawn");
-                continue;
-            }
+            auto image = textureLoads_->stored(batch.texture);
+            pending.terrainTextures.push_back(image);
             out.images.emplace_back(batch.texture, std::move(image));
         }
         pending.detailModels.push_back(std::move(out));

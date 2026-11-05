@@ -61,58 +61,6 @@ std::string strippedText(const std::string& in) {
 
 } // namespace
 
-std::vector<uint8_t> WidgetRenderer::readTextureFile(const std::string& path,
-                                                     std::string& resolvedOut) {
-    if (!assets_ || path.empty()) return {};
-
-    // Addons write "Interface\\Foo\\Bar" without the extension as often as with
-    // it, and the real client accepts both.
-    std::string resolved = path;
-    auto endsWith = [&resolved](const char* ext) {
-        if (resolved.size() <= 4) return false;
-        const size_t at = resolved.size() - 4;
-        for (size_t i = 0; i < 4; ++i) {
-            if (std::tolower(static_cast<unsigned char>(resolved[at + i])) != ext[i]) {
-                return false;
-            }
-        }
-        return true;
-    };
-    // .tga means .blp. Blizzard's own markup still names 33 files that way -
-    // the world map's quest icons and small frame edges, the login screen's
-    // rating art - and no .tga has shipped in the archives since long before
-    // 3.3.5. The real client accepts the name and loads the BLP beside it;
-    // taking the extension at its word left every one of those blank, which
-    // looks exactly like art nobody meant to draw.
-    if (endsWith(".tga")) resolved.replace(resolved.size() - 4, 4, ".blp");
-    else if (!endsWith(".blp")) resolved += ".blp";
-
-    auto data = assets_->readFile(resolved);
-    if (data.empty()) {
-        // The interface is WotLK's; the assets are whichever expansion this
-        // install carries, and the two do not always agree on a folder. The
-        // quest icon is the one that differs here - FrameXML asks for
-        // Interface\GossipFrame\AvailableQuestIcon, which is where 3.3.5 keeps
-        // it, and this install has Interface\Gossip\. Retried rather than
-        // aliased at extraction time, because the extractor preserves the
-        // paths its MPQs use and is right to.
-        static constexpr struct { const char* from; const char* to; } kFolders[] = {
-            {.from = "gossipframe\\", .to = "gossip\\"},
-        };
-        std::string lower = resolved;
-        for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        for (const auto& swap : kFolders) {
-            const size_t at = lower.find(swap.from);
-            if (at == std::string::npos) continue;
-            std::string alt = resolved;
-            alt.replace(at, std::strlen(swap.from), swap.to);
-            data = assets_->readFile(alt);
-            if (!data.empty()) { resolved = alt; break; }
-        }
-    }
-    resolvedOut = resolved;
-    return data;
-}
 
 bool WidgetRenderer::textureSize(const std::string& path, float& w, float& h) {
     if (path.empty()) return false;
@@ -131,10 +79,7 @@ bool WidgetRenderer::textureSize(const std::string& path, float& w, float& h) {
     // Deliberately no vkCtx_ here. Asking how big a picture is does not need a
     // GPU, and tying it to one would mean the headless harness could never
     // check any of this - which is what kept this fix unwritten.
-    std::string resolved;
-    auto data = readTextureFile(path, resolved);
-    if (data.empty()) { textureSizes_[path] = {0.0f, 0.0f}; return false; }
-    const auto image = pipeline::BLPLoader::load(data);
+    const auto image = assets_->loadInterfaceTexture(path);
     if (!image.isValid() || image.width == 0 || image.height == 0) {
         textureSizes_[path] = {0.0f, 0.0f};
         return false;

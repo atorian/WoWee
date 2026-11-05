@@ -69,6 +69,9 @@ public:
     /// keepCompressed asks the loader to leave a DXT texture in its blocks.
     /// A PNG override is decoded regardless - it has no blocks to keep.
     BLPImage loadTexture(const std::string& path, bool keepCompressed = false);
+    /// FrameXML accepts omitted extensions and .tga names for BLP files.
+    static std::string interfaceTexturePath(const std::string& path);
+    BLPImage loadInterfaceTexture(const std::string& path, bool keepCompressed = false);
 
     /**
      * Set expansion-specific data path for CSV DBC lookup.

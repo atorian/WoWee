@@ -4,6 +4,7 @@
 #include <backends/imgui_impl_vulkan.h>
 
 #include "rendering/vk_context.hpp"
+#include "rendering/texture_loads.hpp"
 #include "rendering/interface_frame.hpp"
 #include "core/logger.hpp"
 #include <unordered_map>
@@ -72,9 +73,40 @@ ImGuiTexture makeImGuiTexture(VkContext& ctx, const pipeline::BLPImage& image) {
     return ImGuiTexture{.texture = std::move(texture), .descriptorSet = descriptorSet};
 }
 
-ImGuiTexture loadImGuiTexture(pipeline::AssetManager& assets, VkContext& ctx,
-                              const std::string& path) {
-    return makeImGuiTexture(ctx, assets.loadTexture(path));
+ImGuiTextureRequest::~ImGuiTextureRequest() { reset(); }
+
+ImGuiTextureRequest::ImGuiTextureRequest(ImGuiTextureRequest&& other) noexcept
+    : texture(std::move(other.texture)), descriptorSet(std::exchange(other.descriptorSet, VK_NULL_HANDLE)) {}
+
+ImGuiTextureRequest& ImGuiTextureRequest::operator=(ImGuiTextureRequest&& other) noexcept {
+    if (this != &other) {
+        reset();
+        texture = std::move(other.texture);
+        descriptorSet = std::exchange(other.descriptorSet, VK_NULL_HANDLE);
+    }
+    return *this;
+}
+
+void ImGuiTextureRequest::reset() {
+    removeImGuiTexture(descriptorSet);
+    texture.reset();
+}
+
+bool ImGuiTextureRequest::poll() {
+    if (descriptorSet) return true;
+    if (!texture.get() || texture.loading() || texture.failed()) return false;
+    descriptorSet = addImGuiTexture(texture->getSampler(), texture->getImageView(),
+                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    if (!descriptorSet) {
+        LOG_WARNING("Interface texture '", texture.key().path, "' descriptor failed; image is not drawn");
+        texture.reset();
+    }
+    return descriptorSet != VK_NULL_HANDLE;
+}
+
+ImGuiTextureRequest requestImGuiTexture(pipeline::AssetManager& assets, VkContext& ctx,
+                                        const std::string& path, InterfaceAlpha alpha) {
+    return ImGuiTextureRequest(ctx.textureLoads(assets).interfaceTexture(path, alpha));
 }
 
 namespace {

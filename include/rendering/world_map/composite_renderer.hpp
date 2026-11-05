@@ -4,6 +4,7 @@
 #pragma once
 
 #include "rendering/world_map/world_map_types.hpp"
+#include "rendering/texture_cache.hpp"
 #include <vulkan/vulkan.h>
 #include <vk_mem_alloc.h>
 #include <glm/glm.hpp>
@@ -134,9 +135,7 @@ private:
     // ImGui display descriptor set (points to composite render target)
     VkDescriptorSet imguiDisplaySet = VK_NULL_HANDLE;
 
-    // Texture storage (owns all VkTexture objects for zone tiles)
-    std::vector<std::unique_ptr<VkTexture>> zoneTextures;
-
+    uint64_t textureRevision_ = 0;
     std::atomic<int> compositedIdx_{-1};
     std::atomic<bool> everComposited_{false};
     int pendingCompositeIdx_ = -1;
@@ -146,11 +145,11 @@ private:
     // Per-zone tile texture pointers (indexed by zone, then by tile slot)
     // Stored separately since Zone struct is now Vulkan-free
     struct ZoneTextureSlots {
-        VkTexture* tileTextures[12] = {};
+        TextureRef tileTextures[12];
         bool tilesLoaded = false;
         // Per-overlay tile textures
         struct OverlaySlots {
-            std::vector<VkTexture*> tiles;
+            std::vector<TextureRef> tiles;
             bool tilesLoaded = false;
         };
         std::vector<OverlaySlots> overlays;

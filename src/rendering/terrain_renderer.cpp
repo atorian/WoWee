@@ -3,6 +3,7 @@
 #include "rendering/terrain_renderer.hpp"
 #include "rendering/rt_scene.hpp"
 #include "rendering/texture_upload.hpp"
+#include "rendering/texture_loads.hpp"
 #include "rendering/vk_context.hpp"
 #include "rendering/cpu_stage_times.hpp"
 #include "rendering/vk_texture.hpp"
@@ -240,6 +241,8 @@ bool TerrainRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameL
         LOG_ERROR("TerrainRenderer: null context or asset manager");
         return false;
     }
+    normalMapFormat_ = normalMapFormatFor(*ctx);
+    (void)ctx->textureLoads(*assets);
 
     LOG_INFO("Initializing terrain renderer (Vulkan)");
     VkDevice device = vkCtx->getDevice();
@@ -430,8 +433,6 @@ void TerrainRenderer::shutdown() {
     bake_.shutdown();
     bakeEnabled_ = false;
 
-    loggedTextureLoadFails_.clear();
-    loggedNormalMapFails_.clear();
     whiteTexture.reset();
     flatNormalTexture.reset();
     // After the flush, which destroyed the tiles' maps clear() let go. The
@@ -647,24 +648,19 @@ TerrainChunkGPU TerrainRenderer::uploadChunk(const pipeline::ChunkMesh& chunk) {
 }
 
 TextureRef TerrainRenderer::loadTexture(const std::string& path) {
-    TextureCache& cache = vkCtx->textures();
-    const TextureKey key{normalizeTexturePath(path), TextureForm::Stored, 0};
-    if (TextureRef cached = cache.find(key)) return cached;
+    return vkCtx->textureLoads(*assetManager).stored(path, whiteTexture);
+}
 
-    // Terrain tileset textures are sampled and never read back, so they go
-    // up as blocks with the file's own mip levels.
-    pipeline::BLPImage blp = assetManager->loadTexture(key.path, true);
-    if (!blp.isValid()) {
-        // White, and asked for again by the next tile that names it, in case
-        // the asset becomes available.
-        if (loggedTextureLoadFails_.insert(key.path).second) {
-            LOG_WARNING("Failed to load texture: ", path, " - white ground where it is laid");
-        }
-        return whiteTexture;
+bool TerrainRenderer::texturesSettled() const {
+    for (const auto& [gx, gy] : pendingTextureChunks_) {
+        const auto index = chunkIndex_.find(gx, gy);
+        if (index == TerrainChunkIndex::kNone) continue;
+        const auto& chunk = chunks[index];
+        if (chunk.baseTexture.loading() || chunk.baseNormalMap.loading()) return false;
+        for (int layer = 0; layer < chunk.layerCount; ++layer)
+            if (chunk.layerTextures[layer].loading() || chunk.layerNormalMaps[layer].loading()) return false;
     }
-    // Refused or failed: the cache has said so.
-    if (TextureRef uploaded = cacheStoredTexture(*vkCtx, key.path, blp)) return uploaded;
-    return whiteTexture;
+    return true;
 }
 
 EncodedNormalMap TerrainRenderer::deriveNormalMap(const pipeline::BLPImage& blp, NormalMapFormat format) {
@@ -687,48 +683,26 @@ TextureKey TerrainRenderer::normalMapKey(const std::string& path) {
 }
 
 NormalMapFormat TerrainRenderer::normalMapFormat() const {
-    return vkCtx ? normalMapFormatFor(*vkCtx) : NormalMapFormat::Rgba8;
+    return normalMapFormat_;
 }
 
-void TerrainRenderer::uploadPreloadedNormalMap(const std::string& path, const EncodedNormalMap& map) {
-    // Held by nothing until a chunk binds it, as the textures above are.
+TextureRef TerrainRenderer::requestNormalMap(TextureLoads& loads, const std::string& path,
+                                             NormalMapFormat format, TextureRef fallback) {
     const TextureKey key = normalMapKey(path);
-    if (!map.valid() || vkCtx->textures().find(key)) return;
-    (void)cacheNormalMap(*vkCtx, key, map);
+    return loads.reference(key, std::move(fallback), [&loads, key, format]() -> TextureLoads::Make {
+        return [ctx = &loads.context(), assets = &loads.assets(), key, format]() -> std::vector<PreparedTexture> {
+            const auto map = deriveNormalMap(assets->loadTexture(key.path, true), format);
+            if (!map.valid()) {
+                LOG_WARNING("Terrain relief '", key.path, "' could not be derived; ground is lit flat");
+                return {};
+            }
+            return {prepareNormalMap(*ctx, key, map)};
+        };
+    });
 }
 
 TextureRef TerrainRenderer::loadNormalMap(const std::string& path) {
-    const TextureKey key = normalMapKey(path);
-    if (TextureRef cached = vkCtx->textures().find(key)) return cached;
-    if (loggedNormalMapFails_.count(key.path) != 0) return {};
-
-    // The loading worker derives it ahead of the tile; it is missing here
-    // only when the cache let it go before the chunk was bound.
-    const EncodedNormalMap map =
-        deriveNormalMap(assetManager->loadTexture(key.path, true), normalMapFormat());
-    if (!map.valid()) {
-        loggedNormalMapFails_.insert(key.path);
-        LOG_WARNING("Terrain: no relief could be derived from '", path,
-                    "' - the ground there is lit flat");
-        return {};
-    }
-    // Refused or failed: the cache has said so, and the ground is lit flat.
-    return cacheNormalMap(*vkCtx, key, map);
-}
-
-void TerrainRenderer::uploadPreloadedTextures(
-    const std::unordered_map<std::string, pipeline::BLPImage>& textures) {
-    // Into the shared cache ahead of the chunks that will name them, in one
-    // submission. Held by nothing until those chunks bind them, so a full
-    // cache may evict one again before then; loadTexture then reads it anew.
-    TextureCache& cache = vkCtx->textures();
-    vkCtx->beginUploadBatch();
-    for (const auto& [path, blp] : textures) {
-        if (!blp.isValid()) continue;
-        if (cache.find({normalizeTexturePath(path), TextureForm::Stored, 0})) continue;
-        (void)cacheStoredTexture(*vkCtx, path, blp);
-    }
-    vkCtx->endUploadBatch();
+    return requestNormalMap(vkCtx->textureLoads(*assetManager), path, normalMapFormat(), flatNormalTexture);
 }
 
 bool TerrainRenderer::writeChunkRow(TerrainChunkGPU& chunk) {
@@ -741,7 +715,7 @@ bool TerrainRenderer::writeChunkRow(TerrainChunkGPU& chunk) {
     // A chunk texture failing is ordinary - it is what the cache does under
     // memory pressure - and the 1x1 fallbacks are what that case is for.
     const auto sampleable = [](const TextureRef& t) {
-        return t && t->isValid() && t.tableHandle() != kNoTextureHandle;
+        return t.get() && t->isValid() && t.tableHandle() != kNoTextureHandle;
     };
     const auto pick = [&](const TextureRef& wanted, const TextureRef& fallback) {
         return sampleable(wanted) ? wanted.tableHandle() : fallback.tableHandle();
@@ -829,6 +803,17 @@ void TerrainRenderer::bindDraw(VkCommandBuffer cmd, const GeometryDraw& draw) {
 
 TerrainRenderer::DrawList TerrainRenderer::extract(const Camera& camera, const std::vector<LocalLight>& lights,
                                                    const WaterReflectionView* mirror) {
+    std::erase_if(pendingTextureChunks_, [&](const std::pair<int, int>& place) {
+        const uint32_t index = chunkIndex_.find(place.first, place.second);
+        if (index == TerrainChunkIndex::kNone) return true;
+        auto& chunk = chunks[index];
+        if (chunk.baseTexture.loading() || chunk.baseNormalMap.loading()) return false;
+        for (int layer = 0; layer < chunk.layerCount; ++layer)
+            if (chunk.layerTextures[layer].loading() || chunk.layerNormalMaps[layer].loading()) return false;
+        if (writeChunkRow(chunk)) queueRows(index);
+        queueBake(chunk);
+        return true;
+    });
     // Its steps timed apart under the frame's own terrain stage: the walk
     // over every resident chunk against what each visible one costs.
     CpuStageLaps laps(vkCtx ? &vkCtx->gameCpuStages() : nullptr, "extract/terrain");
@@ -1265,7 +1250,11 @@ void TerrainRenderer::addChunk(TerrainChunkGPU&& chunk) {
     ShadowTile& tile = shadowTiles_[slot->second];
     tile.chunks.push_back(index);
     tile.depth.invalidate();
-    queueBake(added);
+    bool texturesLoading = added.baseTexture.loading() || added.baseNormalMap.loading();
+    for (int layer = 0; layer < added.layerCount; ++layer)
+        texturesLoading = texturesLoading || added.layerTextures[layer].loading() || added.layerNormalMaps[layer].loading();
+    if (texturesLoading) pendingTextureChunks_.emplace_back(gx, gy);
+    else queueBake(added);
     // Its row for the cull names its neighbours, and theirs now name it.
     queueRows(index);
     for (size_t edge = 0; edge < TerrainChunkIndex::kEdges; ++edge) {
@@ -1392,6 +1381,10 @@ void TerrainRenderer::recordDepth(VkCommandBuffer cmd, const glm::mat4& lightSpa
 }
 
 void TerrainRenderer::removeTile(int tileX, int tileY) {
+    std::erase_if(pendingTextureChunks_, [tileX, tileY](const auto& place) {
+        return place.first >= tileX * 16 && place.first < (tileX + 1) * 16 &&
+               place.second >= tileY * 16 && place.second < (tileY + 1) * 16;
+    });
     // Only the tile's own chunks are touched: each is filled by the last chunk
     // of the list, and that one's place and its tile's entry are moved with
     // it. Erasing each of the 256 where it was found moved every chunk after
@@ -1508,6 +1501,7 @@ void TerrainRenderer::clear() {
         destroyChunkGPU(chunk);
     }
     chunks.clear();
+    pendingTextureChunks_.clear();
     chunkIndex_.clear();
     shadowTiles_.clear();
     tileAt_.clear();

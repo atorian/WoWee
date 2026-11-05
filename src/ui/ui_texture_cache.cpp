@@ -1,15 +1,13 @@
 #include "ui/ui_texture_cache.hpp"
 #include "core/logger.hpp"
 #include "core/thread_pool.hpp"
+#include "pipeline/asset_manager.hpp"
+#include "rendering/vk_texture.hpp"
 #include <chrono>
 
 namespace wowee::ui {
 std::string uiTexturePath(const std::string& path) {
-    if (path.empty()) return {};
-    auto normalized = rendering::normalizeTexturePath(path);
-    if (normalized.ends_with(".tga")) normalized.resize(normalized.size() - 4);
-    if (!normalized.ends_with(".blp")) normalized += ".blp";
-    return normalized;
+    return pipeline::AssetManager::interfaceTexturePath(path);
 }
 std::string UiTextureCache::key(const std::string& path, bool additive) {
     return uiTexturePath(path) + (additive ? "|add" : "");
@@ -54,12 +52,18 @@ void UiTextureCache::pump() {
         if (e.state == State::Loading && e.future.wait_for(0s) == std::future_status::ready) {
             try {
                 e.prepared = e.future.get();
-                if (!e.prepared.uploaded && (e.prepared.width <= 0 || e.prepared.height <= 0))
+                if (!e.prepared.image && !e.prepared.uploaded && (e.prepared.width <= 0 || e.prepared.height <= 0))
                     fail(e, e.prepared.failure.empty() ? "read, decode or GPU allocation failed" : e.prepared.failure);
                 else e.state = State::Uploading;
             } catch (const std::exception& error) { fail(e, error.what()); }
         }
+        if (e.state == State::Uploading && e.prepared.image.loading()) { ++it; continue; }
+        if (e.state == State::Uploading && e.prepared.image.failed()) fail(e, "read, decode or GPU upload failed");
         if (e.state == State::Uploading) {
+            if (e.prepared.image.get() && e.prepared.width <= 0) {
+                e.prepared.width = static_cast<int>(e.prepared.image->getWidth());
+                e.prepared.height = static_cast<int>(e.prepared.image->getHeight());
+            }
             const int done = e.prepared.uploaded ? e.prepared.uploaded->load() : 1;
             if (done < 0) fail(e, "GPU upload failed");
             else if (done > 0 && (e.prepared.width <= 0 || e.prepared.height <= 0)) {

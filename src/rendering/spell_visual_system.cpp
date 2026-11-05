@@ -7,6 +7,7 @@
 #include "pipeline/dbc_loader.hpp"
 #include "pipeline/required_table.hpp"
 #include "pipeline/m2_loader.hpp"
+#include "pipeline/m2_model_cache.hpp"
 #include "core/logger.hpp"
 #include "core/thread_pool.hpp"
 #include <algorithm>
@@ -267,51 +268,56 @@ void SpellVisualSystem::playPhysicalProjectile(const std::string& modelPath,
                                                 const glm::vec3& end,
                                                 float duration,
                                                 bool spin) {
-    if (!renderer_ || modelPath.empty()) return;
-    auto* characterRenderer = renderer_->getCharacterRenderer();
-    if (!characterRenderer) return;
-    if (!cachedAssetManager_)
-        cachedAssetManager_ = renderer_ ? renderer_->getAssetManager() : nullptr;
-    if (!cachedAssetManager_) return;
+    DeferredProjectile projectile{.modelPath = modelPath, .texturePath = texturePath,
+        .start = start, .end = end, .duration = std::max(duration, 0.05f), .spin = spin};
+    if (!startProjectile(projectile)) deferredProjectiles_.push_back(std::move(projectile));
+}
 
-    const std::string cacheKey = modelPath + "|" + texturePath;
-    uint32_t modelId = 0;
-    auto cached = projectileModelIds_.find(cacheKey);
-    if (cached != projectileModelIds_.end()) {
-        modelId = cached->second;
-    } else {
-        if (nextProjectileModelId_ >= 999000) return;
-        modelId = nextProjectileModelId_++;
-        projectileModelIds_[cacheKey] = modelId;
+bool SpellVisualSystem::startProjectile(DeferredProjectile& projectile) {
+    if (!renderer_ || projectile.modelPath.empty()) return true;
+    auto* characters = renderer_->getCharacterRenderer();
+    if (!characters) return true;
+    const std::string key = projectile.modelPath + "|" + projectile.texturePath;
+    if (failedProjectiles_.contains(key)) return true;
+    if (!projectile.texturePath.empty() && !projectile.texture)
+        projectile.texture = characters->loadTexture(projectile.texturePath);
+    const auto parsed = renderer_->unitModels().request(projectile.modelPath);
+    if (parsed.state == pipeline::M2ModelCache::State::Loading || projectile.texture.loading()) return false;
+    if (parsed.state == pipeline::M2ModelCache::State::Failed) {
+        LOG_WARNING("Physical projectile '", projectile.modelPath, "' could not be loaded; shot has no projectile");
+        failedProjectiles_.insert(key);
+        return true;
     }
-
-    if (!characterRenderer->getModelData(modelId)) {
-        auto bytes = cachedAssetManager_->readFile(modelPath);
-        if (bytes.empty()) return;
-        pipeline::M2Model model = pipeline::M2Loader::load(bytes);
-        if (model.name.empty()) model.name = modelPath;
-        if (model.version >= 264) {
-            const std::string skinPath = pipeline::skinPathForM2(modelPath);
-            auto skin = cachedAssetManager_->readFile(skinPath);
-            if (!skin.empty()) pipeline::M2Loader::loadSkin(skin, model);
+    auto [model, inserted] = projectileModelIds_.try_emplace(key, 0);
+    if (inserted) {
+        if (nextProjectileModelId_ >= 999000) {
+            LOG_WARNING("Physical projectile model IDs exhausted for '", projectile.modelPath,
+                        "'; shot has no projectile");
+            failedProjectiles_.insert(key);
+            return true;
         }
-        if (model.vertices.empty() || !characterRenderer->loadModel(std::move(model), modelId)) return;
-        if (!texturePath.empty()) {
-            if (TextureRef texture = characterRenderer->loadTexture(texturePath))
-                characterRenderer->setModelTexture(modelId, 0, texture);
-        }
+        model->second = nextProjectileModelId_++;
     }
-
-    const glm::vec3 delta = end - start;
+    const uint32_t modelId = model->second;
+    if (!characters->getModelData(modelId)) {
+        if (!characters->loadModel(parsed.model, modelId)) {
+            LOG_WARNING("Physical projectile '", projectile.modelPath,
+                        "' GPU preparation failed; shot has no projectile");
+            failedProjectiles_.insert(key);
+            return true;
+        }
+        if (projectile.texture) characters->setModelTexture(modelId, 0, projectile.texture);
+    }
+    const glm::vec3 delta = projectile.end - projectile.start;
     const float horizontal = std::sqrt(delta.x * delta.x + delta.y * delta.y);
-    glm::vec3 rotation(0.0f);
-    rotation.z = std::atan2(delta.y, delta.x);
-    rotation.y = -std::atan2(delta.z, std::max(horizontal, 0.001f));
-
-    const uint32_t instanceId = renderer_->scene().characters().createInstance(modelId, start, rotation, 1.0f);
-    if (instanceId == 0) return;
-    physicalProjectiles_.push_back({.instanceId = instanceId, .start = start, .end = end, .rotation = rotation, .elapsed = 0.0f,
-                                    .duration = std::max(duration, 0.05f), .spin = spin});
+    const glm::vec3 rotation(0.0f, -std::atan2(delta.z, std::max(horizontal, 0.001f)),
+                             std::atan2(delta.y, delta.x));
+    const auto position = glm::mix(projectile.start, projectile.end, projectile.age / projectile.duration);
+    const uint32_t instanceId = renderer_->scene().characters().createInstance(modelId, position, rotation, 1.0f);
+    if (instanceId != 0) physicalProjectiles_.push_back({.instanceId = instanceId,
+        .start = projectile.start, .end = projectile.end, .rotation = rotation, .elapsed = projectile.age,
+        .duration = projectile.duration, .spin = projectile.spin});
+    return true;
 }
 
 void SpellVisualSystem::update(float deltaTime) {
@@ -330,7 +336,7 @@ void SpellVisualSystem::update(float deltaTime) {
             }
         }
     }
-    if (activeEffects_.empty() && physicalProjectiles_.empty()) return;
+    if (activeEffects_.empty() && physicalProjectiles_.empty() && deferredProjectiles_.empty()) return;
 
     // Each effect rides its attachment every frame - bone, facing and scale -
     // as the client parents it (0x82e550): a buff landing on a running player
@@ -380,6 +386,17 @@ void SpellVisualSystem::update(float deltaTime) {
             }
         }
     }
+    std::erase_if(deferredProjectiles_, [&](DeferredProjectile& projectile) {
+        projectile.age += deltaTime;
+        if (projectile.age >= projectile.duration) {
+            if (expiredProjectiles_.insert(projectile.modelPath).second)
+                LOG_WARNING("Physical projectile '", projectile.modelPath,
+                            "' was not ready before impact; shot finishes without a projectile");
+            return true;
+        }
+        return startProjectile(projectile);
+    });
+
 }
 
 void SpellVisualSystem::cancelAllPrecastVisuals() {
@@ -404,6 +421,9 @@ void SpellVisualSystem::reset() {
     }
     activeEffects_.clear();
     physicalProjectiles_.clear();
+    deferredProjectiles_.clear();
+    failedProjectiles_.clear();
+    expiredProjectiles_.clear();
     deferredPlays_.clear();
     resetStateVisuals();
     // Reset the negative cache so models that failed during asset loading can retry.

@@ -126,8 +126,7 @@ private:
     /// The bytes of a texture, with the extension and folder fallbacks applied.
     /// Shared by the upload and the size query so the two cannot look in
     /// different places.
-    std::vector<uint8_t> readTextureFile(const std::string& path,
-                                         std::string& resolvedOut);
+
 
     /// Labels whose glyphs are wider than the rect they were given.
     void reportOverflowingText(WidgetTree& tree);

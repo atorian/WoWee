@@ -16,6 +16,40 @@ void until(const std::function<bool()>& done, UiTextureCache& cache) {
     REQUIRE(done());
 }
 auto descriptor(uintptr_t value) { return reinterpret_cast<VkDescriptorSet>(value); }
+class NoImagesDevice : public wowee::rendering::TextureDevice {
+public:
+    void retireAfterFrames(std::function<void()> release) override { release(); }
+    std::optional<uint64_t> textureHeapBudget() const override { return std::nullopt; }
+    wowee::rendering::TextureHandle addToTable(const wowee::rendering::VkTexture&) override {
+        return wowee::rendering::kNoTextureHandle;
+    }
+    void removeFromTable(wowee::rendering::TextureHandle) override {}
+};
+}
+
+// Without failure publication a deferred image keeps loading forever,
+// occupying one of the interface's eight active requests.
+TEST_CASE("a failed deferred texture leaves the interface queue instead of waiting forever", "[ui][resources]") {
+    NoImagesDevice device;
+    wowee::rendering::TextureCache images(device, {});
+    auto request = images.defer({"missing.blp", wowee::rendering::TextureForm::Interface, 0}, {});
+    std::atomic<int> reads{0};
+    int published = 0;
+    UiTextureCache cache([&](const std::string&, bool) {
+        ++reads;
+        return PreparedUiTexture{.image = request};
+    }, [&](PreparedUiTexture&) { ++published; return descriptor(1); }, [](auto&) {});
+    cache.request("Interface/Missing");
+    until([&] { return cache.state("Interface/Missing") == UiTextureCache::State::Uploading; }, cache);
+    CHECK(cache.pending() == 1);
+    CHECK(cache.resident("Interface/Missing") == nullptr);
+    images.complete(request, {});
+    until([&] { return cache.pending() == 0; }, cache);
+    for (int i = 0; i < 20; ++i) { cache.request("Interface/Missing"); cache.pump(); }
+    CHECK(reads == 1);
+    CHECK(published == 0);
+    REQUIRE(cache.resident("Interface/Missing"));
+    CHECK(*cache.resident("Interface/Missing") == VK_NULL_HANDLE);
 }
 TEST_CASE("interface requests do not wait for disk and publish only fenced images", "[ui][resources]") {
     std::promise<void> release;

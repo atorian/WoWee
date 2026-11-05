@@ -239,8 +239,7 @@ public:
                                 int& chunkIndex, int maxChunksPerCall = 16);
 
     void removeTile(int tileX, int tileY);
-
-    void uploadPreloadedTextures(const std::unordered_map<std::string, pipeline::BLPImage>& textures);
+    [[nodiscard]] bool texturesSettled() const;
 
     /// The relief of a tileset texture, derived from its colours on a loading
     /// worker and encoded with its mips. Pure: no Vulkan, safe off the main
@@ -255,9 +254,9 @@ public:
     [[nodiscard]] static EncodedNormalMap deriveNormalMap(const pipeline::BLPImage& blp, NormalMapFormat format);
     /// The cache key a tileset texture's relief is kept under.
     [[nodiscard]] static TextureKey normalMapKey(const std::string& path);
-    /// Puts a normal map made by deriveNormalMap in the shared cache, where
-    /// the chunks that lay its texture find it.
-    void uploadPreloadedNormalMap(const std::string& path, const EncodedNormalMap& map);
+    /// Ask the shared texture producer; safe to prefetch on a tile worker.
+    static TextureRef requestNormalMap(class TextureLoads& loads, const std::string& path,
+                                       NormalMapFormat format, TextureRef fallback = {});
     [[nodiscard]] NormalMapFormat normalMapFormat() const;
 
     /// The "Surface bumps" setting: the ground lit by its textures' relief, as
@@ -525,10 +524,13 @@ private:
     bool countFromGpu_ = false;
 
     // Loaded terrain chunks
+    NormalMapFormat normalMapFormat_ = NormalMapFormat::Rgba8;
     std::vector<TerrainChunkGPU> chunks;
+    /// Editor/direct loads may bind before textures arrive. Game streaming
+    /// waits on the tile's held requests before publishing its chunks.
+    std::vector<std::pair<int, int>> pendingTextureChunks_;
 
     /// Tileset paths that would not load, said once each.
-    std::unordered_set<std::string> loggedTextureLoadFails_;
 
     // Fallback textures, held in the shared cache like any other.
     TextureRef whiteTexture;
@@ -543,7 +545,6 @@ private:
     VkSampler tileMapSampler_ = VK_NULL_HANDLE;
     bool tileMapsFailureSaid_ = false;
     /// Tileset paths whose relief could not be derived, said once each.
-    std::unordered_set<std::string> loggedNormalMapFails_;
 
     // Rendering state
     bool wireframe = false;

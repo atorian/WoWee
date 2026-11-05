@@ -315,6 +315,32 @@ bool AssetManager::setBaseFallbackPath(const std::string& basePath,
     return true;
 }
 
+std::string AssetManager::interfaceTexturePath(const std::string& path) {
+    if (path.empty()) return {};
+    std::string key(path.substr(0, path.find('\0')));
+    for (char& c : key) c = c == '/' ? '\\' : static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (key.rfind(".\\", 0) == 0) key.erase(0, 2);
+    const size_t first = key.find_first_not_of('\\');
+    key.erase(0, first == std::string::npos ? key.size() : first);
+    if (key.ends_with(".tga")) key.resize(key.size() - 4);
+    if (!key.ends_with(".blp")) key += ".blp";
+    return key;
+}
+
+BLPImage AssetManager::loadInterfaceTexture(const std::string& path, bool keepCompressed) {
+    const std::string key = interfaceTexturePath(path);
+    auto image = loadTexture(key, keepCompressed);
+    if (image.isValid()) return image;
+    // Older expansions keep the gossip icons in Interface/Gossip.
+    const auto at = key.find("gossipframe\\");
+    if (at != std::string::npos) {
+        std::string alternate = key;
+        alternate.replace(at, std::string_view("gossipframe\\").size(), "gossip\\");
+        image = loadTexture(alternate, keepCompressed);
+    }
+    return image;
+}
+
 BLPImage AssetManager::loadTexture(const std::string& path, bool keepCompressed) {
     ZoneScopedN("AssetManager::loadTexture");
     // Callers ask for the blocks to save the decompression and the memory. On a

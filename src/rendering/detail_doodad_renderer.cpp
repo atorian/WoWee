@@ -163,14 +163,14 @@ void DetailDoodadRenderer::shutdown() {
 }
 
 void DetailDoodadRenderer::addModel(uint32_t doodadId, pipeline::DetailDoodadModel model,
-                                    std::vector<std::pair<std::string, pipeline::BLPImage>> images) {
+                                    std::vector<std::pair<std::string, TextureRef>> images) {
     if (!vkCtx_ || models_.count(doodadId)) return;
     for (auto& [path, image] : images) {
         if (textures_.count(path)) continue;
         Texture texture;
-        texture.image = cacheStoredTexture(*vkCtx_, path, image);
-        if (!texture.image) {
-            // cacheStoredTexture has said why.
+        texture.image = std::move(image);
+        if (!texture.image.get() || texture.image.loading() || texture.image.failed()) {
+            // The shared producer has said why.
             LOG_WARNING("Ground clutter: texture ", path, " of doodad ", doodadId,
                         " did not upload; the clutter that uses it is not drawn");
             textures_.emplace(path, std::move(texture));

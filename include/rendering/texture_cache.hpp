@@ -18,6 +18,7 @@ namespace rendering {
 
 class VkTexture;
 class TextureCache;
+class TextureLoads;
 
 /// A texture's place in the device's texture table (TextureTable): the number
 /// a shader samples it by.
@@ -48,6 +49,14 @@ enum class TextureForm : uint8_t {
     /// UI art, with its original alpha or the additive conversion.
     Interface,
     Count_,
+};
+
+enum class InterfaceAlpha : uint8_t {
+    Original,
+    Additive,
+    /// Highlight art with opaque alpha uses luminance as coverage. Authored
+    /// transparency is preserved when the file already has it.
+    Highlight,
 };
 
 inline constexpr size_t kTextureFormCount = static_cast<size_t>(TextureForm::Count_);
@@ -91,6 +100,7 @@ struct TextureInfo {
 
 namespace detail {
 struct TextureEntry;
+struct TextureFuture;
 }
 
 /// A counted reference to one texture in the cache. While any reference to an
@@ -113,7 +123,25 @@ public:
 
     [[nodiscard]] VkTexture* get() const;
     VkTexture* operator->() const { return get(); }
-    explicit operator bool() const { return entry_ != nullptr; }
+    explicit operator bool() const { return entry_ != nullptr || future_ != nullptr; }
+    /// A requested texture keeps its fallback until its upload has fenced.
+    /// Copies of the reference resolve together, including those already held
+    /// by a model or an appearance. Failed requests keep the fallback.
+    [[nodiscard]] bool loading() const;
+    [[nodiscard]] bool failed() const;
+    /// Freeze the currently sampled image for a frame snapshot. A later
+    /// publication cannot change its image, metadata or texture-table handle.
+    [[nodiscard]] TextureRef snapshot() const;
+    /// Changes only when this binding's sampled image or normal map changes.
+    /// Shared by references to the same resident image, including references
+    /// obtained before its upload completed. Safe to poll on the producer.
+    [[nodiscard]] uint64_t revision() const;
+    struct Hash {
+        size_t operator()(const TextureRef& ref) const {
+            return std::hash<const void*>{}(ref.entry_) ^
+                   (std::hash<const void*>{}(ref.future_.get()) << 1);
+        }
+    };
     [[nodiscard]] const TextureInfo& info() const;
     /// What it is cached under; an empty path for one only its owner holds.
     [[nodiscard]] const TextureKey& key() const;
@@ -136,12 +164,20 @@ public:
 
     void reset();
 
-    friend bool operator==(const TextureRef& a, const TextureRef& b) { return a.entry_ == b.entry_; }
+    friend bool operator==(const TextureRef& a, const TextureRef& b) {
+        return a.entry_ == b.entry_ && a.future_ == b.future_;
+    }
 
 private:
     friend class TextureCache;
+    friend class TextureLoads;
+    static TextureRef pending(const TextureKey& key, TextureRef fallback);
+    void complete(TextureRef resident);
+    TextureRef withFallback(TextureRef fallback) const;
+    [[nodiscard]] detail::TextureEntry* resolved() const;
     explicit TextureRef(detail::TextureEntry* entry);  // takes a reference already counted
     detail::TextureEntry* entry_ = nullptr;
+    std::shared_ptr<detail::TextureFuture> future_;
 };
 
 /// What the cache needs of the device: VkContext in the client, a fake in a
@@ -216,6 +252,14 @@ public:
 
     /// The entry for `key`, if resident. A hit makes it the most recently used.
     [[nodiscard]] TextureRef find(const TextureKey& key);
+
+    /// A reference a consumer may bind before the image exists. Publication
+    /// resolves every copy without mutating any resident image or table slot.
+    [[nodiscard]] TextureRef defer(const TextureKey& key, TextureRef fallback);
+    void complete(TextureRef request, TextureRef resident);
+    /// Dataset changes stop its loaders first. Held images remain alive for
+    /// old frames, but a new lookup cannot find the previous dataset's entry.
+    void invalidateNamed();
 
     /// Whether `bytes` more would fit, evicting what nothing references to
     /// make room. Lets a caller try a smaller upload before giving up.
