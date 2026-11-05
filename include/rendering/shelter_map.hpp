@@ -59,8 +59,11 @@ public:
     /// house round the camera was there has no roof over it.
     [[nodiscard]] bool wantsDrawing(const glm::vec3& camera, double now, uint64_t world) const;
     /// Draw the map round `camera` with the world as `world` says it is:
-    /// begin, draw the casters with matrix(), end. Outside any render pass.
-    void begin(VkCommandBuffer cmd, const glm::vec3& camera, uint64_t world);
+    /// place it, begin, draw the casters with matrix(), end. Placed, its
+    /// drawing() says where it is before its pass begins, for the casters
+    /// culled ahead of it. begin and end outside any render pass.
+    void place(const glm::vec3& camera, uint64_t world);
+    void begin(VkCommandBuffer cmd);
     [[nodiscard]] const OverheadFrame& drawing() const { return drawing_; }
     [[nodiscard]] glm::mat4 matrix() const { return drawing_.viewProjection(); }
     void end(VkCommandBuffer cmd, double now);

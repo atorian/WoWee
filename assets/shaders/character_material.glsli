@@ -1,8 +1,16 @@
-// The per-batch material of the character pass, set 1 binding 1. Both stages
-// read it: the vertex shader picks and animates the UV, the fragment shader
-// does the rest. Must match CharMaterialUBO in character_renderer.cpp.
-layout(set = 1, binding = 1) uniform CharMaterial {
-    float opacity;
+// What a character draw reads, by the draw's place (CharacterRenderer,
+// character_draws.hpp): its record, written by char_draws.comp - the
+// material row, the instance, its opacity and texture animation this frame -
+// the material row itself, and the instance's record. Both stages read it:
+// the vertex shader picks and animates the UV, the fragment shader does the
+// rest. loadCharacterDraw() fills the names below from them.
+
+// A row of the material table (CharMaterialGPU): what used to be the static
+// half of the batch's uniform block, its textures by TextureTable handle.
+struct CharMaterial {
+    uint texture;
+    uint normalHeight;
+    uint secondTexture;
     int alphaTest;
     int unlit;
     float specularIntensity;
@@ -23,28 +31,108 @@ layout(set = 1, binding = 1) uniform CharMaterial {
     // 1 when the M2 material carries flag 0x04. Without it the client culls
     // the back of the surface, and so does the fragment shader.
     int twoSided;
-    int materialPadUv;
-    // The texture animation, as two rows of a 2x3 matrix (w is padding).
-    // See m2_uv_transform.hpp.
-    vec4 uvRow0;
-    vec4 uvRow1;
-    // What an aura multiplies the lit colour by: Shadowform's purple, a
-    // ghost's blue (SpellVisualKit character procs). White without one.
-    vec4 stateTint;
-    // The batch's second stage, at set 1 binding 3, and how the two stages
-    // combine (M2Combiner in m2_combiner.hpp; combineStages in
-    // m2_combiner.glsli). Its UV: 0 or 1 for a vertex set animated by uv2Row*,
-    // -1 for the sphere map, 2 for UV0 as it is.
+    // The second stage and how the two combine (M2Combiner, m2_combiner.glsli).
+    // Its UV: 0 or 1 for a vertex set, -1 for the sphere map, 2 for UV0 as it is.
     int hasSecondTexture;
     int texCoordSet2;
     int combiner;
-    int materialPad0;
-    // The batch's authored M2 colour, multiplied into the texture (w is
-    // padding). A glow card is painted white and coloured here: the riding
-    // phoenix's wing glows carry red, magenta and violet, and drew white
-    // without it.
+    // The batch's authored M2 colour, multiplied into the texture (w unused).
     vec4 batchColor;
-    // The second stage's own texture animation.
-    vec4 uv2Row0;
-    vec4 uv2Row1;
 };
+
+// A draw this frame (CharDrawGPU).
+struct CharDraw {
+    uvec4 refs;     // x its material row, y its instance's slot
+    vec4 uvRow0;    // the first stage's texture animation, two rows of a 2x3 matrix
+    vec4 uvRow1;
+    vec4 uv2Row0;   // the second stage's
+    vec4 uv2Row1;
+    vec4 opacity;   // x the instance's opacity times the batch's animated alpha
+};
+
+// An instance this frame (CharInstanceGPU), written by the CPU.
+struct CharInstance {
+    uvec4 pose;             // x its posed request, y its first bone, z its bone count, w flags
+    vec4 interiorAmbient;   // interior_light.glsli
+    vec4 interiorDirect;
+    vec4 stateTint;         // rgb what an aura multiplies the lit colour by; a its opacity
+    vec4 sphere;            // xyz where it stands, w its cull radius
+    vec4 clock;             // x animation ms, y global ms, z its sequence (int bits)
+    uvec4 anim;             // x its animation blob's page, y its first word; ~0 for none
+    uvec4 pad;
+};
+
+layout(std430, set = 3, binding = 0) readonly buffer CharDraws { CharDraw charDraws[]; };
+layout(std430, set = 3, binding = 1) readonly buffer CharMaterials { CharMaterial charMaterials[]; };
+layout(std430, set = 3, binding = 2) readonly buffer CharInstances { CharInstance charInstances[]; };
+// By instance slot: the point lights that reach it (local_lights.glsli).
+layout(std430, set = 3, binding = 3) readonly buffer CharInstanceLights { uvec4 charInstanceLights[]; };
+
+float opacity;
+int alphaTest;
+int unlit;
+float specularIntensity;
+int enableNormalMap;
+int enablePOM;
+float pomScale;
+int pomMaxSamples;
+float heightMapVariance;
+float normalMapStrength;
+int hairMaterial;
+int ignoreTextureAlpha;
+float modulateNeutral;
+int texCoordSet;
+int twoSided;
+vec4 uvRow0;
+vec4 uvRow1;
+vec4 stateTint;
+int hasSecondTexture;
+int texCoordSet2;
+int combiner;
+vec4 batchColor;
+vec4 uv2Row0;
+vec4 uv2Row1;
+uint charTexture;
+uint charNormalHeight;
+uint charSecondTexture;
+uvec4 charPose;
+vec4 charInteriorAmbient;
+vec4 charInteriorDirect;
+uvec4 charLocalLights;
+
+void loadCharacterDraw(uint index) {
+    const CharDraw draw = charDraws[index];
+    const CharMaterial m = charMaterials[draw.refs.x];
+    const CharInstance instance = charInstances[draw.refs.y];
+    opacity = draw.opacity.x;
+    alphaTest = m.alphaTest;
+    unlit = m.unlit;
+    specularIntensity = m.specularIntensity;
+    enableNormalMap = m.enableNormalMap;
+    enablePOM = m.enablePOM;
+    pomScale = m.pomScale;
+    pomMaxSamples = m.pomMaxSamples;
+    heightMapVariance = m.heightMapVariance;
+    normalMapStrength = m.normalMapStrength;
+    hairMaterial = m.hairMaterial;
+    ignoreTextureAlpha = m.ignoreTextureAlpha;
+    modulateNeutral = m.modulateNeutral;
+    texCoordSet = m.texCoordSet;
+    twoSided = m.twoSided;
+    uvRow0 = draw.uvRow0;
+    uvRow1 = draw.uvRow1;
+    stateTint = vec4(instance.stateTint.rgb, 1.0);
+    hasSecondTexture = m.hasSecondTexture;
+    texCoordSet2 = m.texCoordSet2;
+    combiner = m.combiner;
+    batchColor = m.batchColor;
+    uv2Row0 = draw.uv2Row0;
+    uv2Row1 = draw.uv2Row1;
+    charTexture = m.texture;
+    charNormalHeight = m.normalHeight;
+    charSecondTexture = m.secondTexture;
+    charPose = instance.pose;
+    charInteriorAmbient = instance.interiorAmbient;
+    charInteriorDirect = instance.interiorDirect;
+    charLocalLights = charInstanceLights[draw.refs.y];
+}

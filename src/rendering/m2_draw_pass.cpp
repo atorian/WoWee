@@ -162,27 +162,6 @@ bool M2DrawPass::ensure(Slot& slot, const M2DrawFrame& frame) {
            grow(slot.skyOpacity, slot.opacityRoom, frame.skyOpacity.size(), sizeof(float), "sky opacity");
 }
 
-void M2DrawPass::writePageSet(Slot& slot, const std::vector<::VkBuffer>& framePages, uint32_t pagesVersion) {
-    std::vector<VkDescriptorBufferInfo> pages;
-    std::vector<VkWriteDescriptorSet> writes;
-    pages.reserve(framePages.size());
-    for (size_t p = 0; p < framePages.size() && p < SkeletonPool::kMaxPages; ++p) {
-        if (!framePages[p]) continue;
-        pages.push_back({.buffer = framePages[p], .offset = 0, .range = VK_WHOLE_SIZE});
-        VkWriteDescriptorSet w{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w.dstSet = slot.pageSet;
-        w.dstBinding = 0;
-        w.dstArrayElement = static_cast<uint32_t>(p);
-        w.descriptorCount = 1;
-        w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        writes.push_back(w);
-    }
-    for (size_t i = 0; i < writes.size(); ++i) writes[i].pBufferInfo = &pages[i];
-    if (!writes.empty())
-        vkUpdateDescriptorSets(context_->getDevice(), static_cast<uint32_t>(writes.size()), writes.data(), 0,
-                               nullptr);
-    slot.pagesVersion = pagesVersion;
-}
 
 void M2DrawPass::writeFrameSet(Slot& slot, const Targets& targets) {
     const ::VkBuffer buffers[kFrameBindings] = {slot.groups.buffer, slot.offsets.buffer, slot.clocks.buffer,
@@ -220,7 +199,10 @@ bool M2DrawPass::record(VkCommandBuffer cmd, uint32_t slotIndex, const M2DrawFra
     copy(slot.skyOpacity, frame.skyOpacity.data(), frame.skyOpacity.size() * sizeof(float));
 
     // The sets, after the slot's fence, when a buffer or the pages changed.
-    if (slot.pagesVersion != frame.pagesVersion) writePageSet(slot, frame.pages, frame.pagesVersion);
+    if (slot.pagesVersion != frame.pagesVersion) {
+        writePoolPageSet(context_->getDevice(), slot.pageSet, 0, frame.pages);
+        slot.pagesVersion = frame.pagesVersion;
+    }
     if (!slot.frameSetCurrent || slot.targets.instances != targets.instances ||
         slot.targets.commands != targets.commands || slot.targets.drawMaterials != targets.drawMaterials)
         writeFrameSet(slot, targets);

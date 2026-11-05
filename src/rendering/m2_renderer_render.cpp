@@ -1093,18 +1093,8 @@ void M2Renderer::extractCull(const Camera& camera, Frame& frame) {
 
     // The material rows ride the same way: from the first frame extracted
     // after they were written until one that carried them is on the GPU.
-    MaterialRows& rows = materialRows_;
-    std::erase_if(rows.pending, [&](uint32_t row) {
-        uint32_t& carried = rows.pendingSerial[row];
-        if (carried == kMaterialRowUncarried) carried = serial;
-        if (carried > applied) return false;
-        carried = 0;
-        return true;
-    });
-    frame.materialUpdateSlots.assign(rows.pending.begin(), rows.pending.end());
-    frame.materialUpdateRows.reserve(rows.pending.size());
-    for (const uint32_t row : rows.pending) frame.materialUpdateRows.push_back(rows.data[row]);
-    frame.materialRowCount = static_cast<uint32_t>(rows.data.size());
+    materialRows_.carry(serial, applied, frame.materialUpdateSlots, frame.materialUpdateRows);
+    frame.materialRowCount = materialRows_.count();
 }
 
 M2Renderer::CullRowGPU M2Renderer::cullRowOf(size_t index) const {

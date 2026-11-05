@@ -1357,7 +1357,7 @@ OffscreenComposite::Request CharacterPreview::extractComposite() {
     compositeRequested_ = false;
     if (!charRenderer_ || !camera_ || !modelLoaded_ || !renderTarget_ || !renderTarget_->isValid()) return {};
     const Camera camera = *camera_;
-    auto characters = charRenderer_->extract(camera, {});
+    auto characters = charRenderer_->extract(camera);
     // Update per-frame UBO with preview camera matrices and studio lighting
     GPUPerFrameData ubo{};
     ubo.view = camera.getViewMatrix();
@@ -1388,9 +1388,13 @@ OffscreenComposite::Request CharacterPreview::extractComposite() {
         std::memcpy(owner->previewUBOMapped_[fi], &ubo, sizeof(ubo));
         owner->charRenderer_->useFrame(characters);
         owner->charRenderer_->prepareRender(cmd, fi);
+        // No point lights in the portrait's studio.
+        owner->charRenderer_->prepareDraws(cmd, fi, VK_NULL_HANDLE, 0);
         owner->renderTarget_->beginPass(cmd, clear);
         owner->charRenderer_->render(cmd, owner->previewPerFrameSet_[fi], camera);
         owner->renderTarget_->endPass(cmd);
+        // Recorded into the frame being built, which is submitted with it.
+        owner->charRenderer_->frameSubmitted();
         owner->compositeRendered_.store(true, std::memory_order_release);
     };
 }

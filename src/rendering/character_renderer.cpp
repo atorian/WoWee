@@ -79,21 +79,20 @@ constexpr uint8_t kCharacterNormalMapStrengthKey = static_cast<uint8_t>(kCharact
 
 // The main pass's push constants: character.vert reads the model matrix and
 // character.frag the interior light.
-struct CharacterPushConstants {
-    /// x its skeleton request (models[]), y its first bone, z how many.
-    glm::uvec4 pose{0};
-    InteriorLightGPU interiorLight;
-    /// The point lights that reach the unit (local_lights.glsli).
-    LocalLightSet localLights = kNoLocalLights;
+/// What character.vert is pushed: a call's first place, whose records its
+/// draws read by gl_DrawID.
+struct CharDrawPush {
+    uint32_t drawBase = 0;
+    uint32_t pad[3] = {};
 };
-static_assert(sizeof(CharacterPushConstants) == 64, "matches Push in character.vert/frag");
 
-/// character_shadow.vert's Push: the map's matrix and the pose.
-struct CharacterShadowPush {
+/// What character_shadow.vert is pushed: the map's matrix and the call's
+/// first caster place.
+struct CharShadowPush {
     glm::mat4 lightSpace{1.0f};
-    glm::uvec4 pose{0};
+    glm::uvec4 call{0u};
 };
-static_assert(sizeof(CharacterShadowPush) == sizeof(ShadowPush), "the shadow pipeline's push range");
+static_assert(sizeof(CharShadowPush) <= 128, "the push block every device must take");
 
 // How far an instance moves before the WMO is asked again where it stands.
 constexpr float kInteriorLightRequeryDistance = 0.5f;
@@ -211,7 +210,6 @@ void applyMagentaKeyIfNeeded(pipeline::BLPImage& image, const std::string& path)
 } // namespace
 
 // Descriptor pool sizing
-static constexpr uint32_t MAX_MATERIAL_SETS = 4096;
 
 // Texture compositing sizes (NPC skin upscale)
 static constexpr int kBaseTexSize    = 256;  // NPC baked texture default
@@ -229,44 +227,6 @@ static bool sceneDiagEnabled() {
     return enabled;
 }
 
-// Evaluate a batch's M2 color-alpha track at the given animation sequence/time.
-// Returns 1.0 when the batch has no color slot or the track has no usable data.
-// Global-sequence-timed tracks are not culled (they run on a different clock and
-// typically drive pulsing glows, not visibility gating).
-static float evalBatchColorAlpha(const pipeline::M2Model& model,
-                                 const pipeline::M2Batch& batch,
-                                 int sequenceIndex, float animationTimeMs,
-                                 float globalTimeMs) {
-    if (batch.colorIndex == 0xFFFF ||
-        batch.colorIndex >= model.colorAlphaTracks.size()) {
-        return 1.0f;
-    }
-    return m2_track::sampleFloat(model.colorAlphaTracks[batch.colorIndex],
-                                 sequenceIndex, animationTimeMs, globalTimeMs,
-                                 model.globalSequenceDurations, 1.0f);
-}
-
-// Evaluate the material transparency track selected through the skin batch's
-// lookup table. Enchant cards depend on this track for their authored duty
-// cycle and strength; treating the first key as a constant makes every pulse
-// both brighter and several times more frequent than intended.
-static float evalBatchTextureWeight(const pipeline::M2Model& model,
-                                    const pipeline::M2Batch& batch,
-                                    int sequenceIndex, float animationTimeMs,
-                                    float globalTimeMs) {
-    if (batch.transparencyIndex == 0xFFFF ||
-        batch.transparencyIndex >= model.textureWeightLookup.size()) {
-        return 1.0f;
-    }
-    const uint16_t trackIndex = model.textureWeightLookup[batch.transparencyIndex];
-    if (trackIndex == 0xFFFF || trackIndex >= model.textureWeightTracks.size()) {
-        return 1.0f;
-    }
-    return m2_track::sampleFloat(model.textureWeightTracks[trackIndex],
-                                 sequenceIndex, animationTimeMs, globalTimeMs,
-                                 model.globalSequenceDurations, 1.0f);
-}
-
 // A batch's stages and combiner, from the model's flags and combos and the
 // batch's shader id, as the M2 pass takes them.
 static M2BatchShading characterBatchShading(const pipeline::M2Model& model,
@@ -278,46 +238,6 @@ static M2BatchShading characterBatchShading(const pipeline::M2Model& model,
                           batch.textureCount, blendMode, coordAt(batch.textureUnit),
                           coordAt(static_cast<size_t>(batch.textureUnit) + 1));
 }
-
-// CharMaterial UBO layout (matches character.frag.glsl set=1 binding=1)
-struct CharMaterialUBO {
-    float opacity;
-    int32_t alphaTest;
-    int32_t unlit;
-    float specularIntensity;
-    int32_t enableNormalMap;
-    int32_t enablePOM;
-    float pomScale;
-    int32_t pomMaxSamples;
-    float heightMapVariance;
-    float normalMapStrength;
-    int32_t hairMaterial;
-    int32_t ignoreTextureAlpha;
-    float modulateNeutral;
-    int32_t texCoordSet;
-    int32_t twoSided;
-    int32_t padding0 = 0;  ///< std140 starts uvRow0 on 16 bytes
-
-    M2UVTransform uvTransform;
-    /// What an aura multiplies the lit colour by (w is padding).
-    glm::vec4 stateTint{1.0f};
-    /// The second stage at binding 3, its UV source (m2StageCoordsPush) and
-    /// how the stages combine (M2Combiner).
-    int32_t hasSecondTexture = 0;
-    int32_t texCoordSet2 = 0;
-    int32_t combiner = static_cast<int32_t>(M2Combiner::Mod);
-    int32_t padding = 0;
-    /// The batch's authored M2 colour, multiplied into the texture (w is padding).
-    glm::vec4 batchColor{1.0f};
-    /// The second stage's own texture animation.
-    M2UVTransform uvTransform2;
-};
-static_assert(offsetof(CharMaterialUBO, uvTransform) == 64, "std140 aligns uvRow0 to 16");
-static_assert(offsetof(CharMaterialUBO, stateTint) == 96, "after the two uv rows");
-static_assert(offsetof(CharMaterialUBO, hasSecondTexture) == 112, "after stateTint");
-static_assert(offsetof(CharMaterialUBO, batchColor) == 128, "std140 aligns a vec4 to 16");
-static_assert(offsetof(CharMaterialUBO, uvTransform2) == 144, "after batchColor");
-static_assert(sizeof(CharMaterialUBO) == 176, "matches character_material.glsli");
 
 // GPU vertex struct with tangent (expanded from M2Vertex for normal mapping)
 struct CharVertexGPU {
@@ -475,101 +395,34 @@ bool CharacterRenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFram
         skeletons_.initialize(*vkCtx_);
     }
     assetManager = am;
-    perFrameLayout_ = perFrameLayout;
     renderPassOverride_ = renderPassOverride;
     msaaSamplesOverride_ = msaaSamples;
 
     VkDevice device = vkCtx_->getDevice();
 
-    // --- Descriptor set layouts ---
-
-    // Material set layout (set 1): binding 0 = sampler2D, binding 1 = CharMaterial UBO,
-    // binding 2 = normal/height map, binding 3 = second texture (white when unused)
-    {
-        VkDescriptorSetLayoutBinding bindings[4] = {};
-        bindings[0].binding = 0;
-        bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[0].descriptorCount = 1;
-        bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        bindings[1].binding = 1;
-        bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-        bindings[1].descriptorCount = 1;
-        // The vertex stage reads the batch's UV set and texture animation.
-        bindings[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-        bindings[2].binding = 2;
-        bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[2].descriptorCount = 1;
-        bindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-        bindings[3].binding = 3;
-        bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[3].descriptorCount = 1;
-        bindings[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-
-        VkDescriptorSetLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        ci.bindingCount = 4;
-        ci.pBindings = bindings;
-        vkCreateDescriptorSetLayout(device, &ci, nullptr, &materialSetLayout_);
-    }
-
-    // Set 2 is the skeleton pass's: the frame's bones and each request's
-    // model matrix, as skeleton.comp posed them.
+    // Set 1 is the device's texture table: a draw's textures are handles in
+    // its material row. Set 2 is the skeleton pass's: the frame's bones and
+    // each request's model matrix, as skeleton.comp posed them. Set 3 is the
+    // draw pass's: what the cull wrote for the draws, the material rows and
+    // the instances (character_draws.hpp).
     if (!skeletonPass_.initialize(*vkCtx_, "CharacterRenderer")) return false;
-
-    // --- Descriptor pools ---
-    // Material descriptors are transient and allocated every draw; keep per-frame
-    // pools so we can reset safely each frame slot without exhausting descriptors.
-    for (auto& materialDescPool : materialDescPools_) {
-        VkDescriptorPoolSize sizes[] = {
-            {.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_MATERIAL_SETS * 3},  // diffuse + normal/height + second
-            {.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, .descriptorCount = MAX_MATERIAL_SETS},
-        };
-        VkDescriptorPoolCreateInfo ci{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-        ci.maxSets = MAX_MATERIAL_SETS;
-        ci.poolSizeCount = 2;
-        ci.pPoolSizes = sizes;
-        ci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-        vkCreateDescriptorPool(device, &ci, nullptr, &materialDescPool);
-    }
-
-    // --- Material UBO ring buffers (one per frame slot) ---
+    layout_.initialize(*vkCtx_);
+    if (!drawPass_.initialize(*vkCtx_, "CharacterRenderer")) return false;
     {
-        VkPhysicalDeviceProperties props;
-        vkGetPhysicalDeviceProperties(ctx->getPhysicalDevice(), &props);
-        materialUboAlignment_ = static_cast<uint32_t>(props.limits.minUniformBufferOffsetAlignment);
-        if (materialUboAlignment_ < 1) materialUboAlignment_ = 1;
-        // Round up UBO size to alignment
-        uint32_t alignedUboSize = (sizeof(CharMaterialUBO) + materialUboAlignment_ - 1) & ~(materialUboAlignment_ - 1);
-        uint32_t ringSize = alignedUboSize * MATERIAL_RING_CAPACITY;
-        for (int i = 0; i < 2; i++) {
-            VkBufferCreateInfo bci{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-            bci.size = ringSize;
-            bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-            VmaAllocationCreateInfo aci{};
-            aci.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-            aci.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
-            VmaAllocationInfo allocInfo{};
-            gpuCreateBuffer(ctx->getAllocator(), &bci, &aci,
-                            &materialRingBuffer_[i], &materialRingAlloc_[i], &allocInfo);
-            materialRingMapped_[i] = allocInfo.pMappedData;
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(vkCtx_->getPhysicalDevice(), &properties);
+        maxDrawsPerCall_ = std::max(1u, properties.limits.maxDrawIndirectCount);
+    }
+    {
+        const VkPushConstantRange pushRange{.stageFlags = VK_SHADER_STAGE_VERTEX_BIT, .offset = 0,
+                                            .size = sizeof(CharDrawPush)};
+        pipelineLayout_ = createPipelineLayout(device, {perFrameLayout, vkCtx_->textureTable().layout(),
+                                                        skeletonPass_.drawSetLayout(), drawPass_.drawSetLayout()},
+                                               {pushRange});
+        if (!pipelineLayout_) {
+            LOG_ERROR("CharacterRenderer: could not create its pipeline layout; no characters are drawn");
+            return false;
         }
-    }
-
-    // --- Pipeline layout ---
-    // set 0 = perFrame, set 1 = material, set 2 = bones
-    // Push constants: CharacterPushConstants
-    {
-        VkDescriptorSetLayout setLayouts[] = {perFrameLayout, materialSetLayout_, skeletonPass_.drawSetLayout()};
-        VkPushConstantRange pushRange{};
-        pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-        pushRange.offset = 0;
-        pushRange.size = sizeof(CharacterPushConstants);
-
-        VkPipelineLayoutCreateInfo ci{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-        ci.setLayoutCount = 3;
-        ci.pSetLayouts = setLayouts;
-        ci.pushConstantRangeCount = 1;
-        ci.pPushConstantRanges = &pushRange;
-        vkCreatePipelineLayout(device, &ci, nullptr, &pipelineLayout_);
     }
 
     // --- Load shaders ---
@@ -650,37 +503,17 @@ void CharacterRenderer::shutdown() {
 
     retired.destroy(pipelineLayout_);
 
-    // Destroy material ring buffers
-    for (int i = 0; i < 2; i++) {
-        if (materialRingBuffer_[i]) {
-            retired.buffer(materialRingBuffer_[i], materialRingAlloc_[i]);
-            materialRingBuffer_[i] = VK_NULL_HANDLE;
-            materialRingAlloc_[i] = VK_NULL_HANDLE;
-            materialRingMapped_[i] = nullptr;
-        }
-        materialRingOffset_[i] = 0;
-    }
-
-    // Destroy descriptor pools and layouts
-    for (auto& materialDescPool : materialDescPools_) {
-        retired.destroy(materialDescPool);
-    }
-    retired.destroy(materialSetLayout_);
-    // The skeleton pass and the skeletons themselves.
+    // The lists' rows and places, the cull, the skeleton pass and the
+    // skeletons themselves.
+    layout_.clear();
+    listsBuilt_.clear();
+    drawPass_.destroy();
     skeletonPass_.destroy();
     skeletons_.destroy();
 
     // Shadow resources
     retired.destroy(shadowPipeline_);
     retired.destroy(shadowPipelineLayout_);
-    retired.destroy(shadowParams_.pool);
-    shadowParams_.set = VK_NULL_HANDLE;
-    retired.destroy(shadowParams_.layout);
-    retired.buffer(shadowParams_.ubo, shadowParams_.alloc);
-    shadowTexSetCache_.clear();
-    for (auto& pool : shadowTexPool_) {
-        if (pool) { retired.destroy(pool); pool = VK_NULL_HANDLE; }
-    }
     geometry_.destroy();
 
     vkCtx_ = nullptr;
@@ -713,6 +546,8 @@ void CharacterRenderer::clear() {
 
 void CharacterRenderer::clearInstances() {
     *scene_ = InstanceState{};
+    layout_.clear();
+    listsBuilt_.clear();
 }
 
 void CharacterRenderer::createFallbackTextures() {
@@ -730,6 +565,7 @@ void CharacterRenderer::destroyModelGPU(const M2ModelGPU& model) {
     if (!vkCtx_) return;
     geometry_.release(model.geometry);
     skeletons_.release(model.skeleton);
+    skeletons_.release(model.animations);
 }
 
 size_t CharacterRenderer::pendingNormalMapJobs() const {
@@ -783,6 +619,8 @@ void CharacterRenderer::requestNormalMaps() {
         // Built before, and kept while the texture was away: no need to again.
         if (TextureRef built = cache.find({path, TextureForm::NormalHeight, kCharacterNormalMapStrengthKey})) {
             cache.setNormalMap(*texture, std::move(built));
+            // The lists that draw with it take its relief.
+            ++textureSerial_;
             continue;
         }
         pipeline::AssetManager* assets = assetManager;
@@ -891,7 +729,10 @@ void CharacterRenderer::processPendingNormalMaps(int budget) {
         if (!texture) continue;
         TextureRef normals = cacheNormalMap(
             *vkCtx_, {result.key, TextureForm::NormalHeight, kCharacterNormalMapStrengthKey}, result.map);
-        if (normals) cache.setNormalMap(texture, std::move(normals));
+        if (normals) {
+            cache.setNormalMap(texture, std::move(normals));
+            ++textureSerial_;
+        }
     }
     if (!finished.empty()) vkCtx_->endUploadBatch();
 
@@ -1691,6 +1532,8 @@ void CharacterRenderer::setModelTexture(uint32_t modelId, uint32_t textureSlot, 
     }
 
     gpuModel.textureIds[textureSlot] = std::move(texture);
+    // The lists that draw with it are built again.
+    ++textureSerial_;
     core::Logger::getInstance().debug("Replaced model ", modelId, " texture slot ", textureSlot, " with composited texture");
 }
 bool CharacterRenderer::loadModel(const pipeline::M2Model& model, uint32_t id) {
@@ -1790,6 +1633,11 @@ bool CharacterRenderer::uploadModel(std::shared_ptr<const pipeline::M2Model> dat
     setupModelBuffers(gpuModel);
     // Its bones and keys, which it is posed from on the GPU.
     gpuModel.skeleton = skeletons_.place(model, MAX_BONES, model.name.c_str());
+    // Its batches' animated alpha and texture animations, which the cull
+    // samples.
+    if (const std::vector<uint32_t> animations = packCharacterAnimations(model); !animations.empty())
+        gpuModel.animations = skeletons_.placeBlob(animations, model.name.c_str(),
+                                                   "drawn with its batches' alpha and textures standing still");
 
     // Calculate bind pose
     calculateBindPose(gpuModel);
@@ -2299,22 +2147,89 @@ void CharacterRenderer::prepareRender(VkCommandBuffer cmd, uint32_t frameIndex) 
     posed_[frameIndex] = skeletonPass_.record(cmd, frameIndex, recording_->skeleton);
 }
 
+void CharacterRenderer::prepareDraws(VkCommandBuffer cmd, uint32_t frameIndex, ::VkBuffer lights,
+                                     uint32_t lightCount) {
+    if (!scenePipes_.opaque || frameIndex >= 2 || !recording_) return;
+    if (!drawPass_.prepare(cmd, frameIndex, recording_->draws, recording_->skeleton.pages,
+                           recording_->skeleton.pagesVersion, lights, lightCount)) {
+        return;
+    }
+    pendingSerial_ = recording_->serial;
+}
+
+void CharacterRenderer::frameSubmitted() {
+    if (pendingSerial_ == 0) return;
+    frameApplied_.store(pendingSerial_, std::memory_order_release);
+    pendingSerial_ = 0;
+}
+
 void CharacterRenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera&, Part part) {
-    recordCharacters(cmd, perFrameSet, part, recording_->drawLists[static_cast<size_t>(part)]);
+    const uint32_t frameIndex = vkCtx_->getCurrentFrame();
+    if (frameIndex >= 2 || !recording_ || !drawPass_.ready(frameIndex)) return;
+    // The frame's bones and models (set 2), posed by prepareRender.
+    const VkDescriptorSet boneSet = skeletonPass_.drawSet(frameIndex);
+    if (!boneSet || !posed_[frameIndex] || recording_->skeleton.requests.empty()) return;
+    const PipelineSet& pipes =
+        part == Part::Faded && fadedPass_ != VK_NULL_HANDLE ? fadedPassPipes_ : scenePipes_;
+    const CharDrawFrame& draws = recording_->draws;
+    const VkDescriptorSet sets[4] = {perFrameSet, vkCtx_->textureTable().set(), boneSet,
+                                     drawPass_.drawSet(frameIndex)};
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 4, sets, 0, nullptr);
+    const auto pipelineOf = [&](CharPipeline pipeline) -> VkPipeline {
+        switch (pipeline) {
+            case CharPipeline::Opaque: return pipes.opaque;
+            case CharPipeline::AlphaTest: return pipes.alphaTest;
+            case CharPipeline::Alpha: return pipes.alpha;
+            case CharPipeline::Translucent: return pipes.translucent;
+            case CharPipeline::Additive: return pipes.additive;
+            case CharPipeline::Modulate: return pipes.modulate;
+            case CharPipeline::Modulate2x: return pipes.modulate2x;
+            case CharPipeline::FadeDepth: return pipes.fadeDepth;
+            case CharPipeline::FadeColor: return pipes.fadeColor;
+        }
+        return pipes.alpha;
+    };
+    // The part's buckets in drawing order: by phase, so each instance's
+    // batches go out in the order they always did.
+    VkPipeline bound = VK_NULL_HANDLE;
+    int32_t boundPage = -1;
+    for (const CharBucket& bucket : draws.colour) {
+        if ((part == Part::Solid && bucket.key.part != 0) || (part == Part::Faded && bucket.key.part != 1)) continue;
+        if (static_cast<size_t>(bucket.key.page) >= draws.pages.size() ||
+            !draws.pages[static_cast<size_t>(bucket.key.page)].vertices) {
+            continue;
+        }
+        const VkPipeline pipeline = pipelineOf(bucket.key.pipeline);
+        if (!pipeline) continue;
+        if (pipeline != bound) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+            bound = pipeline;
+        }
+        if (bucket.key.page != boundPage) {
+            const CharPageBuffers& page = draws.pages[static_cast<size_t>(bucket.key.page)];
+            geometry_.bind(cmd, GeometryPool::Range{.page = bucket.key.page, .vertices = page.vertices,
+                                                    .indices = page.indices});
+            boundPage = bucket.key.page;
+        }
+        // The layer's depth bias, which separates coplanar armour pieces
+        // (chest, legs, gloves) that share identical depth.
+        vkCmdSetDepthBias(cmd, static_cast<float>(bucket.key.layer) * 0.5f, 0.0f, 0.0f);
+        for (uint32_t first = 0; first < bucket.size; first += maxDrawsPerCall_) {
+            const CharDrawPush push{.drawBase = bucket.start + first};
+            vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
+            vkCmdDrawIndexedIndirect(cmd, drawPass_.commands(frameIndex),
+                                     VkDeviceSize(push.drawBase) * sizeof(VkDrawIndexedIndirectCommand),
+                                     std::min(maxDrawsPerCall_, bucket.size - first),
+                                     sizeof(VkDrawIndexedIndirectCommand));
+        }
+    }
 }
 
 void CharacterRenderer::Frame::clear() noexcept {
-    for (auto& list : drawLists) list.clear();
-    depth.clear(); poseById.clear();
+    serial = 0;
+    draws.clear();
+    poseById.clear();
     skeleton.clear();
-}
-
-uint32_t CharacterRenderer::Frame::poseIndex(uint32_t id) const {
-    const auto at = std::lower_bound(poseById.begin(), poseById.end(), id,
-        [](const auto& entry, uint32_t wanted) { return entry.first < wanted; });
-    if (at == poseById.end() || at->first != id)
-        throw std::out_of_range("Visible character has no extracted pose");
-    return at->second;
 }
 
 std::optional<PosedSkeletons::Pose> CharacterRenderer::Frame::poseOf(uint32_t id) const {
@@ -2329,15 +2244,487 @@ std::optional<PosedSkeletons::Pose> CharacterRenderer::Frame::poseOf(uint32_t id
     return Pose{.request = at->second, .boneBase = request.outBase, .boneCount = next - request.outBase};
 }
 
-std::shared_ptr<const CharacterRenderer::Frame> CharacterRenderer::extract(const Camera& camera,
-        const std::vector<LocalLight>& lights) {
+std::optional<CharacterRenderer::BatchLook> CharacterRenderer::lookOf(const CharacterInstance& instance,
+                                                                      const M2ModelGPU& gpuModel,
+                                                                      size_t bi) {
+    const CharacterDress& dress = *instance.dress;
+    const auto& batch = gpuModel.data->batches[bi];
+    const auto batchUsesTextureType = [&](uint32_t wantedType) {
+        if (batch.textureIndex == 0xFFFF || gpuModel.data->textureLookup.empty()) return false;
+        uint32_t comboCount = batch.textureCount ? static_cast<uint32_t>(batch.textureCount) : 1u;
+        comboCount = std::min<uint32_t>(comboCount, 8u);
+        for (uint32_t i = 0; i < comboCount; ++i) {
+            const uint32_t lookupPos = static_cast<uint32_t>(batch.textureIndex) + i;
+            if (lookupPos >= gpuModel.data->textureLookup.size()) break;
+            const uint16_t texSlot = gpuModel.data->textureLookup[lookupPos];
+            if (texSlot < gpuModel.data->textures.size() && gpuModel.data->textures[texSlot].type == wantedType)
+                return true;
+        }
+        return false;
+    };
+    const bool previewMainModel = renderPassOverride_ != VK_NULL_HANDLE && !instance.hasOverrideModelMatrix;
+
+    // One line per head batch, for the first few instances: which texture
+    // slot it resolved to and what type that slot is. The player and an NPC
+    // use the same model, the same art and the same pairing, and one of them
+    // draws a face - so the answer is in what each batch actually got. Only
+    // instances that are actually a character in the world: one with
+    // per-instance texture overrides is an NPC, and the player is the one
+    // that draws its head detail.
+    const bool worldCharacter = !dress.textureSlotOverrides.empty() || dress.displaySkin || dress.drawSkinExtra;
+    if (batch.submeshId == 0 && worldCharacter && headBatchCanaryCount_ < 24) {
+        ++headBatchCanaryCount_;
+        uint32_t chosenType = 0;
+        if (batch.textureIndex != 0xFFFF && !gpuModel.data->textureLookup.empty()) {
+            const uint16_t sl = gpuModel.data->textureLookup[batch.textureIndex];
+            if (sl < gpuModel.data->textures.size()) chosenType = gpuModel.data->textures[sl].type;
+        }
+        const VkTexture* rt = resolveBatchTexture(dress, gpuModel, batch).texture->get();
+        // At debug: this canary was for heads resolving to the white
+        // texture, and they resolve to a texture.
+        core::Logger::getInstance().debug(
+            "Head batch: instance=", instance.id, " model=", instance.modelId, " geoset=", batch.submeshId,
+            " firstSlotType=", chosenType,
+            " resolved=", (rt == whiteTexture_.get() ? "WHITE" : (rt == nullptr ? "null" : "texture")),
+            " ptr=", static_cast<const void*>(rt), " overrides=", dress.textureSlotOverrides.size(),
+            " drawSkinExtra=", (dress.drawSkinExtra ? 1 : 0), " verts=", gpuModel.vertexCount);
+    }
+    // Note on the Skin Extra batch, since it has been misread twice: it is
+    // NOT a layer over the head. On an HD character model it is its own
+    // section - 703 vertices and 634 triangles of the human female's head -
+    // carrying the eyes, the mouth, the ears and the eyelashes.
+
+    // Resolve texture for this batch (prefer hair textures for hair geosets).
+    const BatchTexture resolved = resolveBatchTexture(dress, gpuModel, batch);
+    const TextureRef* texRef = resolved.texture;
+    uint8_t wrapFlags = resolved.wrapFlags;
+    const uint16_t batchGroup = static_cast<uint16_t>(batch.submeshId / 100);
+    const auto groupTexIt = dress.groupTextureOverrides.find(batchGroup);
+    if (groupTexIt != dress.groupTextureOverrides.end() && groupTexIt->second) texRef = &groupTexIt->second;
+
+    // Respect M2 material blend mode for creature/character submeshes.
+    uint16_t blendMode = 0;
+    uint16_t materialFlags = 0;
+    if (batch.materialIndex < gpuModel.data->materials.size()) {
+        blendMode = gpuModel.data->materials[batch.materialIndex].blendMode;
+        materialFlags = gpuModel.data->materials[batch.materialIndex].flags;
+    }
+    const M2BatchShading shading = characterBatchShading(*gpuModel.data, batch, blendMode);
+    // Shader 0x8000: the client builds no effect for it and draws nothing.
+    if (!shading.drawn) return std::nullopt;
+
+    const uint16_t submeshGroup = static_cast<uint16_t>(batch.submeshId / 100);
+    const bool hairTexture = batchUsesTextureType(6);
+    const bool hairGeoset = (submeshGroup >= 1 && submeshGroup <= 3) ||
+                            (submeshGroup == 0 && batch.submeshId > 0 && batch.submeshId <= 99);
+    // Scene models have no hair, and their submesh ids are all 0, which would
+    // otherwise satisfy the hair-geoset guess for every batch.
+    const bool hairMaterial = !instance.isSceneModel &&
+                              (hairTexture || (hairGeoset && (blendMode != 0 || batch.textureCount > 1)));
+
+    // For body/equipment parts with white/fallback texture, use skin (type 1) texture.
+    if (*texRef == whiteTexture_ && !instance.isSceneModel) {
+        const uint16_t group = batchGroup;
+        const bool isSkinGroup = (group == 0 || group == 3 || group == 4 || group == 5 || group == 8 ||
+                                  group == 9 || group == 13);
+        if (isSkinGroup) {
+            uint32_t texType = 0;
+            if (batch.textureIndex < gpuModel.data->textureLookup.size()) {
+                const uint16_t lk = gpuModel.data->textureLookup[batch.textureIndex];
+                if (lk < gpuModel.data->textures.size()) texType = gpuModel.data->textures[lk].type;
+            }
+            // Do NOT apply skin composite to hair (type 6) batches
+            if (texType != 6) {
+                for (size_t ti = 0; ti < gpuModel.textureIds.size(); ti++) {
+                    const TextureRef* candidate = &gpuModel.textureIds[ti];
+                    if (dress.displaySkin) {
+                        const auto itD = dress.displaySkin->find(static_cast<uint16_t>(ti));
+                        if (itD != dress.displaySkin->end() && itD->second) candidate = &itD->second;
+                    }
+                    const auto itO = dress.textureSlotOverrides.find(static_cast<uint16_t>(ti));
+                    if (itO != dress.textureSlotOverrides.end() && itO->second) candidate = &itO->second;
+                    if (*candidate != whiteTexture_ && *candidate) {
+                        if (ti < gpuModel.data->textures.size() &&
+                            (gpuModel.data->textures[ti].type == 1 || gpuModel.data->textures[ti].type == 11)) {
+                            texRef = candidate;
+                            wrapFlags = static_cast<uint8_t>(gpuModel.data->textures[ti].flags & 0x3);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    VkTexture* texPtr = texRef->get();
+
+    // A scene means what its materials say. Stormwind's walls are DXT5 with
+    // an unused alpha channel - every texel below the 0.5 cutoff - so
+    // inferring a cutout from "the texture has alpha" discards the whole
+    // building and leaves the sky showing through it. Only an alpha-key
+    // material (blendMode 1) cuts out here.
+    const bool alphaCutout = texPtr != nullptr && *texRef != whiteTexture_ && texRef->info().hasAlpha;
+    const bool blendNeedsCutout =
+        characterBatchNeedsAlphaTest(blendMode, alphaCutout, hairMaterial, instance.isSceneModel);
+    const bool unlit = characterBatchUnlit(blendMode, materialFlags);
+    BatchLook look;
+    look.solid = characterBlendPipeline(
+        {.blendMode = blendMode, .materialFlags = materialFlags, .hairMaterial = hairMaterial, .opacity = 1.0f});
+    look.partial = characterBlendPipeline(
+        {.blendMode = blendMode, .materialFlags = materialFlags, .hairMaterial = hairMaterial, .opacity = 0.5f});
+    look.faded = look.partial;
+
+    // Its textures by their places in the table, through the batch's wrap -
+    // valid ones, not merely non-null: a null view in a live descriptor is
+    // undefined behaviour that reaches NVIDIA as a lost device. The white
+    // and flat fallbacks stand in.
+    const auto handleOf = [&](const VkTexture* texture, TextureHandle image, uint8_t wrap,
+                              const TextureRef& fallback) {
+        if (!texture || !texture->isValid() || image == kNoTextureHandle) {
+            texture = fallback.get();
+            image = fallback.tableHandle();
+        }
+        if (!texture || image == kNoTextureHandle) return kNoTextureHandle;
+        const VkSampler sampler =
+            vkCtx_->getOrCreateSampler(m2TextureSamplerInfo(wrap, texture->getMipLevels(), 0.0f));
+        return sampler == VK_NULL_HANDLE ? image : vkCtx_->textureTable().withSampler(image, sampler);
+    };
+
+    // Resolve normal/height map for this texture
+    const VkTexture* normalMap = nullptr;
+    TextureHandle normalImage = kNoTextureHandle;
+    float batchHeightVariance = 0.0f;
+    if (texPtr && *texRef != whiteTexture_) {
+        if (VkTexture* derived = texRef->normalMap()) {
+            normalMap = derived;
+            normalImage = texRef->normalMapTableHandle();
+            batchHeightVariance = texRef->normalMapInfo().heightVariance;
+        }
+    }
+    const bool useAdvancedMaterials = !previewMainModel;
+
+    CharMaterialGPU& m = look.material;
+    // The colour half of the batch's M2Color, beside the alpha half the
+    // cull samples. The generic M2 path tints with the same value.
+    if (batch.colorIndex < gpuModel.data->colorRGB.size())
+        m.batchColor = glm::vec4(gpuModel.data->colorRGB[batch.colorIndex], 1.0f);
+    m.alphaTest = blendNeedsCutout ? 1 : 0;
+    m.ignoreTextureAlpha = (blendMode == 0 && !hairMaterial) ? 1 : 0;
+    m.unlit = unlit ? 1 : 0;
+    m.modulateNeutral = look.solid == CharacterBlendPipeline::Modulate2x ? 0.5f
+                        : look.solid == CharacterBlendPipeline::Modulate ? 1.0f : 0.0f;
+    // Where each stage's coordinates come from and how the stages combine,
+    // as the client works it out at skin load.
+    m.combiner = static_cast<int32_t>(shading.combiner);
+    m.texCoordSet = m2StageCoordsPush(shading.coords0);
+    m.texCoordSet2 = m2StageCoordsPush(shading.coords1);
+    const VkTexture* secondTex = nullptr;
+    TextureHandle secondImage = kNoTextureHandle;
+    uint8_t secondWrapFlags = BatchTexture::kRepeatBoth;
+    if (shading.stages == 2 && m2CombinerUsesSecondStage(shading.combiner)) {
+        look.secondStage = true;
+        const BatchTexture second = resolveBatchTexture(dress, gpuModel, batch, 1);
+        secondWrapFlags = second.wrapFlags;
+        VkTexture* image = second.texture->get();
+        if (image && image->isValid() && *second.texture != whiteTexture_) {
+            secondTex = image;
+            secondImage = second.texture->tableHandle();
+            m.hasSecondTexture = 1;
+        } else {
+            // Drawn with the second stage white: the first alone.
+            static std::unordered_set<uint64_t> loggedMissingSecond;
+            if (loggedMissingSecond.insert((uint64_t{instance.modelId} << 16) | bi).second) {
+                LOG_WARNING("Character model '", gpuModel.data->name, "' batch ", bi,
+                            ": its second texture (lookup ", size_t{batch.textureIndex} + 1,
+                            ") is not loaded; drawn with the first stage alone");
+            }
+        }
+    }
+    // Only hair and cloaks are two-sided on the stock models. The rest - a
+    // trouser leg's knee flare among them - show their inside through any
+    // gap, and lit with the normal turned round that inside is a dark wedge
+    // where the client draws nothing.
+    m.twoSided = (materialFlags & 0x04) ? 1 : 0;
+    m.specularIntensity = 0.5f;
+    m.enableNormalMap = (useAdvancedMaterials && listNormalMapping_) ? 1 : 0;
+    // Character textures are layered/mirrored atlases, not coherent height
+    // fields. Parallax offsets cross face seams and reveal underlying armor
+    // through tabards, so keep POM out of the character path even when it is
+    // enabled for the world. The scale and sample count stay zero: nothing
+    // reads them.
+    m.enablePOM = 0;
+    m.heightMapVariance = useAdvancedMaterials ? batchHeightVariance : 0.0f;
+    m.normalMapStrength = listNormalStrength_;
+    m.hairMaterial = hairMaterial ? 1 : 0;
+
+    // The base humanoid mesh samples a mirrored character atlas, with the
+    // face sitting directly beside a UV seam. Parallax displacement moves
+    // each mirrored half in opposite screen directions, producing crossed
+    // eyes and a center-squashed mouth at oblique angles. Keep normal
+    // lighting, but never displace UVs on group 0 body/head surfaces - nor
+    // on the no-cloak panel, which is a patch of the same torso.
+    bool flatNormal = false;
+    if (batchGroup == 0 || batch.submeshId == core::kGeosetNoCape) {
+        flatNormal = true;
+        m.specularIntensity = 0.20f;
+        m.enableNormalMap = 0;
+        m.enablePOM = 0;
+        m.heightMapVariance = 0.0f;
+    }
+    // Tabards are a thin cloth layer over the torso, and a cloak is cloth
+    // too: the relief derived from their artwork read as embossed armour and
+    // hammered metal. Keep the diffuse artwork, but give groups 12 and 15 a
+    // flat, low-specular cloth material.
+    if (batchGroup == 12 || batchGroup == 15) {
+        flatNormal = true;
+        m.specularIntensity = 0.08f;
+        m.enableNormalMap = 0;
+        m.enablePOM = 0;
+        m.heightMapVariance = 0.0f;
+    }
+    // The tangent frame follows UV0. A batch sampling UV1 or the sphere map
+    // would have its relief turned the wrong way.
+    if (m.texCoordSet != 0) {
+        flatNormal = true;
+        m.enableNormalMap = 0;
+        m.heightMapVariance = 0.0f;
+    }
+    if (previewMainModel) {
+        m.enableNormalMap = 0;
+        m.enablePOM = kPreviewSimpleTextureMode;
+        m.heightMapVariance = 0.0f;
+    }
+
+    // WOWEE_SCENE_DIAG=1 dumps what each backdrop batch is told to draw -
+    // texture, blend mode, shader path - once per scene model.
+    static int sceneDiagLines = 0;
+    if (instance.isSceneModel && sceneDiagEnabled() && sceneDiagLines++ < 40) {
+        std::string texName = "<white>";
+        if (batch.textureIndex < gpuModel.data->textureLookup.size()) {
+            const uint16_t lk = gpuModel.data->textureLookup[batch.textureIndex];
+            if (lk < gpuModel.data->textures.size()) texName = gpuModel.data->textures[lk].filename;
+        }
+        core::Logger::getInstance().warning(
+            "SCENE DIAG batch submesh=", batch.submeshId, " blend=", blendMode, " matFlags=0x", std::hex,
+            materialFlags, std::dec, " alphaTest=", m.alphaTest, " unlit=", m.unlit,
+            " simplePath=", (m.enablePOM == kPreviewSimpleTextureMode ? 1 : 0),
+            " whiteFallback=", (texPtr == whiteTexture_.get() ? 1 : 0), " tex=", texName);
+    }
+
+    m.texture = handleOf(texPtr, texRef->tableHandle(), wrapFlags, whiteTexture_);
+    m.normalHeight = flatNormal || !normalMap
+                         ? handleOf(flatNormalTexture_.get(), flatNormalTexture_.tableHandle(), wrapFlags,
+                                    flatNormalTexture_)
+                         : handleOf(normalMap, normalImage, wrapFlags, flatNormalTexture_);
+    m.secondTexture = handleOf(secondTex, secondImage, secondWrapFlags, whiteTexture_);
+    if (m.texture == kNoTextureHandle || m.normalHeight == kNoTextureHandle || m.secondTexture == kNoTextureHandle) {
+        // Even the fallbacks have no place: skipping the batch loses a
+        // model's piece; sampling nothing would lose the device.
+        static core::LogBudget budget(8, "character batches with no texture place");
+        if (budget.take())
+            LOG_WARNING("Character model '", gpuModel.data->name, "' batch ", bi,
+                        ": a texture has no place in the texture table - the batch is not drawn");
+        return std::nullopt;
+    }
+    return look;
+}
+
+namespace {
+
+CharPipeline charPipelineOf(CharacterBlendPipeline pipeline) {
+    switch (pipeline) {
+        case CharacterBlendPipeline::Opaque: return CharPipeline::Opaque;
+        case CharacterBlendPipeline::AlphaTest: return CharPipeline::AlphaTest;
+        case CharacterBlendPipeline::Alpha: return CharPipeline::Alpha;
+        case CharacterBlendPipeline::Translucent: return CharPipeline::Translucent;
+        case CharacterBlendPipeline::Additive: return CharPipeline::Additive;
+        case CharacterBlendPipeline::Modulate: return CharPipeline::Modulate;
+        case CharacterBlendPipeline::Modulate2x: return CharPipeline::Modulate2x;
+    }
+    return CharPipeline::Alpha;
+}
+
+}  // namespace
+
+std::vector<CharListEntry> CharacterRenderer::describeDraws(const CharacterInstance& instance,
+                                                            const M2ModelGPU& gpuModel) {
+    std::vector<CharListEntry> out;
+    // A model with no batches draws nothing, as in the client: an invisible
+    // stalker's skin is exactly that.
+    const auto& data = *gpuModel.data;
+    if (data.batches.empty()) return out;
+    const CharacterDress& dress = *instance.dress;
+    bool applyGeosetFilter = !dress.activeGeosets.empty();
+    if (applyGeosetFilter) {
+        const bool hasRenderableGeoset = std::any_of(data.batches.begin(), data.batches.end(), [&](const auto& b) {
+            return dress.activeGeosets.contains(b.submeshId);
+        });
+        if (!hasRenderableGeoset) {
+            static std::unordered_set<uint32_t> loggedGeosetFallback;
+            if (loggedGeosetFallback.insert(instance.id).second) {
+                LOG_WARNING("Geoset filter matched no batches for instance ", instance.id, " (model ",
+                            instance.modelId, "); rendering all batches as fallback");
+            }
+            applyGeosetFilter = false;
+        }
+    }
+    const auto blendModeOf = [&](const pipeline::M2Batch& b) -> uint16_t {
+        return b.materialIndex < data.materials.size() ? data.materials[b.materialIndex].blendMode : 0;
+    };
+    const auto entryOf = [&](size_t bi) {
+        const auto& batch = data.batches[bi];
+        CharListEntry entry;
+        CharEntryGPU& e = entry.entry;
+        e.indexCount = batch.indexCount;
+        e.firstIndex = gpuModel.geometry.firstIndex + batch.indexStart;
+        e.baseVertex = gpuModel.geometry.baseVertex;
+        if (batch.colorIndex != 0xFFFF && batch.colorIndex < data.colorAlphaTracks.size()) e.colorAlpha = batch.colorIndex;
+        if (batch.transparencyIndex != 0xFFFF && batch.transparencyIndex < data.textureWeightLookup.size()) {
+            const uint16_t track = data.textureWeightLookup[batch.transparencyIndex];
+            if (track != 0xFFFF && track < data.textureWeightTracks.size()) e.weight = track;
+        }
+        return entry;
+    };
+    const auto transformOf = [&](const pipeline::M2Batch& batch, uint32_t stage) -> uint32_t {
+        if (batch.textureAnimIndex == 0xFFFF) return CharEntryGPU::kNone;
+        const size_t lookup = size_t{batch.textureAnimIndex} + stage;
+        if (lookup >= data.textureTransformLookup.size()) return CharEntryGPU::kNone;
+        const uint16_t index = data.textureTransformLookup[lookup];
+        return index < data.textureTransforms.size() ? index : CharEntryGPU::kNone;
+    };
+
+    // The colour batches in the order the CPU drew them: the opaque ones
+    // (blend mode 0) first, then the rest, each by the model's sorted order
+    // - so capes and body parts write depth before hair overlays them.
+    struct Drawn {
+        size_t batch;
+        BatchLook look;
+    };
+    std::vector<Drawn> drawn;
+    for (int pass = 0; pass < 2; ++pass) {
+        for (const size_t bi : gpuModel.sortedBatchIndices) {
+            const auto& batch = data.batches[bi];
+            const uint16_t bm = blendModeOf(batch);
+            if ((pass == 0) != (bm == 0)) continue;
+            if (applyGeosetFilter) {
+                if (!dress.activeGeosets.contains(batch.submeshId)) continue;
+            } else {
+                // Without a filter, eye glow (17), group 18 and the cloak
+                // (15) are not drawn: an NPC that owns a cape says so by
+                // naming the geoset.
+                const uint16_t grp = batch.submeshId / 100;
+                if (grp == 17 || grp == 18 || grp == 15) continue;
+            }
+            if (auto look = lookOf(instance, gpuModel, bi)) drawn.push_back({bi, *look});
+        }
+    }
+
+    std::unordered_map<size_t, size_t> entryOfBatch;
+    out.reserve(drawn.size());
+    // A solid instance: a phase a change of pipeline or layer; a partly
+    // faded batch's place in the same phase, on its own pipeline.
+    uint16_t phase = 0;
+    std::optional<std::pair<CharPipeline, uint16_t>> state;
+    for (const Drawn& d : drawn) {
+        const auto& batch = data.batches[d.batch];
+        CharListEntry entry = entryOf(d.batch);
+        entry.entry.uvTransforms.x = transformOf(batch, 0);
+        if (d.look.secondStage) entry.entry.uvTransforms.y = transformOf(batch, 1);
+        entry.material = d.look.material;
+        const auto next = std::make_pair(charPipelineOf(d.look.solid), batch.materialLayer);
+        if (state && *state != next) ++phase;
+        state = next;
+        entry.solid = CharBucketKey{.part = 0, .phase = phase, .partial = 0, .pipeline = next.first,
+                                    .layer = batch.materialLayer};
+        if (d.look.partial != d.look.solid)
+            entry.partial = CharBucketKey{.part = 0, .phase = phase, .partial = 1,
+                                          .pipeline = charPipelineOf(d.look.partial), .layer = batch.materialLayer};
+        entryOfBatch[d.batch] = out.size();
+        out.push_back(std::move(entry));
+    }
+    // A faded body: its solid parts into depth first, then everything, its
+    // solid parts coloured only where that depth is.
+    phase = 0;
+    state.reset();
+    const auto fadedPlace = [&](CharPipeline pipeline, uint16_t layer, std::optional<CharBucketKey>& into) {
+        const auto next = std::make_pair(pipeline, layer);
+        if (state && *state != next) ++phase;
+        state = next;
+        into = CharBucketKey{.part = 1, .phase = phase, .partial = 0, .pipeline = pipeline, .layer = layer};
+    };
+    for (size_t i = 0; i < drawn.size(); ++i) {
+        if (drawn[i].look.faded != CharacterBlendPipeline::Translucent) continue;
+        fadedPlace(CharPipeline::FadeDepth, data.batches[drawn[i].batch].materialLayer, out[i].fadedDepth);
+    }
+    for (size_t i = 0; i < drawn.size(); ++i) {
+        const CharPipeline pipeline = drawn[i].look.faded == CharacterBlendPipeline::Translucent
+                                          ? CharPipeline::FadeColor
+                                          : charPipelineOf(drawn[i].look.faded);
+        fadedPlace(pipeline, data.batches[drawn[i].batch].materialLayer, out[i].faded);
+    }
+
+    // What casts into the shadow maps, in the model's own order: the solid
+    // and alpha-keyed batches, an alpha-keyed one cutting the shape of its
+    // texture.
+    for (size_t bi = 0; bi < data.batches.size(); ++bi) {
+        const auto& batch = data.batches[bi];
+        const uint16_t blendMode = blendModeOf(batch);
+        if (blendMode >= 2) continue;
+        if (!characterBatchShading(data, batch, blendMode).drawn) continue;  // shader 0x8000
+        if (applyGeosetFilter ? !dress.activeGeosets.contains(batch.submeshId)
+                              : (batch.submeshId / 100 == 17 || batch.submeshId / 100 == 18)) {
+            continue;
+        }
+        size_t at;
+        if (const auto found = entryOfBatch.find(bi); found != entryOfBatch.end()) {
+            at = found->second;
+        } else {
+            at = out.size();
+            out.push_back(entryOf(bi));
+        }
+        CharListEntry& entry = out[at];
+        entry.casts = true;
+        if (blendMode == 1) {
+            const TextureRef& tex = *resolveBatchTexture(dress, gpuModel, batch).texture;
+            if (tex && tex != whiteTexture_ && tex->isValid() && tex.tableHandle() != kNoTextureHandle) {
+                entry.entry.casterTexture = tex.tableHandle();
+                entry.entry.flags |= CharEntryGPU::kCasterSample | CharEntryGPU::kCasterAlphaTest;
+            }
+        }
+    }
+    return out;
+}
+
+void CharacterRenderer::refreshList(uint32_t id, const CharacterInstance& instance) {
+    const M2ModelGPU& model = *instance.cachedModel;
+    const ListBuilt now{.dress = instance.dress.get(), .model = &model, .textures = textureSerial_,
+                        .sceneModel = instance.isSceneModel};
+    auto [built, made] = listsBuilt_.try_emplace(id);
+    if (!made && built->second.dress == now.dress && built->second.model == now.model &&
+        built->second.textures == now.textures && built->second.sceneModel == now.sceneModel) {
+        return;
+    }
+    built->second = now;
+    layout_.setList(id, model.geometry.page, describeDraws(instance, model));
+}
+
+std::shared_ptr<const CharacterRenderer::Frame> CharacterRenderer::extract(const Camera& camera) {
     auto frame = framePool_.acquire();
-    frame->normalMapping = normalMappingEnabled_;
-    frame->normalStrength = normalMapStrength_;
-    frameLights_ = &lights;
+    // The normal settings are in every material row; changed, every list is
+    // built again.
+    if (listNormalMapping_ != normalMappingEnabled_ || listNormalStrength_ != normalMapStrength_) {
+        listNormalMapping_ = normalMappingEnabled_;
+        listNormalStrength_ = normalMapStrength_;
+        ++textureSerial_;
+    }
     frame->skeleton.view = boneView_.value_or(glm::mat4(1.0f));
     frame->skeleton.pages = skeletons_.pageBuffers();
     frame->skeleton.pagesVersion = skeletons_.version();
+
+    const float renderRadius = static_cast<float>(envSizeOrDefault("WOWEE_CHAR_RENDER_RADIUS", 130));
+    // Default frustum-cull radius when model bounds aren't available.
+    // 4.0 covers Tauren, mounted characters, and most creature models.
+    constexpr float kDefaultCharacterCullRadius = 4.0f;
+    std::vector<CharInstanceGPU>& records = frame->draws.instances;
 
     // Each shown instance a request: those placed by their own matrix, then
     // the weapons on their wielders' bones, then the enchants on the weapons
@@ -2391,12 +2778,41 @@ std::shared_ptr<const CharacterRenderer::Frame> CharacterRenderer::extract(const
         for (const uint16_t bone : inst.watchedBones)
             if (bone < boneCount)
                 frame->skeleton.reads.push_back({.owner = id, .bone = bone, .source = r.outBase + bone});
+
+        // Its record: what the cull and the draws read of it this frame.
         if (model.geometry.placed()) {
-            frame->depth.push_back({.modelMatrix = inst.hasOverrideModelMatrix ? inst.overrideModelMatrix
-                                                                               : getModelMatrix(inst),
-                                    .model = models.at(inst.modelId), .dress = inst.dress, .pose = index,
-                                    .boneBase = r.outBase, .boneCount = boneCount, .id = inst.id,
-                                    .modelId = inst.modelId});
+            refreshList(id, inst);
+            const uint32_t slot = layout_.slotOf(id);
+            if (records.size() <= slot) records.resize(slot + 1);
+            const CharacterInstance& look = drawnAs(inst);
+            // An aura's opacity caps the instance's own rather than
+            // multiplying it, so a stealthed unit that also carries the
+            // stealth state kit is not drawn twice as faint. The camera's
+            // closeness fades it on top: the player with the camera pressed
+            // against them. An attachment is drawn as its body is.
+            const float drawOpacity = std::min(look.opacity, look.stateAlpha) * look.cameraFade;
+            const glm::mat4 matrix = inst.hasOverrideModelMatrix ? inst.overrideModelMatrix : getModelMatrix(inst);
+            float cullRadius = kDefaultCharacterCullRadius;
+            if (model.data->boundRadius > 0.01f)
+                cullRadius = std::max(kDefaultCharacterCullRadius,
+                                      model.data->boundRadius * std::max(0.001f, inst.scale));
+            CharInstanceGPU& record = records[slot];
+            uint32_t flags = CharInstanceGPU::kPlaced;
+            if (!inst.hasOverrideModelMatrix && !inst.isSceneModel) flags |= CharInstanceGPU::kCulled;
+            if (drawOpacity > 0.0f) flags |= CharInstanceGPU::kSeen;
+            record.pose = glm::uvec4(index, r.outBase, boneCount, flags);
+            record.interiorAmbient = inst.interiorLight.ambient;
+            record.interiorDirect = inst.interiorLight.direct;
+            record.stateTint = glm::vec4(look.stateTint, drawOpacity);
+            record.sphere = glm::vec4(glm::vec3(matrix[3]), cullRadius);
+            int32_t sequence = inst.currentSequenceIndex;
+            uint32_t sequenceBits = 0;
+            std::memcpy(&sequenceBits, &sequence, sizeof(sequence));
+            record.clock = glm::vec4(inst.animationTime, inst.globalSequenceTime, glm::uintBitsToFloat(sequenceBits),
+                                     0.0f);
+            record.anim = model.animations.placed()
+                              ? glm::uvec4(static_cast<uint32_t>(model.animations.page), model.animations.first, 0u, 0u)
+                              : glm::uvec4(~0u, 0u, 0u, 0u);
         }
         return index;
     };
@@ -2434,755 +2850,42 @@ std::shared_ptr<const CharacterRenderer::Frame> CharacterRenderer::extract(const
     }
     frame->skeleton.levelEnds.push_back(static_cast<uint32_t>(frame->skeleton.requests.size()));
     std::sort(frame->poseById.begin(), frame->poseById.end());
-    cullCharacters(camera, Part::All, frame->drawLists[0], *frame);
-    for (const auto& draw : frame->drawLists[0]) frame->drawLists[draw.opacity < 0.999f ? 2 : 1].push_back(draw);
-    frameLights_ = nullptr;
-    return frame;
-}
 
-void CharacterRenderer::cullCharacters(const Camera& camera, Part part,
-                                       std::vector<DrawCharacter>& list, const Frame& frame) const {
-    list.clear();
-    const float renderRadius = static_cast<float>(envSizeOrDefault("WOWEE_CHAR_RENDER_RADIUS", 130));
-    const float renderRadiusSq = renderRadius * renderRadius;
-    // Default frustum-cull radius when model bounds aren't available.
-    // 4.0 covers Tauren, mounted characters, and most creature models.
-    constexpr float kDefaultCharacterCullRadius = 4.0f;
-    const glm::vec3 camPos = camera.getPosition();
-
-    // Extract frustum planes for per-instance visibility testing
+    // The lists' rows ride from the first frame extracted after they were
+    // written until one that carried them is on the GPU.
+    frame->serial = ++frameSerial_;
+    CharDrawFrame& draws = frame->draws;
+    layout_.carry(frame->serial, frameApplied_.load(std::memory_order_acquire), draws);
+    records.resize(std::max<size_t>(records.size(), layout_.slotCount()));
+    draws.pages.resize(geometry_.pageCount());
+    for (size_t page = 0; page < draws.pages.size(); ++page)
+        draws.pages[page] = {.vertices = geometry_.vertices(static_cast<int32_t>(page)),
+                             .indices = geometry_.indices(static_cast<int32_t>(page))};
     Frustum frustum;
     frustum.extractFromMatrix(camera.getViewProjectionMatrix());
-
-    for (const auto& pair : scene_->instances) {
-        const auto& instance = pair.second;
-
-        // Skip invisible instances (e.g., player in first-person mode), and
-        // the weapons and armour of a body put away for a form.
-        if (!isShown(instance)) continue;
-        const CharacterInstance& look = drawnAs(instance);
-
-        // Character instance culling: test both distance and frustum visibility
-        if (!instance.hasOverrideModelMatrix && !instance.isSceneModel) {
-            glm::vec3 toInst = instance.position - camPos;
-            float distSq = glm::dot(toInst, toInst);
-
-            // Distance cull: skip if beyond render radius
-            if (distSq > renderRadiusSq) continue;
-
-            // Compute per-instance bounding radius from model data when available.
-            float cullRadius = kDefaultCharacterCullRadius;
-            auto mIt = models.find(instance.modelId);
-            if (mIt != models.end()) {
-                float modelR = mIt->second->data->boundRadius;
-                if (modelR > 0.01f)
-                    cullRadius = std::max(kDefaultCharacterCullRadius, modelR * std::max(0.001f, instance.scale));
-            }
-
-            // Frustum cull: skip if outside view frustum
-            if (!frustum.intersectsSphere(instance.position, cullRadius)) continue;
-        }
-
-        if (!instance.cachedModel) continue;
-        const auto& gpuModel = *instance.cachedModel;
-
-        // Skip models without GPU buffers
-        if (!gpuModel.geometry.placed()) continue;
-
-        // Skip fully transparent instances. An aura's opacity caps the
-        // instance's own rather than multiplying it, so a stealthed unit
-        // that also carries the stealth state kit is not drawn twice as faint.
-        // The camera's closeness fades it on top of that: the player with the
-        // camera pressed against them. An attachment is drawn as its body is.
-        const float drawOpacity = std::min(look.opacity, look.stateAlpha) * look.cameraFade;
-        if (drawOpacity <= 0.0f) continue;
-        // A faded body goes with the faded ones, after the blended world.
-        const bool fadedInstance = drawOpacity < 0.999f;
-        if ((part == Part::Solid && fadedInstance) || (part == Part::Faded && !fadedInstance)) continue;
-
-        // Set model matrix (use override for weapon instances)
-        const glm::mat4 modelMatrix = instance.hasOverrideModelMatrix ? instance.overrideModelMatrix
-                                                                      : getModelMatrix(instance);
-        const uint32_t pose = frame.poseIndex(instance.id);
-        const SkeletonRequestGPU& posed = frame.skeleton.requests[pose];
-        list.push_back(DrawCharacter{
-            .modelMatrix = modelMatrix,
-            .model = models.at(instance.modelId),
-            .dress = instance.dress,
-            .pose = pose,
-            .boneBase = posed.outBase,
-            .boneCount = (posed.flags & SkeletonRequestGPU::kNoSkeleton) ? 0u : gpuModel.skeleton.boneCount,
-            .interiorLight = instance.interiorLight,
-            // The lights nearest the unit's origin, as the client picks them
-            // for any model.
-            .localLights = frameLights_ ? pickLocalLights(*frameLights_, glm::vec3(modelMatrix[3]), 0.0f)
-                                        : kNoLocalLights,
-            .stateTint = look.stateTint,
-            .opacity = drawOpacity,
-            .animationTime = instance.animationTime,
-            .globalSequenceTime = instance.globalSequenceTime,
-            .sequenceIndex = instance.currentSequenceIndex,
-            .id = instance.id,
-            .modelId = instance.modelId,
-            .isSceneModel = instance.isSceneModel,
-            .hasOverrideModelMatrix = instance.hasOverrideModelMatrix,
-        });
+    for (int i = 0; i < 6; ++i) {
+        const Plane& p = frustum.getPlane(static_cast<Frustum::Side>(i));
+        draws.cull.viewPlanes[i] = glm::vec4(p.normal, p.distance);
     }
-}
-
-void CharacterRenderer::recordCharacters(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, Part part,  // NOLINT(readability-function-size)
-                                         const std::vector<DrawCharacter>& list) {
-    const PipelineSet& pipes =
-        part == Part::Faded && fadedPass_ != VK_NULL_HANDLE ? fadedPassPipes_ : scenePipes_;
-    uint32_t frameIndex = vkCtx_->getCurrentFrame();
-    uint32_t frameSlot = frameIndex % 2u;
-    uint32_t& draws = drawCalls_[static_cast<size_t>(part)];
-    draws = 0;
-
-    // Reset material ring buffer and descriptor pool once per frame slot.
-    if (lastMaterialPoolResetFrame_ != frameIndex) {
-        materialRingOffset_[frameSlot] = 0;
-        if (materialDescPools_[frameSlot]) {
-            vkCtx_->resetDescriptorPool(materialDescPools_[frameSlot]);
-        }
-        materialDescriptorCache_[frameSlot].clear();
-        lastMaterialPoolResetFrame_ = frameIndex;
-    }
-
-    // Pre-compute aligned UBO stride for ring buffer sub-allocation
-    const uint32_t uboStride = (sizeof(CharMaterialUBO) + materialUboAlignment_ - 1) & ~(materialUboAlignment_ - 1);
-    const uint32_t ringCapacityBytes = uboStride * MATERIAL_RING_CAPACITY;
-    auto getMaterialDescriptorSet = [&](VkTexture* diffuse, uint8_t wrapFlags,
-                                        VkTexture* normal, VkTexture* second = nullptr,
-                                        uint8_t secondWrapFlags = BatchTexture::kRepeatBoth) -> VkDescriptorSet {
-        // Valid, not merely non-null. descriptorInfo() hands back whatever the
-        // texture holds - VK_NULL_HANDLE for a view and a sampler that were
-        // never created - and declares SHADER_READ_ONLY_OPTIMAL either way. A
-        // draw that samples that is undefined behaviour, and on NVIDIA it
-        // surfaces as a graphics engine exception and a lost device rather
-        // than anything this client can catch.
-        //
-        // Both call sites check the diffuse and neither checks the normal, and
-        // the normal is the one that can arrive from an asynchronous generation
-        // pass or from a flat fallback whose own upload can fail under the same
-        // memory pressure that makes the texture cache start rejecting.
-        if (!diffuse || !diffuse->isValid()) diffuse = whiteTexture_.get();
-        if (!normal || !normal->isValid()) normal = flatNormalTexture_.get();
-        // Unused, the second stage is white, and the shader does not read it.
-        if (!second || !second->isValid()) second = whiteTexture_.get();
-        if (!diffuse || !diffuse->isValid() || !normal || !normal->isValid() ||
-            !second || !second->isValid()) {
-            // Even the fallbacks are gone. Skipping the draw loses a model;
-            // binding a null view loses the device.
-            return VK_NULL_HANDLE;
-        }
-        VkDescriptorImageInfo diffuseInfo = diffuse->descriptorInfo();
-        // The texture's own sampler is the one the cache made for whichever
-        // model loaded the image first, always REPEAT. Wrap per batch instead,
-        // and the normal map the same way: it is read at the same UV, and a
-        // normal wrapping where the colour clamps lights the edge from the
-        // opposite side of the texture.
-        auto wrapSampler = [&](const VkTexture& tex) {
-            return vkCtx_->getOrCreateSampler(
-                m2TextureSamplerInfo(wrapFlags, tex.getMipLevels(), 0.0f));
-        };
-        if (const VkSampler s = wrapSampler(*diffuse); s != VK_NULL_HANDLE) diffuseInfo.sampler = s;
-        VkDescriptorImageInfo normalInfo = normal->descriptorInfo();
-        if (const VkSampler s = wrapSampler(*normal); s != VK_NULL_HANDLE) normalInfo.sampler = s;
-        // The second texture wraps by its own slot's flags.
-        VkDescriptorImageInfo secondInfo = second->descriptorInfo();
-        if (const VkSampler s = vkCtx_->getOrCreateSampler(
-                m2TextureSamplerInfo(secondWrapFlags, second->getMipLevels(), 0.0f));
-            s != VK_NULL_HANDLE) {
-            secondInfo.sampler = s;
-        }
-        const MaterialDescriptorKey key{.diffuse = diffuseInfo.imageView, .normal = normalInfo.imageView,
-                                        .second = secondInfo.imageView,
-                                        .diffuseSampler = diffuseInfo.sampler, .normalSampler = normalInfo.sampler,
-                                        .secondSampler = secondInfo.sampler};
-        auto& cache = materialDescriptorCache_[frameSlot];
-        if (auto it = cache.find(key); it != cache.end()) return it->second;
-
-        VkDescriptorSet set = VK_NULL_HANDLE;
-        VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-        ai.descriptorPool = materialDescPools_[frameSlot];
-        ai.descriptorSetCount = 1;
-        ai.pSetLayouts = &materialSetLayout_;
-        if (vkCtx_->allocateDescriptorSets(ai, &set) != VK_SUCCESS)
-            return VK_NULL_HANDLE;
-
-        VkDescriptorBufferInfo bufferInfo{};
-        bufferInfo.buffer = materialRingBuffer_[frameSlot];
-        bufferInfo.offset = 0;
-        bufferInfo.range = sizeof(CharMaterialUBO);
-        VkWriteDescriptorSet writes[4] = {};
-        writes[0] = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = nullptr, .dstSet = set, .dstBinding = 0, .dstArrayElement = 0, .descriptorCount = 1,
-                     .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &diffuseInfo, .pBufferInfo = nullptr, .pTexelBufferView = nullptr};
-        writes[1] = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = nullptr, .dstSet = set, .dstBinding = 1, .dstArrayElement = 0, .descriptorCount = 1,
-                     .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, .pImageInfo = nullptr, .pBufferInfo = &bufferInfo, .pTexelBufferView = nullptr};
-        writes[2] = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = nullptr, .dstSet = set, .dstBinding = 2, .dstArrayElement = 0, .descriptorCount = 1,
-                     .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &normalInfo, .pBufferInfo = nullptr, .pTexelBufferView = nullptr};
-        writes[3] = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .pNext = nullptr, .dstSet = set, .dstBinding = 3, .dstArrayElement = 0, .descriptorCount = 1,
-                     .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &secondInfo, .pBufferInfo = nullptr, .pTexelBufferView = nullptr};
-        vkUpdateDescriptorSets(vkCtx_->getDevice(), 4, writes, 0, nullptr);
-        cache.emplace(key, set);
-        return set;
-    };
-
-    // Bind per-frame descriptor set (set 0) -- shared across all draws
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            pipelineLayout_, 0, 1, &perFrameSet, 0, nullptr);
-    // The frame's bones and models (set 2), posed by prepareRender.
-    const VkDescriptorSet boneSet = skeletonPass_.drawSet(frameIndex);
-    if (!boneSet || !posed_[frameIndex] || recording_->skeleton.requests.empty()) return;
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 2, 1, &boneSet, 0, nullptr);
-
-    auto pipelineFor = [&](CharacterBlendPipeline p) -> VkPipeline {
-        switch (p) {
-            case CharacterBlendPipeline::Opaque: return pipes.opaque;
-            case CharacterBlendPipeline::AlphaTest: return pipes.alphaTest;
-            case CharacterBlendPipeline::Alpha: return pipes.alpha;
-            case CharacterBlendPipeline::Translucent: return pipes.translucent;
-            case CharacterBlendPipeline::Additive: return pipes.additive;
-            case CharacterBlendPipeline::Modulate: return pipes.modulate;
-            case CharacterBlendPipeline::Modulate2x: return pipes.modulate2x;
-        }
-        return pipes.alpha;
-    };
-
-    // Start with opaque pipeline
-    VkPipeline currentPipeline = pipes.opaque;
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, currentPipeline);
-
-    for (const DrawCharacter& instance : list) {
-        const auto& gpuModel = *instance.model;
-        const CharacterDress& dress = *instance.dress;
-        const float drawOpacity = instance.opacity;
-
-        const CharacterPushConstants push{
-            .pose = glm::uvec4(instance.pose, instance.boneBase, instance.boneCount, 0u),
-            .interiorLight = instance.interiorLight,
-            .localLights = instance.localLights,
-        };
-        vkCmdPushConstants(cmd, pipelineLayout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(push), &push);
-
-        geometry_.bind(cmd, gpuModel.geometry);
-
-        // A model with no batches draws nothing, as in the client: an
-        // invisible stalker's skin is exactly that. It used to be drawn
-        // whole with its first texture.
-        if (!gpuModel.data->batches.empty()) {
-            bool applyGeosetFilter = !dress.activeGeosets.empty();
-            if (applyGeosetFilter) {
-                bool hasRenderableGeoset = false;
-                for (const auto& batch : gpuModel.data->batches) {
-                    if (dress.activeGeosets.find(batch.submeshId) != dress.activeGeosets.end()) {
-                        hasRenderableGeoset = true;
-                        break;
-                    }
-                }
-                if (!hasRenderableGeoset) {
-                    static std::unordered_set<uint32_t> loggedGeosetFallback;
-                    if (loggedGeosetFallback.insert(instance.id).second) {
-                        LOG_WARNING("Geoset filter matched no batches for instance ",
-                                    instance.id, " (model ", instance.modelId,
-                                    "); rendering all batches as fallback");
-                    }
-                    applyGeosetFilter = false;
-                }
-            }
-
-
-            auto batchUsesTextureType = [](const M2ModelGPU& gm, const pipeline::M2Batch& b, uint32_t wantedType) {
-                if (b.textureIndex == 0xFFFF || gm.data->textureLookup.empty()) return false;
-
-                uint32_t comboCount = b.textureCount ? static_cast<uint32_t>(b.textureCount) : 1u;
-                comboCount = std::min<uint32_t>(comboCount, 8u);
-                for (uint32_t i = 0; i < comboCount; ++i) {
-                    uint32_t lookupPos = static_cast<uint32_t>(b.textureIndex) + i;
-                    if (lookupPos >= gm.data->textureLookup.size()) break;
-                    uint16_t texSlot = gm.data->textureLookup[lookupPos];
-                    if (texSlot < gm.data->textures.size() && gm.data->textures[texSlot].type == wantedType)
-                        return true;
-                }
-                return false;
-            };
-
-            const bool previewMainModel = renderPassOverride_ != VK_NULL_HANDLE &&
-                                          !instance.hasOverrideModelMatrix;
-
-            // Draw batches in two passes: opaque (blendMode 0) first, then
-            // alpha-key/blend after.  This ensures capes and body parts write
-            // depth before hair overlay, preventing hair→cape z-fight.
-            auto getBatchBlendMode = [&](const pipeline::M2Batch& b) -> uint16_t {
-                if (b.materialIndex < gpuModel.data->materials.size())
-                    return gpuModel.data->materials[b.materialIndex].blendMode;
-                return 0;
-            };
-
-            // Use precomputed batch render order (cached on gpuModel at load time;
-            // depends only on static batch metadata, so per-frame re-sorting was waste).
-            const auto& sortedBatchIndices = gpuModel.sortedBatchIndices;
-
-            // A faded body goes through the batches twice: first its solid
-            // parts into depth alone (stage 0), then everything with those
-            // parts coloured only where that depth is (PipelineSet::fadeDepth).
-            // Drawn in one go, each surface blended over the ones the model
-            // happened to draw before it - a Shadowform drake's far legs over
-            // its near ones, its layers stacked nearly black.
-            const bool fadeDepthStage = drawOpacity < 0.999f;
-            for (int stage = fadeDepthStage ? 0 : 1; stage < 2; ++stage) {
-            for (int pass = 0; pass < 2; pass++) {
-            for (size_t bi : sortedBatchIndices) {
-                const auto& batch = gpuModel.data->batches[bi];
-                uint16_t bm = getBatchBlendMode(batch);
-                if (pass == 0 && bm != 0) continue;  // pass 0: opaque only
-                if (pass == 1 && bm == 0) continue;   // pass 1: non-opaque only
-                if (applyGeosetFilter) {
-                    if (dress.activeGeosets.find(batch.submeshId) == dress.activeGeosets.end()) {
-                        continue;
-                    }
-                } else {
-                    // Even without a geoset filter, skip eye glow (group 17)
-                    // and group 18 unless explicitly opted in. These geosets are
-                    // only for DK/NE eye glow and should be off by default.
-                    //
-                    // Group 15 joins them, for the same reason and a visible
-                    // one: it is the cloak, and its variants above 1501 are
-                    // cloaks that exist. A model drawn with no filter drew one
-                    // whether or not the character wore anything - and with no
-                    // cloak texture to bind, a white sheet. An NPC that owns a
-                    // cape says so by naming the geoset; one that says nothing
-                    // has none.
-                    uint16_t grp = batch.submeshId / 100;
-                    if (grp == 17 || grp == 18 || grp == 15) continue;
-                }
-                // One line per head batch, for the first few instances: which
-                // texture slot it resolved to and what type that slot is. The
-                // player and an NPC use the same model, the same art and the
-                // same pairing, and one of them draws a face - so the answer is
-                // in what each batch actually got, which nothing has yet shown.
-                // Only instances that are actually a character in the world: one
-                // with per-instance texture overrides is an NPC, and the player
-                // is the one that draws its head detail. The first run of this
-                // spent all its lines on the character-select models before a
-                // single NPC had spawned.
-                const bool worldCharacter =
-                    !dress.textureSlotOverrides.empty() || dress.displaySkin || dress.drawSkinExtra;
-                if (batch.submeshId == 0 && worldCharacter && headBatchCanaryCount_ < 24) {
-                    ++headBatchCanaryCount_;
-                    uint32_t chosenType = 0;
-                    if (batch.textureIndex != 0xFFFF && !gpuModel.data->textureLookup.empty()) {
-                        uint16_t sl = gpuModel.data->textureLookup[batch.textureIndex];
-                        if (sl < gpuModel.data->textures.size())
-                            chosenType = gpuModel.data->textures[sl].type;
-                    }
-                    const VkTexture* rt = resolveBatchTexture(dress, gpuModel, batch).texture->get();
-                    // At debug: this canary was for heads resolving to the
-                    // white texture, and they resolve to a texture. Twenty-four
-                    // of them a session is noise in a log read for faults.
-                    core::Logger::getInstance().debug(
-                        "Head batch: instance=", instance.id, " model=", instance.modelId,
-                        " geoset=", batch.submeshId, " firstSlotType=", chosenType,
-                        " resolved=", (rt == whiteTexture_.get() ? "WHITE"
-                                       : (rt == nullptr ? "null" : "texture")),
-                        " ptr=", static_cast<const void*>(rt),
-                        " overrides=", dress.textureSlotOverrides.size(),
-                        " drawSkinExtra=", (dress.drawSkinExtra ? 1 : 0),
-                        " verts=", gpuModel.vertexCount);
-                }
-                // Note on the Skin Extra batch, since it has been misread twice:
-                // it is NOT a layer over the head. On an HD character model it
-                // is its own section - 703 vertices and 634 triangles of the
-                // human female's head, separate from the 403 and 877 of the
-                // sections beside it - carrying the eyes, the mouth, the ears
-                // and the eyelashes. Skipping it does not remove a detail pass,
-                // it removes a face's features. Whatever is wrong with an NPC
-                // face, it is not this batch existing.
-                // M2 color-alpha animation gates prop submeshes per animation -
-                // e.g. the peasant lumberjack carry model has two wood-bundle
-                // submeshes and only one is alpha-1 in any given animation.
-                // Opaque batches can't express alpha in the shader, so cull
-                // batches whose track evaluates to ~0 for the current sequence.
-                const float batchColorAlpha = glm::clamp(
-                    evalBatchColorAlpha(*gpuModel.data, batch,
-                                        instance.sequenceIndex,
-                                        instance.animationTime,
-                                        instance.globalSequenceTime) *
-                    evalBatchTextureWeight(*gpuModel.data, batch,
-                                           instance.sequenceIndex,
-                                           instance.animationTime,
-                                           instance.globalSequenceTime),
-                    0.0f, 1.0f);
-                if (batchColorAlpha <= 0.01f) {
-                    continue;
-                }
-                // Resolve texture for this batch (prefer hair textures for hair geosets).
-                const BatchTexture resolved = resolveBatchTexture(dress, gpuModel, batch);
-                // The model's or the instance's reference, so what is read
-                // about the texture - its alpha, its normal map - comes from
-                // its cache entry; nothing is copied, which would take the
-                // cache's lock from this worker.
-                const TextureRef* texRef = resolved.texture;
-                uint8_t wrapFlags = resolved.wrapFlags;
-                const uint16_t batchGroup = static_cast<uint16_t>(batch.submeshId / 100);
-                auto groupTexIt = dress.groupTextureOverrides.find(batchGroup);
-                if (groupTexIt != dress.groupTextureOverrides.end() && groupTexIt->second) {
-                    texRef = &groupTexIt->second;
-                }
-
-                // Respect M2 material blend mode for creature/character submeshes.
-                uint16_t blendMode = 0;
-                uint16_t materialFlags = 0;
-                if (batch.materialIndex < gpuModel.data->materials.size()) {
-                    blendMode = gpuModel.data->materials[batch.materialIndex].blendMode;
-                    materialFlags = gpuModel.data->materials[batch.materialIndex].flags;
-                }
-                const M2BatchShading shading = characterBatchShading(*gpuModel.data, batch, blendMode);
-                // Shader 0x8000: the client builds no effect for it and draws nothing.
-                if (!shading.drawn) continue;
-
-                const uint16_t submeshGroup = static_cast<uint16_t>(batch.submeshId / 100);
-                const bool hairTexture = batchUsesTextureType(gpuModel, batch, 6);
-                const bool hairGeoset = (submeshGroup >= 1 && submeshGroup <= 3) ||
-                                        (submeshGroup == 0 && batch.submeshId > 0 && batch.submeshId <= 99);
-                // Scene models have no hair, and their submesh ids are all 0, which
-                // would otherwise satisfy the hair-geoset guess for every batch.
-                const bool hairMaterial = !instance.isSceneModel &&
-                                          (hairTexture ||
-                                           (hairGeoset && (blendMode != 0 || batch.textureCount > 1)));
-
-                // For body/equipment parts with white/fallback texture, use skin (type 1) texture.
-                if (*texRef == whiteTexture_ && !instance.isSceneModel) {
-                    uint16_t group = batchGroup;
-                    bool isSkinGroup = (group == 0 || group == 3 || group == 4 || group == 5 ||
-                                        group == 8 || group == 9 || group == 13);
-                    if (isSkinGroup) {
-                        uint32_t texType = 0;
-                        if (batch.textureIndex < gpuModel.data->textureLookup.size()) {
-                            uint16_t lk = gpuModel.data->textureLookup[batch.textureIndex];
-                            if (lk < gpuModel.data->textures.size()) {
-                                texType = gpuModel.data->textures[lk].type;
-                            }
-                        }
-                        // Do NOT apply skin composite to hair (type 6) batches
-                        if (texType != 6) {
-                            for (size_t ti = 0; ti < gpuModel.textureIds.size(); ti++) {
-                                const TextureRef* candidate = &gpuModel.textureIds[ti];
-                                if (dress.displaySkin) {
-                                    auto itD = dress.displaySkin->find(static_cast<uint16_t>(ti));
-                                    if (itD != dress.displaySkin->end() && itD->second) candidate = &itD->second;
-                                }
-                                auto itO = dress.textureSlotOverrides.find(static_cast<uint16_t>(ti));
-                                if (itO != dress.textureSlotOverrides.end() && itO->second) {
-                                    candidate = &itO->second;
-                                }
-                                if (*candidate != whiteTexture_ && *candidate) {
-                                    if (ti < gpuModel.data->textures.size() &&
-                                        (gpuModel.data->textures[ti].type == 1 || gpuModel.data->textures[ti].type == 11)) {
-                                        texRef = candidate;
-                                        wrapFlags = static_cast<uint8_t>(gpuModel.data->textures[ti].flags & 0x3);
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                VkTexture* texPtr = texRef->get();
-
-                // Determine material properties
-                const bool alphaCutout = texPtr != nullptr && *texRef != whiteTexture_ && texRef->info().hasAlpha;
-                // A scene means what its materials say. Stormwind's walls are DXT5 with
-                // an unused alpha channel - every texel below the 0.5 cutoff - so
-                // inferring a cutout from "the texture has alpha" discards the whole
-                // building and leaves the sky showing through it. Only an alpha-key
-                // material (blendMode 1) cuts out here.
-                const bool blendNeedsCutout = characterBatchNeedsAlphaTest(
-                    blendMode, alphaCutout, hairMaterial, instance.isSceneModel);
-                const bool unlit = characterBatchUnlit(blendMode, materialFlags);
-                const CharacterBlendPipeline blendPipeline = characterBlendPipeline({
-                    .blendMode = blendMode,
-                    .materialFlags = materialFlags,
-                    .hairMaterial = hairMaterial,
-                    .opacity = drawOpacity * batchColorAlpha,
-                });
-                const bool fadedSolid = fadeDepthStage &&
-                                        blendPipeline == CharacterBlendPipeline::Translucent;
-                if (stage == 0 && !fadedSolid) continue;
-                VkPipeline desiredPipeline = stage == 0 ? pipes.fadeDepth
-                                           : fadedSolid ? pipes.fadeColor
-                                                        : pipelineFor(blendPipeline);
-                if (desiredPipeline != currentPipeline) {
-                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, desiredPipeline);
-                    currentPipeline = desiredPipeline;
-                }
-
-                // Resolve normal/height map for this texture
-                VkTexture* normalMap = flatNormalTexture_.get();
-                float batchHeightVariance = 0.0f;
-                if (texPtr && *texRef != whiteTexture_) {
-                    if (VkTexture* derived = texRef->normalMap()) {
-                        normalMap = derived;
-                        batchHeightVariance = texRef->normalMapInfo().heightVariance;
-                    }
-                }
-
-                const bool useAdvancedMaterials = !previewMainModel;
-                const bool usePreviewSimpleShader = previewMainModel;
-
-                // Create per-batch material UBO
-                CharMaterialUBO matData{};
-                matData.opacity = drawOpacity * batchColorAlpha;
-                matData.stateTint = glm::vec4(instance.stateTint, 1.0f);
-                // The colour half of the batch's M2Color, beside the alpha
-                // half above. The generic M2 path tints with the same value.
-                if (batch.colorIndex < gpuModel.data->colorRGB.size())
-                    matData.batchColor = glm::vec4(gpuModel.data->colorRGB[batch.colorIndex], 1.0f);
-                matData.alphaTest = blendNeedsCutout ? 1 : 0;
-                matData.ignoreTextureAlpha = (blendMode == 0 && !hairMaterial) ? 1 : 0;
-                matData.unlit = unlit ? 1 : 0;
-                matData.modulateNeutral =
-                    blendPipeline == CharacterBlendPipeline::Modulate2x ? 0.5f
-                    : blendPipeline == CharacterBlendPipeline::Modulate ? 1.0f : 0.0f;
-                // Where each stage's coordinates come from and how the stages
-                // combine, as the client works it out at skin load. One
-                // texture used to be picked among the stages, which lost
-                // armour its sphere-mapped shine and a flame its doubling.
-                matData.combiner = static_cast<int32_t>(shading.combiner);
-                matData.texCoordSet = m2StageCoordsPush(shading.coords0);
-                matData.texCoordSet2 = m2StageCoordsPush(shading.coords1);
-                const auto stageUVTransform = [&](uint32_t stage) {
-                    const size_t animLookup = batch.textureAnimIndex == 0xFFFF
-                        ? size_t{0xFFFF} : size_t{batch.textureAnimIndex} + stage;
-                    const auto* tt = m2TextureTransformAt(gpuModel.data->textureTransformLookup,
-                                                          gpuModel.data->textureTransforms, animLookup);
-                    return tt ? m2SampleUVTransform(*tt, instance.sequenceIndex,
-                                                    instance.animationTime, instance.globalSequenceTime,
-                                                    gpuModel.data->globalSequenceDurations)
-                              : M2UVTransform{};
-                };
-                matData.uvTransform = stageUVTransform(0);
-                VkTexture* secondTex = nullptr;
-                uint8_t secondWrapFlags = BatchTexture::kRepeatBoth;
-                if (shading.stages == 2 && m2CombinerUsesSecondStage(shading.combiner)) {
-                    matData.uvTransform2 = stageUVTransform(1);
-                    const BatchTexture second = resolveBatchTexture(dress, gpuModel, batch, 1);
-                    secondWrapFlags = second.wrapFlags;
-                    VkTexture* secondImage = second.texture->get();
-                    if (secondImage && secondImage->isValid() && *second.texture != whiteTexture_) {
-                        secondTex = secondImage;
-                        matData.hasSecondTexture = 1;
-                    } else {
-                        // Drawn with the second stage white: the first alone.
-                        static std::unordered_set<uint64_t> loggedMissingSecond;
-                        if (loggedMissingSecond.insert((uint64_t{instance.modelId} << 16) | bi).second) {
-                            LOG_WARNING("Character model '", gpuModel.data->name, "' batch ", bi,
-                                        ": its second texture (lookup ", size_t{batch.textureIndex} + 1,
-                                        ") is not loaded; drawn with the first stage alone");
-                        }
-                    }
-                }
-                // Only hair and cloaks are two-sided on the stock models. The
-                // rest - a trouser leg's knee flare among them - show their
-                // inside through any gap, and lit with the normal turned round
-                // that inside is a dark wedge where the client draws nothing.
-                matData.twoSided = (materialFlags & 0x04) ? 1 : 0;
-                matData.specularIntensity = 0.5f;
-                matData.enableNormalMap = (useAdvancedMaterials && recording_->normalMapping) ? 1 : 0;
-                // Character textures are layered/mirrored atlases, not coherent
-                // height fields. Parallax offsets cross face seams and reveal
-                // underlying armor through tabards, so keep POM out of the
-                // character path even when it is enabled for the world. The
-                // scale and sample count stay zero: nothing reads them.
-                matData.enablePOM = 0;
-                matData.heightMapVariance = useAdvancedMaterials ? batchHeightVariance : 0.0f;
-                matData.normalMapStrength = recording_->normalStrength;
-                matData.hairMaterial = hairMaterial ? 1 : 0;
-
-                // The base humanoid mesh samples a mirrored character atlas,
-                // with the face sitting directly beside a UV seam. Parallax
-                // displacement moves each mirrored half in opposite screen
-                // directions, producing crossed eyes and a center-squashed
-                // mouth at oblique angles. Keep normal lighting, but never
-                // displace UVs on group 0 body/head surfaces - nor on the
-                // no-cloak panel, which is a patch of the same torso.
-                if (batchGroup == 0 || batch.submeshId == core::kGeosetNoCape) {
-                    normalMap = flatNormalTexture_.get();
-                    matData.specularIntensity = 0.20f;
-                    matData.enableNormalMap = 0;
-                    matData.enablePOM = 0;
-                    matData.heightMapVariance = 0.0f;
-                }
-
-                // Tabards are a thin cloth layer over the torso. Reusing the
-                // body composite's generated height/normal response makes the
-                // armor underneath appear embossed and reflective through the
-                // cloth as the camera moves. Keep the diffuse tabard artwork,
-                // but give group 12 a flat, low-specular cloth material.
-                // A cloak is cloth too, and its relief derived from the artwork
-                // read as hammered metal: ridges along every painted fold, each
-                // with a highlight. Mostly out of sight while the outer faces were lit with
-                // their normals turned round, and the first thing seen once not.
-                if (batchGroup == 12 || batchGroup == 15) {
-                    normalMap = flatNormalTexture_.get();
-                    matData.specularIntensity = 0.08f;
-                    matData.enableNormalMap = 0;
-                    matData.enablePOM = 0;
-                    matData.heightMapVariance = 0.0f;
-                }
-                // The tangent frame follows UV0. A batch sampling UV1 or the
-                // sphere map would have its relief turned the wrong way.
-                if (matData.texCoordSet != 0) {
-                    normalMap = flatNormalTexture_.get();
-                    matData.enableNormalMap = 0;
-                    matData.heightMapVariance = 0.0f;
-                }
-                if (usePreviewSimpleShader) {
-                    matData.enableNormalMap = 0;
-                    matData.enablePOM = kPreviewSimpleTextureMode;
-                    matData.heightMapVariance = 0.0f;
-                }
-
-                // WOWEE_SCENE_DIAG=1 dumps what each backdrop batch is actually told to
-                // draw - texture, blend mode, shader path - once per scene model.
-                static int sceneDiagLines = 0;
-                if (instance.isSceneModel && sceneDiagEnabled() && sceneDiagLines++ < 40) {
-                    std::string texName = "<white>";
-                    if (batch.textureIndex < gpuModel.data->textureLookup.size()) {
-                        uint16_t lk = gpuModel.data->textureLookup[batch.textureIndex];
-                        if (lk < gpuModel.data->textures.size())
-                            texName = gpuModel.data->textures[lk].filename;
-                    }
-                    // Warning level: the diagnostic is opt-in already, and the file log
-                    // filters info out by default.
-                    core::Logger::getInstance().warning(
-                        "SCENE DIAG batch submesh=", batch.submeshId,
-                        " blend=", blendMode, " matFlags=0x", std::hex, materialFlags, std::dec,
-                        " alphaTest=", matData.alphaTest,
-                        " unlit=", matData.unlit,
-                        " simplePath=", (matData.enablePOM == kPreviewSimpleTextureMode ? 1 : 0),
-                        " whiteFallback=", (texPtr == whiteTexture_.get() ? 1 : 0),
-                        " tex=", texName);
-                }
-
-                // Sub-allocate material UBO from ring buffer
-                uint32_t matOffset = materialRingOffset_[frameSlot];
-                if (matOffset + uboStride > ringCapacityBytes) continue; // ring exhausted
-                memcpy(static_cast<char*>(materialRingMapped_[frameSlot]) + matOffset, &matData, sizeof(CharMaterialUBO));
-                materialRingOffset_[frameSlot] = matOffset + uboStride;
-
-                VkTexture* bindTex = (texPtr && texPtr->isValid()) ? texPtr : whiteTexture_.get();
-                VkDescriptorSet materialSet = getMaterialDescriptorSet(bindTex, wrapFlags, normalMap,
-                                                                       secondTex, secondWrapFlags);
-                if (!materialSet) continue;
-
-                // Bind material descriptor set (set 1)
-                const uint32_t dynamicOffset = matOffset;
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                        pipelineLayout_, 1, 1, &materialSet, 1, &dynamicOffset);
-
-                // Per-batch depth bias from materialLayer to separate coplanar
-                // armor pieces (chest/legs/gloves) that share identical depth.
-                vkCmdSetDepthBias(cmd, static_cast<float>(batch.materialLayer) * 0.5f, 0.0f, 0.0f);
-
-                vkCmdDrawIndexed(cmd, batch.indexCount, 1, gpuModel.geometry.firstIndex + batch.indexStart,
-                                 gpuModel.geometry.baseVertex, 0);
-                ++draws;
-            }
-            } // end pass loop
-            } // end stage loop
-        }
-    }
+    draws.cull.camera = glm::vec4(camera.getPosition(), renderRadius * renderRadius);
+    return frame;
 }
 
 bool CharacterRenderer::initializeShadow(VkRenderPass shadowRenderPass) {
     if (!vkCtx_ || shadowRenderPass == VK_NULL_HANDLE) return false;
     VkDevice device = vkCtx_->getDevice();
 
-    // ShadowCharParams UBO (matches character_shadow.frag.glsl set=1 binding=1)
-    struct ShadowCharParams {
-        int32_t alphaTest = 0;
-    };
-
-    // The same set the other three shadow passes bind - a sampler and a small
-    // uniform buffer - with this pass's own params behind binding 1.
-    if (!createShadowParamsSet(device, vkCtx_->getAllocator(), sizeof(ShadowCharParams),
-                               whiteTexture_->getImageView(), whiteTexture_->getSampler(),
-                               "CharacterRenderer", shadowParams_)) {
-        return false;
-    }
-
-    // Alpha testing on, once, because it never varies here.
-    //
-    // The buffer is zero-filled at creation and was then never written, so the
-    // flag read 0 and every caster stamped its bounding rectangle into the
-    // shadow map - hair, capes and cloaks cast solid slabs instead of their own
-    // outline. With it on, an opaque batch is bound to the white fallback whose
-    // alpha is 1 and passes the cutoff untouched, while an alpha-keyed batch is
-    // bound to its own texture below and cuts properly.
-    {
-        VmaAllocationInfo paramsInfo{};
-        vmaGetAllocationInfo(vkCtx_->getAllocator(), shadowParams_.alloc, &paramsInfo);
-        if (paramsInfo.pMappedData) {
-            ShadowCharParams p{};
-            p.alphaTest = 1;
-            std::memcpy(paramsInfo.pMappedData, &p, sizeof(p));
-        }
-    }
-
-    // One texture-set pool per frame in flight, reset at the top of each
-    // frame's shadow pass.
-    {
-        VkDescriptorPoolSize texPoolSizes[2]{};
-        texPoolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        texPoolSizes[0].descriptorCount = 256;
-        texPoolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        texPoolSizes[1].descriptorCount = 256;
-        VkDescriptorPoolCreateInfo texPoolCI{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-        texPoolCI.maxSets = 256;
-        texPoolCI.poolSizeCount = 2;
-        texPoolCI.pPoolSizes = texPoolSizes;
-        for (uint32_t f = 0; f < kShadowTexPoolFrames; ++f) {
-            if (vkCreateDescriptorPool(device, &texPoolCI, nullptr, &shadowTexPool_[f]) != VK_SUCCESS) {
-                LOG_ERROR("CharacterRenderer: failed to create shadow texture pool ", f);
-                return false;
-            }
-        }
-    }
-
-    // Pipeline layout: set 0 = shadowParams_.layout, set 1 = the skeleton pass's bones
-    //
-    // There used to be a third, perFrameLayout_, sitting at set 0 as a dummy
-    // that nothing ever bound, which pushed the params to set 1 and the bones to
-    // set 2. That made this the odd one out of the four passes sharing the
-    // shadow render pass: terrain, WMO and M2 all bind their params at set 0
-    // under a layout of their own. Binding set 1 while set 0 still carried
-    // another pass's incompatible layout left the params disturbed rather than
-    // bound, and the fragment shader read its alpha-test flags from nothing -
-    // thousands of times a session, which GPU-assisted validation reports as
-    // indexing a descriptor array of length zero. A set that is never bound has
-    // no business being in the layout.
-    // Push constant: 128 bytes (lightSpaceMatrix + model), VERTEX stage
-    VkDescriptorSetLayout setLayouts[] = {shadowParams_.layout, skeletonPass_.drawSetLayout()};
-    VkPushConstantRange pc{};
-    pc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-    pc.offset = 0;
-    pc.size = sizeof(ShadowPush);  // one combined matrix and the flags
-    VkPipelineLayoutCreateInfo plCI{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    plCI.setLayoutCount = 2;
-    plCI.pSetLayouts = setLayouts;
-    plCI.pushConstantRangeCount = 1;
-    plCI.pPushConstantRanges = &pc;
-    if (vkCreatePipelineLayout(device, &plCI, nullptr, &shadowPipelineLayout_) != VK_SUCCESS) {
+    // Set 0: the texture table the records name alpha-keyed textures in.
+    // Set 1: the frame's bones. Set 2: the frame slot's caster records and
+    // instances (character_shadow.vert).
+    const VkPushConstantRange pc{.stageFlags = VK_SHADER_STAGE_VERTEX_BIT, .offset = 0, .size = sizeof(CharShadowPush)};
+    shadowPipelineLayout_ = createPipelineLayout(
+        device, {vkCtx_->textureTable().layout(), skeletonPass_.drawSetLayout(), drawPass_.casterSetLayout()}, {pc});
+    if (!shadowPipelineLayout_) {
         LOG_ERROR("CharacterRenderer: failed to create shadow pipeline layout");
         return false;
     }
 
-    // Load character shadow shaders
     VkShaderModule vertShader, fragShader;
     if (!vertShader.loadFromFile(device, "assets/shaders/character_shadow.vert.spv")) {
         LOG_ERROR("CharacterRenderer: failed to load character_shadow.vert.spv");
@@ -3228,156 +2931,39 @@ bool CharacterRenderer::initializeShadow(VkRenderPass shadowRenderPass) {
     return true;
 }
 
-void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
-                                     const glm::vec3& shadowCenter, float shadowRadius, bool resetDescriptors) {
-    if (!shadowPipeline_ || !shadowParams_.set) return;
-    if (recording_->depth.empty()) return;
-
-    uint32_t frameIndex = vkCtx_->getCurrentFrame();
-    if (frameIndex >= 2) return;
-
-    // This frame slot's fence was waited on in beginFrame, so last time's sets
-    // are finished with and the pool can be handed back whole.
-    if (resetDescriptors && frameIndex < kShadowTexPoolFrames && shadowTexPool_[frameIndex]) {
-        vkCtx_->resetDescriptorPool(shadowTexPool_[frameIndex]);
-    }
-    if (resetDescriptors) shadowTexSetCache_.clear();
-
-    std::vector<DrawCharacter> list;
-    for (const auto& draw : recording_->depth) {
-        const glm::vec3 diff = glm::vec3(draw.modelMatrix[3]) - shadowCenter;
-        if (glm::dot(diff, diff) <= shadowRadius * shadowRadius) list.push_back(draw);
-    }
-    recordShadowCasters(cmd, lightSpaceMatrix, list);
+std::optional<uint32_t> CharacterRenderer::cullShadowMap(VkCommandBuffer cmd, const glm::vec3& centre, float radius) {
+    if (!shadowPipeline_) return std::nullopt;
+    const uint32_t frameIndex = vkCtx_->getCurrentFrame();
+    if (frameIndex >= 2 || !posed_[frameIndex]) return std::nullopt;
+    return drawPass_.cullShadowMap(cmd, frameIndex, centre, radius);
 }
 
-void CharacterRenderer::recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
-                                            const std::vector<DrawCharacter>& list) {
-    if (list.empty()) return;
+void CharacterRenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, uint32_t map) {
+    if (!shadowPipeline_ || !recording_) return;
     const uint32_t frameIndex = vkCtx_->getCurrentFrame();
+    if (frameIndex >= 2 || !drawPass_.ready(frameIndex)) return;
+    const VkDescriptorSet boneSet = skeletonPass_.drawSet(frameIndex);
+    if (!boneSet || !posed_[frameIndex] || recording_->skeleton.requests.empty()) return;
+    const CharDrawFrame& draws = recording_->draws;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
-
-    // Which set is bound at 0 right now, so a run of opaque batches does not
-    // rebind the same fallback for each one.
-    VkDescriptorSet currentTexSet = VK_NULL_HANDLE;
-    for (const DrawCharacter& inst : list) {
-        const M2ModelGPU& gpuModel = *inst.model;
-
-        // Params at set 1 and bones at set 2, together, per instance.
-        //
-        // Binding set 1 once before the loop was not enough. This pass runs
-        // after the M2 shadow pass, which binds its own set at set 0 under a
-        // different pipeline layout, and a descriptor set bound while a lower
-        // set carries an incompatible layout is disturbed rather than kept. The
-        // fragment shader then read set 1 binding 1 - its alpha-test flags -
-        // from a set the GPU no longer considered bound, which GPU-assisted
-        // validation reports as indexing a descriptor array of length zero,
-        // thousands of times a session.
-        const VkDescriptorSet boneSet = skeletonPass_.drawSet(frameIndex);
-        if (!boneSet || !posed_[frameIndex] || recording_->skeleton.requests.empty()) return;
-        VkDescriptorSet sets[2] = {shadowParams_.set, boneSet};
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
-            0, 2, sets, 0, nullptr);
-        currentTexSet = shadowParams_.set;
-
-        // The map's matrix; the model is the one the GPU posed it at.
-        const CharacterShadowPush push{.lightSpace = lightSpaceMatrix,
-                                       .pose = glm::uvec4(inst.pose, inst.boneBase, inst.boneCount, 0u)};
-        vkCmdPushConstants(cmd, shadowPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
-                           0, sizeof(CharacterShadowPush), &push);
-
-        geometry_.bind(cmd, gpuModel.geometry);
-
-        const CharacterDress& dress = *inst.dress;
-        bool applyGeosetFilter = !dress.activeGeosets.empty();
-        for (const auto& batch : gpuModel.data->batches) {
-            uint16_t blendMode = 0;
-            if (batch.materialIndex < gpuModel.data->materials.size()) {
-                blendMode = gpuModel.data->materials[batch.materialIndex].blendMode;
-            }
-            if (blendMode >= 2) continue; // skip transparent
-            if (!characterBatchShading(*gpuModel.data, batch, blendMode).drawn) continue;  // shader 0x8000
-            if (applyGeosetFilter &&
-                dress.activeGeosets.find(batch.submeshId) == dress.activeGeosets.end()) continue;
-            if (!applyGeosetFilter) {
-                uint16_t grp = batch.submeshId / 100;
-                if (grp == 17 || grp == 18) continue;
-            }
-
-            // An alpha-keyed batch casts the shape of its texture; everything
-            // else keeps the white fallback and casts solid. Only the set at
-            // binding 0 changes, so the bones stay bound from above.
-            VkDescriptorSet texSet = shadowParams_.set;
-            if (blendMode == 1) {
-                const TextureRef& tex = *resolveBatchTexture(dress, gpuModel, batch).texture;
-                if (tex && tex != whiteTexture_) {
-                    texSet = shadowTexDescSet(tex.get(), frameIndex);
-                }
-            }
-            if (texSet != currentTexSet) {
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
-                                        0, 1, &texSet, 0, nullptr);
-                currentTexSet = texSet;
-            }
-
-            vkCmdDrawIndexed(cmd, batch.indexCount, 1, gpuModel.geometry.firstIndex + batch.indexStart,
-                             gpuModel.geometry.baseVertex, 0);
+    const VkDescriptorSet sets[3] = {vkCtx_->textureTable().set(), boneSet, drawPass_.casterSet(frameIndex)};
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_, 0, 3, sets, 0, nullptr);
+    const uint32_t mapBase = draws.colourPlaces + map * draws.casterPlaces;
+    for (const CharBucket& bucket : draws.casters) {
+        const auto page = static_cast<size_t>(bucket.key.page);
+        if (page >= draws.pages.size() || !draws.pages[page].vertices) continue;
+        geometry_.bind(cmd, GeometryPool::Range{.page = bucket.key.page, .vertices = draws.pages[page].vertices,
+                                                .indices = draws.pages[page].indices});
+        for (uint32_t first = 0; first < bucket.size; first += maxDrawsPerCall_) {
+            const CharShadowPush push{.lightSpace = lightSpaceMatrix,
+                                      .call = glm::uvec4(bucket.start + first, 0u, 0u, 0u)};
+            vkCmdPushConstants(cmd, shadowPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
+            vkCmdDrawIndexedIndirect(cmd, drawPass_.commands(frameIndex),
+                                     VkDeviceSize(mapBase + push.call.x) * sizeof(VkDrawIndexedIndirectCommand),
+                                     std::min(maxDrawsPerCall_, bucket.size - first),
+                                     sizeof(VkDrawIndexedIndirectCommand));
         }
     }
-}
-
-VkDescriptorSet CharacterRenderer::shadowTexDescSet(VkTexture* tex, uint32_t frameIndex) {
-    // Valid, not merely non-null, for the reason in getMaterialDescriptorSet:
-    // a texture whose upload or view creation failed writes a null view and
-    // sampler into a live descriptor. The alpha-tested shadow pass samples it,
-    // which is undefined behaviour and reaches NVIDIA as a lost device.
-    //
-    // Also worth the check for the cache below, which is keyed on the view: a
-    // null one would key every failed texture to the same set.
-    if (!tex || !tex->isValid()) return shadowParams_.set;
-    if (frameIndex >= kShadowTexPoolFrames) return shadowParams_.set;
-    VkDescriptorPool pool = shadowTexPool_[frameIndex];
-    if (!pool) return shadowParams_.set;
-
-    VkImageView view = tex->getImageView();
-    if (auto it = shadowTexSetCache_.find(view); it != shadowTexSetCache_.end()) return it->second;
-
-    VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    ai.descriptorPool = pool;
-    ai.descriptorSetCount = 1;
-    ai.pSetLayouts = &shadowParams_.layout;
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    if (vkCtx_->allocateDescriptorSets(ai, &set) != VK_SUCCESS) {
-        // Out of sets for this frame: the white fallback casts a full shadow,
-        // which is the old behaviour rather than a hole.
-        return shadowParams_.set;
-    }
-
-    VkDescriptorImageInfo imgInfo{};
-    imgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    imgInfo.imageView = view;
-    imgInfo.sampler = tex->getSampler();
-    VkDescriptorBufferInfo bufInfo{};
-    bufInfo.buffer = shadowParams_.ubo;
-    bufInfo.offset = 0;
-    bufInfo.range = VK_WHOLE_SIZE;
-    VkWriteDescriptorSet writes[2]{};
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = set;
-    writes[0].dstBinding = 0;
-    writes[0].descriptorCount = 1;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[0].pImageInfo = &imgInfo;
-    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = set;
-    writes[1].dstBinding = 1;
-    writes[1].descriptorCount = 1;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    writes[1].pBufferInfo = &bufInfo;
-    vkUpdateDescriptorSets(vkCtx_->getDevice(), 2, writes, 0, nullptr);
-
-    shadowTexSetCache_[view] = set;
-    return set;
 }
 
 void CharacterRenderer::gatherLocalLights(const Camera& camera, std::vector<LocalLight>& out) const {
@@ -3747,6 +3333,8 @@ void CharacterRenderer::removeInstance(uint32_t instanceId) {
     // reference these descriptor sets.
 
     scene_->instances.erase(it);
+    layout_.remove(instanceId);
+    listsBuilt_.erase(instanceId);
 }
 
 bool CharacterRenderer::getAnimationState(uint32_t instanceId, uint32_t& animationId,

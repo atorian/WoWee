@@ -843,7 +843,7 @@ void M2Renderer::shutdown() {
     // descriptor pools are still alive.
     vkCtx_->flushDeferredCleanup();
     // Every model's rows came back with it; the next scene's are given anew.
-    materialRows_ = MaterialRows{};
+    materialRows_.reset();
 
     // The models gave their textures back with them; the fallbacks go too.
     failedTextureRetryAt_.clear();
@@ -977,37 +977,8 @@ TextureHandle M2Renderer::batchTextureHandle(const VkTexture* texture, TextureHa
     return vkCtx_->textureTable().withSampler(image, sampler);
 }
 
-uint32_t M2Renderer::placeMaterialRow() {
-    MaterialRows& rows = materialRows_;
-    {
-        std::lock_guard lock(rows.returned->mutex);
-        rows.free.insert(rows.free.end(), rows.returned->rows.begin(), rows.returned->rows.end());
-        rows.returned->rows.clear();
-    }
-    if (!rows.free.empty()) {
-        const uint32_t row = rows.free.back();
-        rows.free.pop_back();
-        return row;
-    }
-    rows.data.emplace_back();
-    rows.pendingSerial.push_back(0);
-    return static_cast<uint32_t>(rows.data.size() - 1);
-}
-
-void M2Renderer::writeMaterialRow(uint32_t row, const M2MaterialGPU& material) {
-    MaterialRows& rows = materialRows_;
-    rows.data[row] = material;
-    if (rows.pendingSerial[row] == 0) rows.pending.push_back(row);
-    // Carried by the next extracted frame, whatever an earlier one carried.
-    rows.pendingSerial[row] = kMaterialRowUncarried;
-}
-
 void M2Renderer::releaseMaterialRow(uint32_t row) {
-    if (row == kNoMaterialRow || !vkCtx_) return;
-    vkCtx_->deferAfterAllFrameFences([returned = materialRows_.returned, row] {
-        std::lock_guard lock(returned->mutex);
-        returned->rows.push_back(row);
-    });
+    if (vkCtx_) materialRows_.release(*vkCtx_, row);
 }
 
 void M2Renderer::applyBatchTextureProps(M2ModelGPU::BatchGPU& batch, const TextureInfo& texture) const {
@@ -1141,8 +1112,8 @@ void M2Renderer::writeBatchMaterial(const M2ModelGPU& model, M2ModelGPU::BatchGP
     mat.swayRefHeight = sway.refHeight;
     mat.swayAmp = sway.amp;
     mat.plantHeight = sway.plantHeight;
-    if (batch.materialRow == kNoMaterialRow) batch.materialRow = placeMaterialRow();
-    writeMaterialRow(batch.materialRow, mat);
+    if (batch.materialRow == kNoMaterialRow) batch.materialRow = materialRows_.place();
+    materialRows_.write(batch.materialRow, mat);
 }
 
 void M2Renderer::markModelAsSpellEffect(uint32_t modelId) {
@@ -2083,7 +2054,7 @@ bool M2Renderer::loadModel(const pipeline::M2Model& model, uint32_t modelId) {  
         writeBatchMaterial(gpuModel, bgpu);
         if (bgpu.materialRow == kNoMaterialRow) continue;
         {
-            const M2MaterialGPU& mat = materialRows_.data[bgpu.materialRow];
+            const M2MaterialGPU& mat = materialRows_.at(bgpu.materialRow);
 
             // What the sky model's layers are actually being given, once each.
             //

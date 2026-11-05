@@ -46,6 +46,14 @@ public:
     /// that runs after it in the queue reads them. False, logged, when there
     /// was no memory for the staging: nothing is written.
     bool write(VkCommandBuffer cmd, uint32_t frameIndex, std::span<const uint32_t> slots, const void* rows);
+    /// reserve() for `slots` rows and write() of the rows a frame carries:
+    /// true when the table has room and holds them, or there are none.
+    bool update(VkCommandBuffer cmd, uint32_t frameIndex, uint32_t slots, std::span<const uint32_t> changed,
+                const void* rows) {
+        if (slots == 0) return true;
+        if (!reserve(cmd, slots)) return false;
+        return changed.empty() || write(cmd, frameIndex, changed, rows);
+    }
     /// Every row zero, after every earlier read and before every later one.
     void clear(VkCommandBuffer cmd);
 

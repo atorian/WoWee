@@ -45,7 +45,13 @@ public:
                         const std::vector<CreatureSpawn>& npcs = {});
 
     void update(float deltaTime);
+    /// Before the frame's render pass: the frame's models extracted, and what
+    /// their draws read uploaded - the M2 tables, skeletons and view draws,
+    /// the WMO material rows.
+    void prepare(VkCommandBuffer cmd);
     void render(VkCommandBuffer cmd);
+    /// The frame prepare() recorded for is submitted.
+    void frameSubmitted();
 
     // Ghost preview for placement
     void setGhostPreview(const std::string& path, const glm::vec3& pos,

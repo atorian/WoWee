@@ -1636,10 +1636,10 @@ FrameInputs Renderer::extractFrameInputs() {
     extraction.lap("terrain");
     if (wmoRenderer) {
         wmoRenderer->setViewDistance(in.viewDistance);
-        scene->buildings = wmoRenderer->extract(in.camera, in.characterPosition, in.localLights, mirror);
+        scene->buildings = wmoRenderer->extract(in.camera, in.characterPosition, mirror);
     }
     extraction.lap("WMO");
-    if (characterRenderer) scene->characters = characterRenderer->extract(in.camera, in.localLights);
+    if (characterRenderer) scene->characters = characterRenderer->extract(in.camera);
     extraction.lap("characters");
     if (m2Renderer) {
         m2Renderer->setViewDistance(in.viewDistance);
@@ -2201,6 +2201,8 @@ void Renderer::endFrame() {
     if (m2Renderer) m2Renderer->frameSubmitted();
     if (skyboxModelRenderer_) skyboxModelRenderer_->frameSubmitted();
     if (terrainRenderer) terrainRenderer->frameSubmitted();
+    if (wmoRenderer) wmoRenderer->frameSubmitted();
+    if (characterRenderer) characterRenderer->frameSubmitted();
     vkCtx->cpuStages().add("Render", "endFrame", std::chrono::duration<float, std::milli>(
         std::chrono::steady_clock::now() - recordingStart).count());
     publishFrameResults();
@@ -2998,17 +3000,13 @@ void Renderer::renderWorld() {  // NOLINT(readability-function-size)
     if (parallelRecordingEnabled_) {
         // --- Pre-compute state + GPU allocations on main thread (not thread-safe) ---
         auto prepStart = std::chrono::steady_clock::now();
-        if (wmoRenderer) wmoRenderer->prepareRender();
-        auto prepWmoEnd = std::chrono::steady_clock::now();
         if (m2Renderer && frameCamera()) m2Renderer->prepareRender(frameIdx, *frameCamera());
         if (drawSkyModels && frameCamera())
             skyboxModelRenderer_->prepareRender(frameIdx, *frameCamera());
         // The characters' bones went up in beginFrame, before the shadow maps.
         auto prepM2End = std::chrono::steady_clock::now();
-        const double prepWmoMs  = std::chrono::duration<double, std::milli>(prepWmoEnd - prepStart).count();
-        const double prepM2Ms   = std::chrono::duration<double, std::milli>(prepM2End - prepWmoEnd).count();
+        const double prepM2Ms   = std::chrono::duration<double, std::milli>(prepM2End - prepStart).count();
         CpuStageTimes& stages = vkCtx->cpuStages();
-        stages.add("renderWorld", "prepare WMO", static_cast<float>(prepWmoMs));
         stages.add("renderWorld", "prepare M2", static_cast<float>(prepM2Ms));
         // From here to the wait the main thread hands work out and records its
         // own share; then it waits for the slowest worker.
@@ -3050,8 +3048,7 @@ void Renderer::renderWorld() {  // NOLINT(readability-function-size)
                 auto t0 = std::chrono::steady_clock::now();
                 VkCommandBuffer cmd = beginSecondary(SEC_WMO);
                 setSecondaryViewportScissor(cmd);
-                wmoRenderer->render(cmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition,
-                                    WMORenderer::Pass::View, WMORenderer::Layer::Opaque);
+                wmoRenderer->render(cmd, perFrameSet, WMORenderer::Pass::View, WMORenderer::Layer::Opaque);
                 vkEndCommandBuffer(cmd);
                 return std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
@@ -3124,8 +3121,7 @@ void Renderer::renderWorld() {  // NOLINT(readability-function-size)
             // The buildings' blended batches, over the sky that shows through
             // them; their opaque batches went ahead of it in SEC_WMO.
             if (wmoRenderer && frameCamera() && !skipWMO) {
-                wmoRenderer->render(cmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition,
-                                    WMORenderer::Pass::View, WMORenderer::Layer::Blended);
+                wmoRenderer->render(cmd, perFrameSet, WMORenderer::Pass::View, WMORenderer::Layer::Blended);
             }
             vkEndCommandBuffer(cmd);
         }
@@ -3217,7 +3213,7 @@ void Renderer::renderWorld() {  // NOLINT(readability-function-size)
         // prepareRender() does the GPU allocations that are not thread-safe, so it runs
         // on the main thread and is not covered by the worker timings. Name the culprit
         // when a frame runs long instead of leaving renderWorld as one opaque number.
-        const double prepTotalMs = prepWmoMs + prepM2Ms;
+        const double prepTotalMs = prepM2Ms;
         const double worstWorkerMs = std::max({lastTerrainRenderMs, lastWMORenderMs, lastM2RenderMs});
 
         // The same breakdown on a timer, not only when a frame runs long.
@@ -3234,7 +3230,7 @@ void Renderer::renderWorld() {  // NOLINT(readability-function-size)
             if (sayNow - lastSaid > std::chrono::seconds(10)) {
                 lastSaid = sayNow;
                 LOG_WARNING("  renderWorld: prepare ", prepTotalMs,
-                            "ms (wmo ", prepWmoMs, " m2 ", prepM2Ms, "), workers terrain ",
+                            "ms (m2 ", prepM2Ms, "), workers terrain ",
                             lastTerrainRenderMs, " wmo ", lastWMORenderMs,
                             " m2 ", lastM2RenderMs, " (worst ", worstWorkerMs,
                             "), terrain chunks drawn ",
@@ -3256,7 +3252,7 @@ void Renderer::renderWorld() {  // NOLINT(readability-function-size)
 
         if (prepTotalMs + worstWorkerMs > 40.0) {
             LOG_WARNING("SLOW renderWorld breakdown: prepare=", prepTotalMs,
-                        "ms (wmo=", prepWmoMs, " m2=", prepM2Ms,
+                        "ms (m2=", prepM2Ms,
                         ") workers: terrain=", lastTerrainRenderMs,
                         " wmo=", lastWMORenderMs, " m2=", lastM2RenderMs,
                         // Terrain is usually the critical path here, and its cost
@@ -3331,12 +3327,10 @@ void Renderer::renderWorld() {  // NOLINT(readability-function-size)
         // buildings' blended batches, for the reasons given on the parallel
         // path.
         if (wmoRenderer && frameCamera() && !skipWMO) {
-            wmoRenderer->prepareRender();
             auto wmoStart = std::chrono::steady_clock::now();
             {
                 GpuPass pass(*vkCtx, currentCmd, "wmo");
-                wmoRenderer->render(currentCmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition,
-                                    WMORenderer::Pass::View, WMORenderer::Layer::Opaque);
+                wmoRenderer->render(currentCmd, perFrameSet, WMORenderer::Pass::View, WMORenderer::Layer::Opaque);
             }
             lastWMORenderMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - wmoStart).count();
@@ -3376,8 +3370,7 @@ void Renderer::renderWorld() {  // NOLINT(readability-function-size)
         }
 
         if (wmoRenderer && frameCamera() && !skipWMO) {
-            wmoRenderer->render(currentCmd, perFrameSet, *frameCamera(), &frameInputs_.characterPosition,
-                                WMORenderer::Pass::View, WMORenderer::Layer::Blended);
+            wmoRenderer->render(currentCmd, perFrameSet, WMORenderer::Pass::View, WMORenderer::Layer::Blended);
         }
 
         if (overlaySystem_) {
@@ -4614,7 +4607,7 @@ void Renderer::renderReflectionPass() {
             terrainRenderer->recordReflection(currentCmd, reflDescSet, frameInputs_.scene->terrain);
         }
         if (wmoRenderer) {
-            wmoRenderer->render(currentCmd, reflDescSet, *frameCamera(), nullptr, WMORenderer::Pass::Reflection);
+            wmoRenderer->render(currentCmd, reflDescSet, WMORenderer::Pass::Reflection);
         }
     }
 
@@ -4665,6 +4658,25 @@ void Renderer::renderShadowMap(ShadowView view) {
     const VkFramebuffer passFramebuffer = strike ? lightningShadowFramebuffer_[frame] : contact ? contactShadowFramebuffer_[frame] : shadowFramebuffer[frame];
     auto& passLayout = strike ? lightningShadowLayout_[frame] : contact ? contactShadowLayout_[frame] : shadowDepthLayout_[frame];
     const glm::vec3 passCenter = strike ? frameInputs_.scene->lightning.ground : contact ? frameInputs_.characterPosition : shadowCenter;
+    // The units' map takes whatever reaches into its square: out to its
+    // corners, and a few yards past them for a caster standing outside whose
+    // body leans in.
+    const float shadowCullRadius = strike ? 550.0f : contact ? CONTACT_MAP_HALF_EXTENT * 1.415f + 8.0f
+                                           : frameInputs_.shadowDistance * 1.35f;
+    // The buildings that cast into it, culled on the GPU before the pass
+    // begins; not into the units' map.
+    std::optional<uint32_t> wmoMap;
+    if (drawCasters && wmoRenderer && !contact) {
+        CpuStage stage(vkCtx->cpuStages(), "beginFrame/graph/shadow_pass", strike ? "lightning: wmo cull" : "sun: wmo cull");
+        wmoMap = wmoRenderer->cullShadowMap(currentCmd, passCenter, shadowCullRadius);
+    }
+    // And the characters, into every map.
+    std::optional<uint32_t> characterMap;
+    if (drawCasters && characterRenderer) {
+        CpuStage stage(vkCtx->cpuStages(), "beginFrame/graph/shadow_pass",
+                       strike ? "lightning: characters cull" : contact ? "units: characters cull" : "sun: characters cull");
+        characterMap = characterRenderer->cullShadowMap(currentCmd, passCenter, shadowCullRadius);
+    }
 
     // Barrier 1: transition this frame's shadow map into writable depth layout.
     VkImageMemoryBarrier2 b1{};
@@ -4746,21 +4758,15 @@ void Renderer::renderShadowMap(ShadowView view) {
     vkCmdSetScissor(currentCmd, 0, 1, &sc);
 
     // Phase 7/8: render shadow casters
-    // The units' map takes whatever reaches into its square: out to its
-    // corners, and a few yards past them for a caster standing outside whose
-    // body leans in.
-    const float shadowCullRadius = strike ? 550.0f : contact ? CONTACT_MAP_HALF_EXTENT * 1.415f + 8.0f
-                                           : frameInputs_.shadowDistance * 1.35f;
     if (drawCasters) {
     constexpr std::string_view kStageGroup = "beginFrame/graph/shadow_pass";
     if (terrainRenderer && !contact) {
         CpuStage stage(vkCtx->cpuStages(), kStageGroup, "sun: terrain");
         terrainRenderer->recordDepth(currentCmd, passMatrix, passCenter, shadowCullRadius, frameInputs_.scene->terrain);
     }
-    if (wmoRenderer && !contact) {
+    if (wmoMap) {
         CpuStage stage(vkCtx->cpuStages(), kStageGroup, strike ? "lightning: wmo" : "sun: wmo");
-        wmoRenderer->renderShadow(currentCmd, passMatrix, passCenter, shadowCullRadius, !wmoCasterSetsReset_);
-        wmoCasterSetsReset_ = true;
+        wmoRenderer->renderShadow(currentCmd, passMatrix, *wmoMap);
     }
     if (m2Renderer) {
         CpuStage stage(vkCtx->cpuStages(), kStageGroup, strike ? "lightning: m2" : contact ? "units: m2" : "sun: m2");
@@ -4768,10 +4774,9 @@ void Renderer::renderShadowMap(ShadowView view) {
                                  !m2CasterSetsReset_, /*reuseCull=*/!contact && !strike);
         m2CasterSetsReset_ = true;
     }
-    if (characterRenderer) {
+    if (characterMap) {
         CpuStage stage(vkCtx->cpuStages(), kStageGroup, strike ? "lightning: characters" : contact ? "units: characters" : "sun: characters");
-        characterRenderer->renderShadow(currentCmd, passMatrix, passCenter, shadowCullRadius, !characterCasterSetsReset_);
-        characterCasterSetsReset_ = true;
+        characterRenderer->renderShadow(currentCmd, passMatrix, *characterMap);
     }
     }  // drawCasters
 
@@ -4838,6 +4843,21 @@ void Renderer::recordModelCompute(CpuStageTimes& stages) {
         GpuPass pass(*vkCtx, currentCmd, "M2 skeletons and particles");
         m2Renderer->poseSkeletons(currentCmd, frame,
                                   characterRenderer ? characterRenderer->posedBones(frame) : PosedBones{});
+    }
+    // The buildings' rows and the cull of their colour lists, before any
+    // pass draws a building; each drawn group's lights from the frame's,
+    // uploaded at the top of beginFrame.
+    if (wmoRenderer) {
+        CpuStage stage(stages, "beginFrame", "WMO cull");
+        wmoRenderer->prepareDraws(currentCmd, frame, localLightBuffers_[frame].buffer,
+                                  static_cast<uint32_t>(currentFrameData.localLightMeta.x));
+    }
+    // The characters' rows and the cull of their colour lists, after their
+    // skeletons were posed and before the shadow maps draw them.
+    if (characterRenderer) {
+        CpuStage stage(stages, "beginFrame", "character cull");
+        characterRenderer->prepareDraws(currentCmd, frame, localLightBuffers_[frame].buffer,
+                                        static_cast<uint32_t>(currentFrameData.localLightMeta.x));
     }
     // Their view draws, written on the GPU from the frame's groups.
     if (m2Renderer) {
@@ -4982,17 +5002,17 @@ void Renderer::renderSeaBedPass() {
     const glm::vec3 centre(frame.centre, frame.ceiling);
     const float reach = SeaBedMap::kHalfExtent * 1.415f;
     // The ground, and the buildings from above and from below: what the
-    // water stands on and against. Not the doodads (SeaBedMap).
+    // water stands on and against. Not the doodads (SeaBedMap). The two
+    // views of the buildings draw the casters of one cull.
+    const std::optional<uint32_t> wmoMap =
+        wmoRenderer ? wmoRenderer->cullShadowMap(currentCmd, centre, reach) : std::nullopt;
     const auto drawView = [&](SeaBedView view) {
         const glm::mat4 matrix = seaBed_->viewMatrix(view);
         seaBed_->beginView(currentCmd, view);
         if (view == SeaBedView::GroundFromAbove) {
             if (terrainRenderer) terrainRenderer->recordDepth(currentCmd, matrix, centre, frame.range, frameInputs_.scene->terrain);
-        } else if (wmoRenderer) {
-            // The sun's pass reset the casters' texture sets this frame if
-            // it drew them; if it did not, this is the first, and resets.
-            wmoRenderer->renderShadow(currentCmd, matrix, centre, reach, !wmoCasterSetsReset_);
-            wmoCasterSetsReset_ = true;
+        } else if (wmoMap) {
+            wmoRenderer->renderShadow(currentCmd, matrix, *wmoMap);
         }
         seaBed_->endView(currentCmd, view);
     };
@@ -5138,19 +5158,20 @@ void Renderer::renderShelterPass() {
     // What is loaded, as a number that moves when any of it streams in or out.
     const uint64_t world = frameInputs_.shelterRevision;
     if (shelter_->wantsDrawing(eye, frameInputs_.time, world)) {
-        shelter_->begin(currentCmd, eye, world);
+        shelter_->place(eye, world);
         const glm::mat4 matrix = shelter_->matrix();
         const glm::vec3 centre(shelter_->drawing().centre, eye.z);
         // The map's corners are its half extent and a half again from its
-        // middle.
+        // middle; the buildings that cast into it are culled before it
+        // begins.
         const float reach = ShelterMap::kHalfExtent * 1.415f;
+        const std::optional<uint32_t> wmoMap =
+            wmoRenderer ? wmoRenderer->cullShadowMap(currentCmd, centre, reach) : std::nullopt;
+        shelter_->begin(currentCmd);
         // The ground, the buildings and the doodads - a tree's crown keeps
         // the rain off as a roof does. Not the characters.
         if (terrainRenderer) terrainRenderer->recordDepth(currentCmd, matrix, centre, reach, frameInputs_.scene->terrain);
-        if (wmoRenderer) {
-            wmoRenderer->renderShadow(currentCmd, matrix, centre, reach, !wmoCasterSetsReset_);
-            wmoCasterSetsReset_ = true;
-        }
+        if (wmoMap) wmoRenderer->renderShadow(currentCmd, matrix, *wmoMap);
         if (m2Renderer) {
             m2Renderer->renderShadow(currentCmd, matrix, frameInputs_.wind, centre, reach, !m2CasterSetsReset_);
             m2CasterSetsReset_ = true;
@@ -5294,7 +5315,7 @@ void Renderer::buildFrameGraph() {
     if (!renderGraph_) return;
 
     renderGraph_->reset();
-    characterCasterSetsReset_ = wmoCasterSetsReset_ = m2CasterSetsReset_ = false;
+    m2CasterSetsReset_ = false;
 
     auto shadowDepth = renderGraph_->findResource("shadow_depth");
     auto reflTex = renderGraph_->findResource("reflection_texture");

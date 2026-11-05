@@ -4,6 +4,7 @@
 #include "rendering/frame_pool.hpp"
 #include "rendering/frame_results.hpp"
 #include "rendering/geometry_pool.hpp"
+#include "rendering/gpu_row_store.hpp"
 #include "rendering/gpu_slot_table.hpp"
 
 #include "collision/m2_shape.hpp"
@@ -1268,25 +1269,8 @@ private:
     /// submitted, as the cull table's do; a row comes back after the frames
     /// that may draw it, handed back by the thread that retires frames.
     GpuSlotTable materialTable_{sizeof(M2MaterialGPU), "M2 material table"};
-    static constexpr uint32_t kNoMaterialRow = UINT32_MAX;
-    /// A row's pending serial while no extracted frame has carried it yet.
-    static constexpr uint32_t kMaterialRowUncarried = UINT32_MAX;
-    struct MaterialRows {
-        std::vector<M2MaterialGPU> data;        ///< by row, as last written
-        std::vector<uint32_t> free;
-        std::vector<uint32_t> pending;          ///< rows written and not yet known on the GPU
-        std::vector<uint32_t> pendingSerial;    ///< by row: the frame that carries it, 0 if none
-        struct Returned {
-            std::mutex mutex;
-            std::vector<uint32_t> rows;
-        };
-        std::shared_ptr<Returned> returned = std::make_shared<Returned>();
-    } materialRows_;
-    /// A row for a batch's material; UINT32_MAX never (the table grows).
-    uint32_t placeMaterialRow();
-    /// The row as the batch's draws will read it, from the next extracted
-    /// frame on.
-    void writeMaterialRow(uint32_t row, const M2MaterialGPU& material);
+    static constexpr uint32_t kNoMaterialRow = GpuRowStore<M2MaterialGPU>::kNoRow;
+    GpuRowStore<M2MaterialGPU> materialRows_;
     /// The row back once no frame in flight can draw with it.
     void releaseMaterialRow(uint32_t row);
     /// The table version (GpuSlotTable::version) each slot's sets name, so

@@ -1,0 +1,38 @@
+// A WMO batch's material (WMORenderer, WmoMaterialGPU): what used to be its
+// own set - the uniform block and the two textures - and the cloth its draws
+// pushed, as one row of a table every draw names by number. Read by wmo.vert
+// (the cloth) and wmo.frag (textures, shading).
+struct WmoMaterial {
+    // TextureTable handles: the diffuse texture and its normal+height map.
+    uint texture;
+    uint normalHeight;
+    int hasTexture;
+    int alphaTest;
+    // The client's light the batch is drawn with (rendering/wmo_lighting.hpp).
+    int light;
+    // A transition batch's second light, -1 for every other batch.
+    int transitionLight;
+    float specularIntensity;
+    int enableNormalMap;
+    int enablePOM;
+    float pomScale;
+    int pomMaxSamples;
+    float heightMapVariance;
+    float normalMapStrength;
+    int isLava;
+    int emissive;
+    int hasVertexColors;
+    int receivesExteriorShadows;
+    int pad0;
+    int pad1;
+    int pad2;
+    vec4 ambient;   // rgb: the model's interior ambient
+    vec4 sidn;      // rgb: F_SIDN, the colour the material glows in, black without
+    // Cloth hung inside the building's own mesh: (top z, drop, centre x, y)
+    // in the model's local space, zero drop for everything else.
+    vec4 cloth;
+};
+
+layout(std430, set = 2, binding = 0) readonly buffer WmoMaterials {
+    WmoMaterial wmoMaterials[];
+};

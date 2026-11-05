@@ -1,4 +1,5 @@
 #version 450
+#extension GL_ARB_shader_draw_parameters : require
 
 layout(set = 0, binding = 0) uniform PerFrame {
     mat4 view;
@@ -37,11 +38,10 @@ layout(set = 0, binding = 0) uniform PerFrame {
     vec4 lightningColor;
 };
 
+// A call's draws - a bucket's places, drawn by one indirect call - read
+// their records from here: draw gl_DrawID's is charDraws[drawBase + gl_DrawID].
 layout(push_constant) uniform Push {
-    uvec4 pose;            // x its posed request, y its first bone, z its bone count
-    vec4 interiorAmbient;  // read by character.frag
-    vec4 interiorDirect;   // read by character.frag
-    uvec4 localLights;     // read by character.frag
+    uint drawBase;
 } push;
 
 #include "character_material.glsli"
@@ -57,7 +57,7 @@ layout(set = 2, binding = 1) readonly buffer ModelSSBO {
 
 // A bone past the skeleton's own count is the identity.
 mat4 boneAt(uint index) {
-    return index < push.pose.z ? bones[push.pose.y + index] : mat4(1.0);
+    return index < charPose.z ? bones[charPose.y + index] : mat4(1.0);
 }
 
 layout(location = 0) in vec3 aPos;
@@ -74,6 +74,8 @@ layout(location = 2) out vec2 TexCoord;
 layout(location = 3) out vec3 Tangent;
 layout(location = 4) out vec3 Bitangent;
 layout(location = 5) out vec2 TexCoord2;
+// The draw's place, which character.frag reads its material by.
+layout(location = 6) flat out uint vDraw;
 // A faded body is drawn into depth by one pipeline and coloured where that
 // depth is by another (LESS_OR_EQUAL); both must compute the same depth.
 invariant gl_Position;
@@ -94,6 +96,8 @@ vec3 fallbackTangent(vec3 n) {
 }
 
 void main() {
+    vDraw = push.drawBase + uint(gl_DrawIDARB);
+    loadCharacterDraw(vDraw);
     uvec4 bi = aBoneIndices;
     mat4 skinMat = boneAt(bi.x) * aBoneWeights.x
                  + boneAt(bi.y) * aBoneWeights.y
@@ -104,7 +108,7 @@ void main() {
     vec3 skinnedNorm = mat3(skinMat) * aNormal;
     vec3 skinnedTan = mat3(skinMat) * aTangent.xyz;
 
-    const mat4 model = models[push.pose.x];
+    const mat4 model = models[charPose.x];
     vec4 worldPos = model * skinnedPos;
     mat3 modelMat3 = mat3(model);
     FragPos = worldPos.xyz;

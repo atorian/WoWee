@@ -99,25 +99,7 @@ const uint kEntryFlags = 9u;
 const uint kEntryOwnOrdinal = 10u;
 const uint kFlagOwnRecords = 1u;
 
-// m2UVTransform (m2_uv_transform.hpp): translate, then scale and rotate
-// about the texture's centre; two rows of the 2x3 matrix.
-void uvTransform(uint transform, int sequence, float time, float globalTime, out vec4 row0, out vec4 row1) {
-    row0 = vec4(1.0, 0.0, 0.0, 0.0);
-    row1 = vec4(0.0, 1.0, 0.0, 0.0);
-    if (transform == kNone || transform >= word(0u)) return;
-    const uint entry = word(2u) + transform * 3u;
-    const vec3 t = sampleVec3(word(entry), sequence, time, globalTime, vec3(0.0));
-    const vec4 q = sampleQuat(word(entry + 1u), sequence, time, globalTime);
-    const vec3 s = sampleVec3(word(entry + 2u), sequence, time, globalTime, vec3(1.0));
-    const vec3 pivot = vec3(0.5, 0.5, 0.0);
-    const mat3 r = quatToMat3(q);
-    const mat3 rs = mat3(r[0] * s.x, r[1] * s.y, r[2] * s.z);
-    // m = T(pivot) * R * S * T(-pivot) * T(t): its linear part rs, its
-    // translation pivot + rs * (t - pivot).
-    const vec3 offset = pivot + rs * (t - pivot);
-    row0 = vec4(rs[0][0], rs[1][0], offset.x, 0.0);
-    row1 = vec4(rs[0][1], rs[1][1], offset.y, 0.0);
-}
+#include "m2_uv_transform.glsli"
 
 void main() {
     const Group g = groups[gl_WorkGroupID.x];

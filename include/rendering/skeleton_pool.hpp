@@ -98,6 +98,18 @@ struct PackedSkeleton {
 ///   tracks, globals  as a skeleton's
 [[nodiscard]] std::vector<uint32_t> packTextureAnimations(const pipeline::M2Model& model);
 
+/// A character model's animated batch state, as char_draws.comp samples it:
+///   header   transform count, 0, transforms, globalCount, globals (as
+///            packTextureAnimations', so m2_uv_transform.glsli reads it),
+///            colour track count, colour table, texture weight count,
+///            weight table
+///   transforms  3 words each, as packTextureAnimations'
+///   colours  a word each: its alpha track's (M2Model::colorAlphaTracks), ~0 for none
+///   weights  a word each: its track's (M2Model::textureWeightTracks), ~0 for none
+///   tracks, globals  as a skeleton's
+/// Empty for a model with none of them.
+[[nodiscard]] std::vector<uint32_t> packCharacterAnimations(const pipeline::M2Model& model);
+
 /// The emitter blob's shape (above), as m2_particles.comp reads it.
 inline constexpr uint32_t kEmitterHeaderWords = 8;
 inline constexpr uint32_t kEmitterWords = 48;
@@ -118,6 +130,11 @@ struct PackedEmitters {
     std::vector<uint32_t> ribbonCapacities;
 };
 [[nodiscard]] PackedEmitters packEmitters(const pipeline::M2Model& model);
+
+/// Binding `binding` of `set` - an array of SkeletonPool::kMaxPages storage
+/// buffers, partially bound - pointed at the pool's `pages` as a frame
+/// carries them (pageBuffers()); a page none holds is left as it was.
+void writePoolPageSet(VkDevice device, VkDescriptorSet set, uint32_t binding, const std::vector<::VkBuffer>& pages);
 
 class SkeletonPool {
 public:

@@ -43,10 +43,26 @@ struct Request {
 layout(set = 0, binding = 1) readonly buffer Requests {
     Request requests[];
 };
-// Coherent: a level reads the bones the level before it wrote.
+// Coherent: a level reads the bones the level before it wrote. Its matrices
+// as four columns each, the layout of a mat4[] that every reader declares:
+// SPIRV-Cross copies a whole matrix in or out of coherent memory in a way
+// Metal does not compile, and MoltenVK then had no skeleton pass at all.
 layout(set = 0, binding = 2) coherent buffer Bones {
-    mat4 bones[];
+    vec4 boneColumns[];
 };
+
+mat4 loadBone(uint index) {
+    const uint at = index * 4u;
+    return mat4(boneColumns[at], boneColumns[at + 1u], boneColumns[at + 2u], boneColumns[at + 3u]);
+}
+
+void storeBone(uint index, mat4 bone) {
+    const uint at = index * 4u;
+    boneColumns[at] = bone[0];
+    boneColumns[at + 1u] = bone[1];
+    boneColumns[at + 2u] = bone[2];
+    boneColumns[at + 3u] = bone[3];
+}
 // Each request's model matrix as posed: its own, or its parent's bone's.
 layout(set = 0, binding = 3) buffer Models {
     mat4 models[];
@@ -136,7 +152,7 @@ void main() {
     mat4 model = request.placement;
     if (request.parent >= 0) {
         const Request parent = requests[uint(request.parent)];
-        const mat4 bone = request.parentBone == kNone ? mat4(1.0) : bones[parent.outBase + request.parentBone];
+        const mat4 bone = request.parentBone == kNone ? mat4(1.0) : loadBone(parent.outBase + request.parentBone);
         model = models[uint(request.parent)] * bone * request.placement;
     }
     model[3].xyz += request.shift.xyz;
@@ -187,10 +203,10 @@ void main() {
                 local = yaw * local;
             }
             mat4 world = parentBone >= 0 && uint(parentBone) < boneCount
-                ? bones[request.outBase + uint(parentBone)] * local : local;
+                ? loadBone(request.outBase + uint(parentBone)) * local : local;
             if (turnBillboards && (flags & 0x78u) != 0u)
                 world = invViewModel * billboardBone(flags, viewModel * world, mat3(local), pivot);
-            bones[request.outBase + i] = world;
+            storeBone(request.outBase + i, world);
         }
         memoryBarrierBuffer();
         barrier();

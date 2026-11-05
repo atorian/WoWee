@@ -1,0 +1,55 @@
+// The lights that reach a receiver, picked on the GPU as pickLocalLights
+// (local_lights.hpp) picks them: the nearest eight within the cells round
+// it, equally near ones by where they stand, packed two 16-bit indices a
+// word. The includer declares localLightData[] (local_lights.glsli's layout:
+// a light's position in its first vec4 of two).
+
+const float kLightCell = 20.0;
+const uint kLightsPerReceiver = 8u;
+
+ivec2 lightCellRange(float centre, float radius) {
+    return ivec2(int(floor((centre - radius) / kLightCell - 0.5)), int(floor((centre + radius) / kLightCell + 0.5)));
+}
+
+uvec4 pickLocalLights(vec3 centre, float radius, uint frameLights) {
+    uvec4 packed = uvec4(0xFFFFFFFFu);
+    uint lightCount = min(frameLights, 0xFFFEu);
+    if (lightCount == 0u) return packed;
+    ivec2 rx = lightCellRange(centre.x, radius);
+    ivec2 ry = lightCellRange(centre.y, radius);
+    float bestDist[8];
+    uint bestIndex[8];
+    uint count = 0u;
+    for (uint i = 0u; i < lightCount; ++i) {
+        vec3 p = localLightData[2u * i].xyz;
+        int cx = int(floor(p.x / kLightCell));
+        int cy = int(floor(p.y / kLightCell));
+        if (cx < rx.x || cx > rx.y || cy < ry.x || cy > ry.y) continue;
+        precise vec3 d = p - centre;
+        precise float distSq = dot(d, d);
+        uint at = count;
+        while (at > 0u) {
+            float other = bestDist[at - 1u];
+            bool after = other > distSq;
+            if (other == distSq) {
+                vec3 q = localLightData[2u * bestIndex[at - 1u]].xyz;
+                after = q.x != p.x ? q.x > p.x : (q.y != p.y ? q.y > p.y : q.z > p.z);
+            }
+            if (!after) break;
+            --at;
+        }
+        if (at >= kLightsPerReceiver) continue;
+        for (uint k = min(count, kLightsPerReceiver - 1u); k > at; --k) {
+            bestDist[k] = bestDist[k - 1u];
+            bestIndex[k] = bestIndex[k - 1u];
+        }
+        bestDist[at] = distSq;
+        bestIndex[at] = i;
+        count = min(count + 1u, kLightsPerReceiver);
+    }
+    for (uint k = 0u; k < count; ++k) {
+        uint shift = 16u * (k & 1u);
+        packed[k >> 1] = (packed[k >> 1] & ~(0xFFFFu << shift)) | ((bestIndex[k] & 0xFFFFu) << shift);
+    }
+    return packed;
+}

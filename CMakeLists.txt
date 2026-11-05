@@ -1147,8 +1147,11 @@ set(WOWEE_SOURCES
     src/rendering/lighting_manager.cpp
     src/rendering/sky_system.cpp
     src/rendering/character_renderer.cpp
+    src/rendering/character_draws.cpp
+    src/rendering/gpu_cull.cpp
     src/rendering/character_preview.cpp
     src/rendering/wmo_renderer.cpp
+    src/rendering/wmo_draws.cpp
     src/rendering/wmo_model_prep.cpp
     src/rendering/imgui_texture.cpp
     src/rendering/interface_frame.cpp
@@ -2598,6 +2601,13 @@ if(WOWEE_BUILD_TESTS)
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_character_skinning.py
                     $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/character-skinning)
         set_tests_properties(scene_character_skinning PROPERTIES SKIP_RETURN_CODE 77)
+        # A character is drawn batch by batch as its animation and its fade
+        # say: a batch its colour track hides is not drawn, and a faded body
+        # is one layer of it over the scene.
+        wowee_add_gpu_test(scene_character_draws
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_character_draws.py
+                    $<TARGET_FILE:scene_render> ${CMAKE_BINARY_DIR}/scratch/character-draws)
+        set_tests_properties(scene_character_draws PROPERTIES SKIP_RETURN_CODE 77)
         # A creature loaded after many others of one model is still posed.
         wowee_add_gpu_test(scene_shared_skeletons
             COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/scene_render/check_shared_skeletons.py

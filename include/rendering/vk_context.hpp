@@ -178,7 +178,6 @@ public:
         return std::unique_lock<std::mutex>(descriptorPoolLock(pool));
     }
     void freeDescriptorSets(VkDescriptorPool pool, uint32_t count, const VkDescriptorSet* sets);
-    void resetDescriptorPool(VkDescriptorPool pool);
 
     /// Destroy something once no frame that may use it is in flight: buffers,
     /// images and descriptor sets freed during streaming, unloads and rebuilds,

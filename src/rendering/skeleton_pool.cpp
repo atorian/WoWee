@@ -298,6 +298,60 @@ std::vector<uint32_t> packTextureAnimations(const pipeline::M2Model& model) {
     return out;
 }
 
+std::vector<uint32_t> packCharacterAnimations(const pipeline::M2Model& model) {
+    const auto transforms = static_cast<uint32_t>(model.textureTransforms.size());
+    const auto colours = static_cast<uint32_t>(model.colorAlphaTracks.size());
+    const auto weights = static_cast<uint32_t>(model.textureWeightTracks.size());
+    if (transforms + colours + weights == 0) return {};
+    constexpr uint32_t kHeader = 9;
+    const uint32_t colourTable = kHeader + 3 * transforms;
+    const uint32_t weightTable = colourTable + colours;
+    std::vector<uint32_t> out(weightTable + weights, kNone);
+    out[0] = transforms;
+    out[1] = 0;
+    out[2] = kHeader;
+    out[5] = colours;
+    out[6] = colourTable;
+    out[7] = weights;
+    out[8] = weightTable;
+    for (uint32_t i = 0; i < transforms; ++i) {
+        const auto& transform = model.textureTransforms[i];
+        const uint32_t translation = packTrack(transform.translation, TrackKind::Vec3, glm::vec3(0.0f), out);
+        const uint32_t rotation = packTrack(transform.rotation, TrackKind::Quat, glm::vec3(0.0f), out);
+        const uint32_t scale = packTrack(transform.scale, TrackKind::Vec3, glm::vec3(1.0f), out);
+        out[kHeader + 3 * i] = translation;
+        out[kHeader + 3 * i + 1] = rotation;
+        out[kHeader + 3 * i + 2] = scale;
+    }
+    for (uint32_t i = 0; i < colours; ++i)
+        out[colourTable + i] = packTrack(model.colorAlphaTracks[i], TrackKind::Float, glm::vec3(1.0f), out);
+    for (uint32_t i = 0; i < weights; ++i)
+        out[weightTable + i] = packTrack(model.textureWeightTracks[i], TrackKind::Float, glm::vec3(1.0f), out);
+    out[3] = static_cast<uint32_t>(model.globalSequenceDurations.size());
+    out[4] = static_cast<uint32_t>(out.size());
+    out.insert(out.end(), model.globalSequenceDurations.begin(), model.globalSequenceDurations.end());
+    return out;
+}
+
+void writePoolPageSet(VkDevice device, VkDescriptorSet set, uint32_t binding, const std::vector<::VkBuffer>& pages) {
+    std::vector<VkDescriptorBufferInfo> infos;
+    std::vector<VkWriteDescriptorSet> writes;
+    infos.reserve(pages.size());
+    for (size_t p = 0; p < pages.size() && p < SkeletonPool::kMaxPages; ++p) {
+        if (!pages[p]) continue;
+        infos.push_back({.buffer = pages[p], .offset = 0, .range = VK_WHOLE_SIZE});
+        VkWriteDescriptorSet w{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        w.dstSet = set;
+        w.dstBinding = binding;
+        w.dstArrayElement = static_cast<uint32_t>(p);
+        w.descriptorCount = 1;
+        w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes.push_back(w);
+    }
+    for (size_t i = 0; i < writes.size(); ++i) writes[i].pBufferInfo = &infos[i];
+    if (!writes.empty()) vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+}
+
 SkeletonPool::~SkeletonPool() { destroy(); }
 
 void SkeletonPool::destroy() {

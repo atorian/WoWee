@@ -14,9 +14,11 @@
 #include "rendering/vk_shader.hpp"
 #include "rendering/wmo_lighting.hpp"
 #include "rendering/wmo_minimap.hpp"
-#include "rendering/shadow_params.hpp"
-#include "rendering/uniform_slot_pool.hpp"
+#include "rendering/gpu_row_store.hpp"
+#include "rendering/gpu_slot_table.hpp"
+#include "rendering/texture_table.hpp"
 #include "rendering/geometry_pool.hpp"
+#include "rendering/wmo_draws.hpp"
 
 #include "pipeline/blp_loader.hpp"
 #include <vulkan/vulkan.h>
@@ -266,31 +268,33 @@ public:
      * @param perFrameSet Per-frame descriptor set (set 0)
      * @param camera Camera for frustum culling
      */
-    /** Pre-update mutable state (frame ID, material UBOs) on main thread before parallel render. */
     struct Frame;
-    /// `mirror`, when there is water to reflect in, fills the reflection's
-    /// draw list with what its mirror can show. Each colour pass keeps only
-    /// the groups its own eye can see.
+    /// What the GPU's cull of this frame needs (wmo_draws.hpp): the rows of
+    /// the instances, groups and materials changed since a frame known to be
+    /// on the GPU, the camera's view and, when there is water to reflect in,
+    /// what its `mirror` can show. The portal walk, when it runs, goes from
+    /// the camera's and the `viewer`'s groups.
     std::shared_ptr<const Frame> extract(const Camera& camera, const glm::vec3& viewer,
-                                        const std::vector<LocalLight>& lights,
                                         const WaterReflectionView* mirror = nullptr);
     void useFrame(std::shared_ptr<const Frame> frame) { recording_ = std::move(frame); }
-    void prepareRender();
-    /// The passes that draw the buildings in colour. Each culls into a draw
-    /// list of its own: the water's reflection is recorded on the main thread
-    /// and the view on a frame worker, and they share nothing they write.
+    /// Record into `cmd`, outside a render pass and before any of the
+    /// frame's WMO draws, the rows the frame carries and the cull of its
+    /// colour lists, picking each drawn group's lights from the frame's
+    /// `lights`.
+    void prepareDraws(VkCommandBuffer cmd, uint32_t frameIndex, ::VkBuffer lights, uint32_t lightCount);
+    /// The frame whose rows prepareDraws recorded is submitted: they are on
+    /// the GPU.
+    void frameSubmitted();
+    /// The passes that draw the buildings in colour: each its own list,
+    /// which the cull wrote. The water's reflection is recorded on the main
+    /// thread and the view on a frame worker.
     enum class Pass : uint8_t { View, Reflection, Count };
     /// Which of a pass's batches a call records; see WmoDrawLayer.
     using Layer = WmoDrawLayer;
 
-    /// viewerPos is the character; portal culling seeds from it as well as from
-    /// the camera, because at a doorway the two stand in different groups and
-    /// neither alone is reliably the right place to start.
-    ///
-    /// Culls the scene into the pass's draw list, then records from that list
-    /// alone: the recording reads no instance.
-    void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
-                const glm::vec3* viewerPos = nullptr, Pass pass = Pass::View,
+    /// Records the pass's list, a call a bucket of the layer's kinds: it
+    /// reads nothing of the scene.
+    void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, Pass pass = Pass::View,
                 Layer layer = Layer::All);
 
     /**
@@ -298,15 +302,14 @@ public:
      */
     [[nodiscard]] bool initializeShadow(VkRenderPass shadowRenderPass);
 
-    /**
-     * Render depth-only for shadow casting. The first depth-only pass of a
-     * frame resets the frame slot's texture sets; a later one in the same
-     * frame (the sea bed's map) passes `resetDescriptors` false and reuses
-     * them, as M2Renderer::renderShadow does.
-     */
-    void renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
-                      const glm::vec3& shadowCenter = glm::vec3(0), float shadowRadius = 1e9f,
-                      bool resetDescriptors = true);
+    /// The cull of a shadow map round `centre`, outside a render pass: what
+    /// casts into it is a group whose box comes within `radius` of it, or
+    /// 180 yards for a smaller map - a distant building's shadow reaches the
+    /// player. The map's number for renderShadow, or nothing when no
+    /// building can cast into it this frame.
+    std::optional<uint32_t> cullShadowMap(VkCommandBuffer cmd, const glm::vec3& centre, float radius);
+    /// The buildings' side of a shadow map the cull made.
+    void renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, uint32_t map);
 
     /**
      * Get number of loaded models
@@ -340,11 +343,13 @@ public:
     /**
      * Get total draw call count (last frame)
      */
-    uint32_t getDrawCallCount() const { return viewDrawCallCount_ + viewBlendedDrawCallCount_; }
-    uint32_t getBlendedDrawCallCount() const { return viewBlendedDrawCallCount_; }
-    /// Draw calls the depth-only passes recorded this frame, from the frame's
-    /// first one (the sun's) on.
-    uint32_t getShadowDrawCallCount() const { return shadowDrawCalls_; }
+    /// The draws the GPU's cull made of the frames that finished last: the
+    /// view's, its blended layer's, and every shadow map's.
+    uint32_t getDrawCallCount() const { return drawPass_.counted().viewDraws + drawPass_.counted().blendedDraws; }
+    uint32_t getBlendedDrawCallCount() const { return drawPass_.counted().blendedDraws; }
+    uint32_t getShadowDrawCallCount() const { return drawPass_.counted().casterDraws; }
+    /// The groups the view drew and those it left out, by why.
+    [[nodiscard]] const WmoCullStatsGPU& cullCounts() const { return drawPass_.counted(); }
 
     /**
      * Normal mapping / Parallax Occlusion Mapping settings
@@ -432,39 +437,38 @@ private:
     // Holds a model's group resources before their upload.
     friend struct WmoModelPrep;
 
-    const std::vector<LocalLight>* frameLights_ = nullptr;
-    // WMO material UBO - matches WMOMaterial in wmo.frag.glsl
-    struct WMOMaterialUBO {
-        int32_t hasTexture;        // 0
-        int32_t alphaTest;         // 4
-        int32_t light;             // 8: WmoLight the batch is drawn with
-        int32_t transitionLight;   // 12: WmoLight under it by 1 - MOCV alpha, -1 for none
-        float specularIntensity;   // 16
-        int32_t enableNormalMap;   // 20
-        int32_t enablePOM;         // 24
-        float pomScale;            // 28 (height scale)
-        int32_t pomMaxSamples;     // 32 (max ray-march steps)
-        float heightMapVariance;   // 36 (low variance = skip POM)
-        float normalMapStrength;   // 40 (0=flat, 1=full, 2=exaggerated)
-        int32_t isLava;            // 44 (1=lava/magma UV scroll)
-        float wmoAmbientR;         // 48 (interior ambient color R)
-        float wmoAmbientG;         // 52 (interior ambient color G)
-        float wmoAmbientB;         // 56 (interior ambient color B)
-        int32_t emissive;           // 60 (0 none, 1 lamp glass, 2 firelit)
-        int32_t hasVertexColors;    // 64: the group carries MOCV (MOGP flag 0x4)
-        int32_t receivesExteriorShadows; // 68: wmoReceivesExteriorShadows
-        float sidnR;                // 72: F_SIDN glow colour, 0 without the flag
-        float sidnG;                // 76
-        float sidnB;                // 80
-        int32_t padding[3];         // 84
-    };  // 96 bytes total
+    /// A batch's row of the material table (WmoMaterial in wmo_material.glsli,
+    /// std430): what its draws used to bind as a set of their own - the
+    /// parameters and the two textures - and the cloth they pushed.
+    struct WmoMaterialGPU {
+        TextureHandle texture = kNoTextureHandle;       // diffuse
+        TextureHandle normalHeight = kNoTextureHandle;  // normal + height map
+        int32_t hasTexture = 0;
+        int32_t alphaTest = 0;
+        int32_t light = 0;               // WmoLight the batch is drawn with
+        int32_t transitionLight = -1;    // WmoLight under it by 1 - MOCV alpha, -1 for none
+        float specularIntensity = 0.0f;
+        int32_t enableNormalMap = 0;
+        int32_t enablePOM = 0;
+        float pomScale = 0.0f;           // height scale
+        int32_t pomMaxSamples = 0;       // most ray-march steps
+        float heightMapVariance = 0.0f;  // low variance = no POM
+        float normalMapStrength = 0.0f;  // 0 flat, 1 full, 2 exaggerated
+        int32_t isLava = 0;              // lava/magma UV scroll
+        int32_t emissive = 0;            // 0 none, 1 lamp glass, 2 firelit
+        int32_t hasVertexColors = 0;     // the group carries MOCV (MOGP flag 0x4)
+        int32_t receivesExteriorShadows = 0;  // wmoReceivesExteriorShadows
+        int32_t pad[3] = {};
+        glm::vec4 ambient{0.0f};         // rgb: the model's interior ambient
+        glm::vec4 sidn{0.0f};            // rgb: F_SIDN glow colour, black without the flag
+        glm::vec4 cloth{0.0f};           // top z, drop, centre x, y; zero drop for no cloth
+    };
+    static_assert(sizeof(WmoMaterialGPU) == 128, "wmo_material.glsli's WmoMaterial");
 
     /**
      * WMO group GPU resources
      */
-    struct GroupDrawData;
     struct GroupResources {
-        mutable std::shared_ptr<const GroupDrawData> drawData;
         /// Where its vertices and indices live (geometry_); unplaced, it is
         /// not drawn.
         GeometryPool::Range geometry;
@@ -498,9 +502,13 @@ private:
             uint32_t pendingTextureIndex = UINT32_MAX;
             VkTexture* normalHeightMap = nullptr;  // generated from diffuse, NOT owned
             float heightMapVariance = 0.0f; // variance of height map (low = flat texture)
-            VkDescriptorSet materialSet = VK_NULL_HANDLE;  // set 1
-            /// Its WMOMaterialUBO, a slot of materialSlots_.
-            UniformSlotPool::Slot materialSlot;
+            /// Its textures' places in the texture table; the material row
+            /// carries them.
+            TextureHandle textureHandle = kNoTextureHandle;
+            TextureHandle normalHandle = kNoTextureHandle;
+            /// Its row of the material table (WmoMaterialGPU), which its draws
+            /// name; none when its textures have no place, and it is not drawn.
+            uint32_t materialRow = UINT32_MAX;
             bool hasTexture = false;
             bool alphaTest = false;
             bool isTransparent = false;     // blendMode >= 2
@@ -553,16 +561,6 @@ private:
     /**
      * Loaded WMO model data
      */
-    /// Immutable GPU description, shared across every instance and frame until
-    /// a material binding changes. Collision meshes stay in GroupResources.
-    struct GroupDrawData {
-        GeometryPool::Range geometry;
-        glm::vec3 boundingBoxMin{0}, boundingBoxMax{0};
-        uint32_t groupFlags = 0;
-        bool isLOD = false;
-        std::vector<GroupResources::MergedBatch> mergedBatches;
-    };
-
     struct ModelData {
         uint32_t id;
         std::vector<GroupResources> groups;
@@ -736,11 +734,8 @@ private:
     std::unordered_map<std::string, pipeline::BLPImage>* predecodedBLPCache_ = nullptr;
     std::unordered_map<std::string, EncodedNormalMap>* predecodedNormalMapCache_ = nullptr;
 
-    /**
-     * Allocate a material descriptor set from the pool
-     */
-    VkDescriptorSet allocateMaterialSet();
-    /// Create a merged batch's material buffer and descriptor set.
+    /// A merged batch's material row written from it as it is, and the
+    /// rendering settings; placed when it has none.
     void createMergedBatchMaterial(const ModelData& model, const GroupResources& group,
                                    GroupResources::MergedBatch& mb);
     /// Point a batch at the normal/height map made from its texture, if any.
@@ -752,12 +747,9 @@ private:
     void retryPendingTextures();
     std::vector<uint32_t> modelsWithPendingTextures_;
 
-    /**
-     * Destroy GPU resources for a single group.
-     * When defer=true, destruction is scheduled via deferAfterAllFrameFences
-     * so in-flight command buffers are not invalidated.
-     */
-    void destroyGroupGPU(GroupResources& group, bool defer = false);
+    /// A group's geometry and material rows given back, after the frames in
+    /// flight that may still draw them.
+    void destroyGroupGPU(GroupResources& group);
 
 
     /// Files every instance's index under its id again, after the list was
@@ -789,30 +781,56 @@ private:
     VkPipeline wireframePipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
 
-    // Shadow rendering (Phase 7)
+    // Shadow rendering: set 0 the texture table, set 1 the frame slot's
+    // caster records and the group and instance tables (wmo_shadow.vert).
     VkPipeline shadowPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout shadowPipelineLayout_ = VK_NULL_HANDLE;
-    /// The set the shadow pass binds. Five separate members before,
-    /// built and torn down here and in three other renderers.
-    ShadowParamsSet shadowParams_;
-    /// Sets binding an alpha-keyed material's texture for the shadow pass, so
-    /// a lattice casts the lattice and not a solid pane. One pool per frame in
-    /// flight, reset at the top of that frame's shadow pass.
-    static constexpr uint32_t kShadowTexPoolFrames = 2;
-    VkDescriptorPool shadowTexPool_[kShadowTexPoolFrames] = {};
-    std::unordered_map<VkImageView, VkDescriptorSet> shadowTexSetCache_;
-    VkDescriptorSet shadowTexSet(VkTexture* tex, uint32_t frameIndex);
+    VkDescriptorSetLayout shadowSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool shadowDescPool_ = VK_NULL_HANDLE;
+    VkDescriptorSet shadowSet_[2] = {};
+    uint32_t shadowSetVersion_[2] = {~0u, ~0u};
 
-    // Descriptor set layouts
+    /// Every merged batch's material, a row each (WmoMaterialGPU), written
+    /// when a batch's material or the settings change. The rows ride in the
+    /// extracted frames until one carrying them is submitted
+    /// (gpu_row_store.hpp); the draws read them at set 2.
+    GpuSlotTable materialTable_{sizeof(WmoMaterialGPU), "WMO material table"};
+    GpuRowStore<WmoMaterialGPU> materialRows_;
+    /// The frame serial every table's rows are carried by - the materials'
+    /// and the layout's - and the newest on the GPU.
+    uint32_t frameSerial_ = 0;
+    std::atomic<uint32_t> frameApplied_{0};
+    uint32_t pendingSerial_ = 0;
+    /// Set 2: the material table and what the frame slot's draws read -
+    /// their records, the groups' lights, the group and instance tables - a
+    /// set per frame slot, rewritten when one of them is replaced.
     VkDescriptorSetLayout materialSetLayout_ = VK_NULL_HANDLE;
-
-    // Descriptor pool for material sets
     VkDescriptorPool materialDescPool_ = VK_NULL_HANDLE;
-    /// Every merged batch's material parameters (uniform_slot_pool.hpp).
-    std::shared_ptr<UniformSlotPool> materialSlots_;
+    VkDescriptorSet materialSet_[2] = {};
+    uint32_t materialSetVersion_[2] = {};
+    uint32_t materialSetDrawVersion_[2] = {~0u, ~0u};
+    /// Whether this slot's draws may be recorded: its sets name the tables
+    /// and buffers as they are.
+    bool drawsReady_[2] = {};
+    /// The device's maxDrawIndirectCount: a bucket bigger than it is drawn
+    /// by several calls.
+    uint32_t maxDrawsPerCall_ = 1;
+    /// What the buildings are drawn from on the GPU: the rows and places as
+    /// the main thread keeps them, and the cull that turns them into draws.
+    WmoDrawLayout layout_;
+    WmoDrawPass drawPass_;
+    /// A model's groups' draws as the layout takes them.
+    std::vector<WmoGroupDraws> describeDraws(const ModelData& model) const;
+    /// The layout's instances caught up with the scene: placed, moved,
+    /// shown, hidden, gone.
+    void catchUpLayout();
+    /// The portal walk's verdict for every instance the camera stands in,
+    /// a bit a group row left out.
+    void walkPortals(const Camera& camera, const glm::vec3& viewer, std::vector<uint32_t>& culled) const;
+    /// Every material row written anew from its batch and the settings.
+    void rewriteMaterialRows();
     /// Every group's vertices and indices, in shared pages.
     GeometryPool geometry_;
-    static constexpr uint32_t MAX_MATERIAL_SETS = 32768;
 
     /// When a path that would not load, or found no room, is worth asking for
     /// again: a failed MPQ read is often transient.
@@ -844,8 +862,7 @@ private:
     float normalMapStrength_ = 0.8f;     // 0.0 = flat, 1.0 = full, 2.0 = exaggerated
     bool pomEnabled_ = true;             // on by default
     int pomQuality_ = 1;                 // 0=Low(16), 1=Medium(32), 2=High(64)
-    uint64_t extractedMaterialVersion_ = 0, appliedMaterialVersion_ = 0;
-    bool materialSettingsDirty_ = false; // rebuild UBOs when settings change
+    bool materialSettingsDirty_ = false; // rewrite the material rows when settings change
 
     // Rendering state
     bool wireframeMode = false;
@@ -861,7 +878,6 @@ private:
     float maxGroupDistance = 500.0f;
     float maxGroupDistanceSq = 250000.0f;  // maxGroupDistance^2
     float viewDistance_ = 1200.0f;
-    uint32_t shadowDrawCalls_ = 0;
 
     /// See contentRevision(). Bumped by markContentChanged().
     uint64_t contentRevision_ = 1;
@@ -869,67 +885,6 @@ private:
 
     // Parallel visibility culling
     uint32_t numCullThreads_ = 1;
-
-    /// One instance as a pass draws it: what the recording needs, copied out
-    /// of the scene by the cull, so the recording reads no instance.
-    struct GroupDraw {
-        std::shared_ptr<const GroupDrawData> gpu;
-        glm::vec3 worldMin{0}, worldMax{0};
-        LocalLightSet lights = kNoLocalLights;
-    };
-    struct DrawEntry {
-        glm::mat4 modelMatrix{1.0f};
-        float scale = 1.0f;
-        /// Valid for the frame: models are unloaded only between frames.
-        /// The model's groups this pass draws.
-        std::vector<GroupDraw> groups;
-    };
-
-    /// What one pass draws, rebuilt by its cull each time it runs. Entries
-    /// past `used` are last frame's, kept for their capacity and never read.
-    struct DrawList {
-        std::vector<DrawEntry> entries;
-        size_t used = 0;
-        uint32_t portalCulled = 0;
-        uint32_t distanceCulled = 0;
-        /// Groups outside the pass's view volume.
-        uint32_t frustumCulled = 0;
-        uint32_t drawCalls = 0;
-        /// The portal walk's result for the instance being culled.
-        std::unordered_set<uint32_t> portalGroups;
-
-        void clear() {
-            used = 0;
-            portalCulled = distanceCulled = frustumCulled = drawCalls = 0;
-        }
-        DrawEntry& add() {
-            if (used == entries.size()) entries.emplace_back();
-            DrawEntry& entry = entries[used++];
-            entry.groups.clear();
-            return entry;
-        }
-        /// Takes back the entry add() gave, when it ended up drawing nothing.
-        void dropLast() { --used; }
-        [[nodiscard]] std::span<const DrawEntry> drawn() const { return {entries.data(), used}; }
-    };
-    uint32_t viewDrawCallCount_ = 0;
-    /// The blended layer's, kept apart: it is recorded on another thread
-    /// from the opaque layer, at the same time.
-    uint32_t viewBlendedDrawCallCount_ = 0;
-    /// The depth-only passes', one at a time on the main thread.
-
-
-    /// The instances the camera sees and their groups that are drawn.
-    /// The camera's view into `list`, and, given a mirror, what the water's
-    /// reflection can show into `mirrorList`; a group outside the camera's
-    /// volume is left out of the view, not of the reflection.
-    void cullView(const Camera& camera, const glm::vec3& portalViewerPos, DrawList& list,
-                  const WaterReflectionView* mirror = nullptr, DrawList* mirrorList = nullptr) const;
-    uint32_t recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const glm::vec3& camPos,
-                    const DrawList& list, Layer layer) const;
-    /// The instances, shown, and groups that reach a shadow map of this centre and reach.
-    void extractDepth(DrawList& list) const;
-    GroupDraw extractGroup(const GroupResources& group, const WMOInstance& instance, uint32_t groupIndex) const;
 
     struct InstanceState {
         std::unordered_map<uint32_t, ModelData> loadingModels_;
@@ -945,11 +900,16 @@ private:
 public:
     struct Frame {
         void clear() noexcept;
-        DrawList view, reflection, depth;
         bool wireframe = false;
-        uint64_t materialVersion = 0;
-        int normalMap = 0, pom = 0, samples = 0;
-        float normalStrength = 1;
+        /// The serial the rows this frame carries go by (gpu_row_store.hpp).
+        uint32_t serial = 0;
+        /// The material rows it carries.
+        uint32_t materialRowCount = 0;
+        std::vector<uint32_t> materialUpdateSlots;
+        std::vector<WmoMaterialGPU> materialUpdateRows;
+        /// The instances', groups' and ranges' rows, the buckets and the
+        /// cull's view.
+        WmoDrawFrame draws;
     };
 private:
     FramePool<Frame> framePool_;

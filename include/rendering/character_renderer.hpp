@@ -3,12 +3,13 @@
 #include "rendering/geometry_pool.hpp"
 #include "rendering/skeleton_pass.hpp"
 #include "rendering/skeleton_pool.hpp"
+#include "rendering/character_draws.hpp"
+#include "rendering/m2_blend_mode.hpp"
 #include <span>
 
 #include "rendering/normal_map_builder.hpp"
 #include "rendering/texture_cache.hpp"
 #include "rendering/vk_shader.hpp"
-#include "rendering/shadow_params.hpp"
 #include "rendering/interior_light.hpp"
 #include "rendering/local_lights.hpp"
 
@@ -139,9 +140,19 @@ public:
     /// back. After the slot's fence and before any pass draws a character -
     /// the shadow maps included - so every pass only binds.
     struct Frame;
-    std::shared_ptr<const Frame> extract(const Camera& camera, const std::vector<LocalLight>& lights);
+    /// The frame's skeleton requests, each shown instance's record and the
+    /// draw lists changed since a frame known to be on the GPU
+    /// (character_draws.hpp).
+    std::shared_ptr<const Frame> extract(const Camera& camera);
     void useFrame(std::shared_ptr<const Frame> frame) { recording_ = std::move(frame); }
     void prepareRender(VkCommandBuffer cmd, uint32_t frameIndex);
+    /// Records into `cmd`, after prepareRender, outside a render pass and
+    /// before any pass draws a character: the frame's rows and the cull of
+    /// its colour lists, each instance picking its lights from the frame's
+    /// `lights` (none without a buffer).
+    void prepareDraws(VkCommandBuffer cmd, uint32_t frameIndex, ::VkBuffer lights, uint32_t lightCount);
+    /// The frame whose rows prepareDraws recorded is submitted.
+    void frameSubmitted();
     /// The slot's posed bones and whether its last prepareRender posed them,
     /// for what stands on them.
     [[nodiscard]] PosedBones posedBones(uint32_t frameIndex) const {
@@ -153,10 +164,18 @@ public:
     /// which rises from the feet through the body, was gone. Faded ones are
     /// drawn after the blended world instead, laid over it as the client does.
     enum class Part { All, Solid, Faded };
+    /// Records the part's buckets, a call each, from the cull's lists: it
+    /// reads nothing of the scene.
     void render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
                 Part part = Part::All);
-    /// The draw calls the last render of each part recorded, together.
-    [[nodiscard]] uint32_t getDrawCallCount() const { return drawCalls_[0] + drawCalls_[1] + drawCalls_[2]; }
+    /// The draws the GPU's cull made of the frames that finished last, solid
+    /// and faded together.
+    [[nodiscard]] uint32_t getDrawCallCount() const {
+        return drawPass_.counted().solidDraws + drawPass_.counted().fadedDraws;
+    }
+    [[nodiscard]] uint32_t getShadowDrawCallCount() const { return drawPass_.counted().casterDraws; }
+    /// What the GPU's cull drew of the frames that finished last, by part.
+    [[nodiscard]] const CharCullStatsGPU& cullCounts() const { return drawPass_.counted(); }
     /// The pass faded instances are drawn in when it is not the scene's - the
     /// one after the water that blended M2s and particles go to - or null.
     /// Rebuilds pipelines: call between frames, with nothing in flight.
@@ -170,9 +189,13 @@ public:
                                 wowee::rendering::VkShaderModule& charVert,
                                 wowee::rendering::VkShaderModule& charFrag);
     [[nodiscard]] bool initializeShadow(VkRenderPass shadowRenderPass);
-    void renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
-                      const glm::vec3& shadowCenter = glm::vec3(0), float shadowRadius = 1e9f,
-                      bool resetDescriptors = true);
+    /// The cull of a shadow map round `centre`, outside a render pass: what
+    /// casts into it is every shown instance standing within `radius` of it.
+    /// The map's number for renderShadow, or nothing when no character can
+    /// cast into it this frame.
+    std::optional<uint32_t> cullShadowMap(VkCommandBuffer cmd, const glm::vec3& centre, float radius);
+    /// The characters' side of a shadow map the cull made.
+    void renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, uint32_t map);
 
     void setInstancePosition(uint32_t instanceId, const glm::vec3& position);
     void setInstanceRotation(uint32_t instanceId, const glm::vec3& rotation);
@@ -405,10 +428,8 @@ public:
     /// Append the point lights of the units animated this frame - those in
     /// view, and those within 33 yards (local_lights.hpp).
     void gatherLocalLights(const Camera& camera, std::vector<LocalLight>& out) const;
-    /// The frame's point lights, which every unit picks its nearest from.
 
 private:
-    const std::vector<LocalLight>* frameLights_ = nullptr;
     std::unordered_map<std::string, pipeline::BLPImage>* predecodedBLPCache_ = nullptr;
     bool preparedTexturesOnly_ = false;
     // GPU representation of M2 model
@@ -430,6 +451,10 @@ private:
         // change while a snapshot holds the previous copy.
         std::shared_ptr<const pipeline::M2Model> data;
         std::vector<glm::mat4> bindPose;  // Inverse bind pose matrices
+        /// Its batches' animated alpha and texture animations
+        /// (packCharacterAnimations), which the cull samples; unplaced for
+        /// a model with none.
+        SkeletonPool::Skeleton animations;
 
         // Tight bind-pose bounds from rendered vertices. M2 header
         // boundingBox/boundingRadius describe collision geometry on many
@@ -575,44 +600,45 @@ private:
         instance.dress = std::move(next);
     }
 
-    /// An instance as a pass draws it: what the recording needs of it,
-    /// copied out of the scene by the cull, so the recording reads no
-    /// instance. The dress is shared, not copied.
-    struct DrawCharacter {
-        glm::mat4 modelMatrix{1.0f};
-        /// Valid for the frame: models are unloaded only between frames.
-        std::shared_ptr<const M2ModelGPU> model;
-        std::shared_ptr<const CharacterDress> dress;
-        /// Its skeleton request this frame (models[] on the GPU), its first
-        /// bone and how many (bones[]).
-        uint32_t pose = 0;
-        uint32_t boneBase = 0;
-        uint32_t boneCount = 0;
-        InteriorLightGPU interiorLight;
-        LocalLightSet localLights = kNoLocalLights;
-        glm::vec3 stateTint{1.0f};
-        /// Its own opacity, its state's and the camera's, as drawn.
-        float opacity = 1.0f;
-        float animationTime = 0.0f;
-        float globalSequenceTime = 0.0f;
-        int sequenceIndex = -1;
-        uint32_t id = 0;
-        uint32_t modelId = 0;
-        bool isSceneModel = false;
-        bool hasOverrideModelMatrix = false;
+    /// What an instance's draw list was built from: rebuilt when any of it
+    /// changes.
+    struct ListBuilt {
+        const CharacterDress* dress = nullptr;
+        const M2ModelGPU* model = nullptr;
+        uint64_t textures = 0;
+        bool sceneModel = false;
     };
-    /// Each colour part's list (All, Solid, Faded): the solid part records on
-    /// a frame worker and the faded one on the main thread after the water.
-
-    /// The depth-only passes', one at a time on the main thread.
-
-    /// The instances this part draws, in the camera's view.
-    void cullCharacters(const Camera& camera, Part part, std::vector<DrawCharacter>& list, const Frame& frame) const;
-    void recordCharacters(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, Part part,
-                          const std::vector<DrawCharacter>& list);
-    /// The shown instances with bones within the shadow's reach.
-    void recordShadowCasters(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
-                             const std::vector<DrawCharacter>& list);
+    std::unordered_map<uint32_t, ListBuilt> listsBuilt_;
+    /// Bumped whenever a texture the lists name may draw otherwise: a normal
+    /// map attached, a model's texture replaced, the normal settings changed.
+    uint64_t textureSerial_ = 1;
+    bool listNormalMapping_ = true;
+    float listNormalStrength_ = 0.8f;
+    /// The instance's batches as the CPU drew them, in the order it drew
+    /// them: each one's material, the places its draws go and what it casts.
+    std::vector<CharListEntry> describeDraws(const CharacterInstance& instance, const M2ModelGPU& model);
+    /// The material row of one batch of `instance`, or nothing when the batch
+    /// is not drawn; its depth bias layer and pipelines alongside.
+    struct BatchLook {
+        CharMaterialGPU material;
+        /// Its second stage is sampled, through its own texture animation.
+        bool secondStage = false;
+        CharacterBlendPipeline solid = CharacterBlendPipeline::Opaque;
+        CharacterBlendPipeline partial = CharacterBlendPipeline::Opaque;
+        CharacterBlendPipeline faded = CharacterBlendPipeline::Opaque;
+    };
+    std::optional<BatchLook> lookOf(const CharacterInstance& instance, const M2ModelGPU& model, size_t batch);
+    /// The instance's list built again where what it was built from changed.
+    void refreshList(uint32_t id, const CharacterInstance& instance);
+    /// The rows and places of every instance's lists.
+    CharacterDrawLayout layout_;
+    CharacterDrawPass drawPass_;
+    uint32_t frameSerial_ = 0;
+    std::atomic<uint32_t> frameApplied_{0};
+    uint32_t pendingSerial_ = 0;
+    /// The device's maxDrawIndirectCount: a bucket bigger than it is drawn
+    /// by several calls.
+    uint32_t maxDrawsPerCall_ = 1;
 
     /// Every loadModel's work. `ownMesh` is the parse itself when nobody else
     /// holds it: its vertices and indices are let go once they are on the GPU.
@@ -710,46 +736,6 @@ private:
     VkSampleCountFlagBits fadedPassSamples_ = VK_SAMPLE_COUNT_1_BIT;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
 
-    // Descriptor set layouts
-    VkDescriptorSetLayout perFrameLayout_ = VK_NULL_HANDLE;  // set 0 (owned by Renderer)
-    VkDescriptorSetLayout materialSetLayout_ = VK_NULL_HANDLE;  // set 1
-    // set 2 is skeletonPass_'s draw set
-
-    // Descriptor pool
-    VkDescriptorPool materialDescPools_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
-    struct MaterialDescriptorKey {
-        VkImageView diffuse = VK_NULL_HANDLE;
-        VkImageView normal = VK_NULL_HANDLE;
-        VkImageView second = VK_NULL_HANDLE;
-        VkSampler diffuseSampler = VK_NULL_HANDLE;
-        VkSampler normalSampler = VK_NULL_HANDLE;
-        VkSampler secondSampler = VK_NULL_HANDLE;
-        bool operator==(const MaterialDescriptorKey&) const = default;
-    };
-    struct MaterialDescriptorKeyHash {
-        size_t operator()(const MaterialDescriptorKey& key) const {
-            const size_t a = std::hash<VkImageView>{}(key.diffuse);
-            const size_t b = std::hash<VkImageView>{}(key.normal);
-            const size_t c = std::hash<VkSampler>{}(key.diffuseSampler);
-            const size_t d = std::hash<VkSampler>{}(key.normalSampler);
-            const size_t e = std::hash<VkImageView>{}(key.second);
-            const size_t f = std::hash<VkSampler>{}(key.secondSampler);
-            return a ^ (b << 1) ^ (c << 2) ^ (d << 3) ^ (e << 4) ^ (f << 5);
-        }
-    };
-    std::unordered_map<MaterialDescriptorKey, VkDescriptorSet, MaterialDescriptorKeyHash>
-        materialDescriptorCache_[2];
-    uint32_t lastMaterialPoolResetFrame_ = 0xFFFFFFFFu;
-    // Draw calls the last recording of each Part made.
-    uint32_t drawCalls_[3] = {};
-
-    // Material UBO ring buffer - pre-allocated per frame slot, sub-allocated each draw
-    VkBuffer materialRingBuffer_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
-    VmaAllocation materialRingAlloc_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
-    void* materialRingMapped_[2] = {nullptr, nullptr};
-    uint32_t materialRingOffset_[2] = {0, 0};
-    uint32_t materialUboAlignment_ = 256;  // minUniformBufferOffsetAlignment
-    static constexpr uint32_t MATERIAL_RING_CAPACITY = 4096;
 
     /// When a path that would not load, or found no room, is next worth a read.
     std::unordered_map<std::string, uint64_t> failedTextureRetryAt_;
@@ -799,12 +785,10 @@ private:
     /// Whether this frame slot's skeletons were posed (prepareRender).
     bool posed_[2] = {};
 
-    // Shadow pipeline resources
+    // Shadow pipeline resources: set 0 the texture table, set 1 the bones,
+    // set 2 the frame slot's caster records and instances.
     VkPipeline shadowPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout shadowPipelineLayout_ = VK_NULL_HANDLE;
-    /// The set the shadow pass binds. Five separate members before,
-    /// built and torn down here and in three other renderers.
-    ShadowParamsSet shadowParams_;
     /// Every model's vertices and indices, in shared pages.
     GeometryPool geometry_;
 
@@ -826,13 +810,6 @@ private:
                                                    const pipeline::M2Batch& b,
                                                    uint32_t stage = 0) const;
 
-    /// Per-batch texture sets for alpha-keyed shadow casters, one pool per
-    /// frame in flight and reset at the top of each frame's shadow pass. Same
-    /// arrangement M2Renderer uses for its foliage shadows.
-    static constexpr uint32_t kShadowTexPoolFrames = 2;
-    VkDescriptorPool shadowTexPool_[kShadowTexPoolFrames] = {};
-    std::unordered_map<VkImageView, VkDescriptorSet> shadowTexSetCache_;
-    VkDescriptorSet shadowTexDescSet(VkTexture* tex, uint32_t frameIndex);
     struct InstanceState {
         std::unordered_map<uint32_t, CharacterInstance> instances;
     };
@@ -842,14 +819,12 @@ private:
 public:
     struct Frame final : PosedSkeletons {
         void clear() noexcept;
-        uint32_t poseIndex(uint32_t id) const;
         /// Where an instance's skeleton is in the frame's posed bones, for
         /// the emitters M2Renderer runs on it.
         [[nodiscard]] std::optional<Pose> poseOf(uint32_t id) const override;
-        bool normalMapping = false;
-        float normalStrength = 1;
-        std::vector<DrawCharacter> drawLists[3];
-        std::vector<DrawCharacter> depth;
+        /// The serial the rows it carries go by, its lists and instances.
+        uint32_t serial = 0;
+        CharDrawFrame draws;
         /// The skeletons to pose: those placed by their own matrix, then the
         /// weapons on their wielders, then the enchants on the weapons.
         SkeletonFrame skeleton;

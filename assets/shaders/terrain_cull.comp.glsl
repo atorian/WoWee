@@ -93,8 +93,8 @@ layout(std430, set = 0, binding = 8) readonly buffer LocalLightBuffer { vec4 loc
 layout(push_constant) uniform Pass { uint second; } pass;
 
 const float kLodMaxErrorPixels = 1.0;
-const float kLightCell = 20.0;
-const uint kLightsPerReceiver = 8u;
+
+#include "local_lights_pick.glsli"
 
 bool insidePlanes(vec4 planes[6], vec3 centre, float radius) {
     for (int i = 0; i < 6; ++i) {
@@ -116,56 +116,6 @@ int lodFor(CullRow row, float nearest) {
     }
     return chosen;
 }
-
-ivec2 cellRange(float centre, float radius) {
-    return ivec2(int(floor((centre - radius) / kLightCell - 0.5)), int(floor((centre + radius) / kLightCell + 0.5)));
-}
-
-// pickLocalLights: the nearest eight within the cells round the chunk,
-// equally near ones by where they stand.
-uvec4 pickLights(vec3 centre, float radius) {
-    uvec4 packed = uvec4(0xFFFFFFFFu);
-    uint lightCount = min(frame.counts.y, 0xFFFEu);
-    if (lightCount == 0u) return packed;
-    ivec2 rx = cellRange(centre.x, radius);
-    ivec2 ry = cellRange(centre.y, radius);
-    float bestDist[8];
-    uint bestIndex[8];
-    uint count = 0u;
-    for (uint i = 0u; i < lightCount; ++i) {
-        vec3 p = localLightData[2u * i].xyz;
-        int cx = int(floor(p.x / kLightCell));
-        int cy = int(floor(p.y / kLightCell));
-        if (cx < rx.x || cx > rx.y || cy < ry.x || cy > ry.y) continue;
-        precise vec3 d = p - centre;
-        precise float distSq = dot(d, d);
-        uint at = count;
-        while (at > 0u) {
-            float other = bestDist[at - 1u];
-            bool after = other > distSq;
-            if (other == distSq) {
-                vec3 q = localLightData[2u * bestIndex[at - 1u]].xyz;
-                after = q.x != p.x ? q.x > p.x : (q.y != p.y ? q.y > p.y : q.z > p.z);
-            }
-            if (!after) break;
-            --at;
-        }
-        if (at >= kLightsPerReceiver) continue;
-        for (uint k = min(count, kLightsPerReceiver - 1u); k > at; --k) {
-            bestDist[k] = bestDist[k - 1u];
-            bestIndex[k] = bestIndex[k - 1u];
-        }
-        bestDist[at] = distSq;
-        bestIndex[at] = i;
-        count = min(count + 1u, kLightsPerReceiver);
-    }
-    for (uint k = 0u; k < count; ++k) {
-        uint shift = 16u * (k & 1u);
-        packed[k >> 1] = (packed[k >> 1] & ~(0xFFFFu << shift)) | ((bestIndex[k] & 0xFFFFu) << shift);
-    }
-    return packed;
-}
-
 void emit(uint list, CullRow row, uint level, uint record, uint group) {
     uint base = regionStart[group * 4u + list];
     const uvec2 surface = row.lods[level];
@@ -252,7 +202,7 @@ void main() {
     r.row = uvec4(index, 0u, 0u, 0u);
     r.relief = vec4(frame.mirror.z, 0.0, 0.0, 0.0);
     r.baked = vec4(float(source), frame.limits.z, frame.limits.w, source == 0u ? 0.0 : float(row.surface.x));
-    r.lights = pickLights(centre, radius);
+    r.lights = pickLocalLights(centre, radius, frame.counts.y);
     records[record] = r;
 
     precise float horizontal = length(vec2(centre - camPos));

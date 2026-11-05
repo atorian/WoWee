@@ -102,14 +102,13 @@ void Renderer::publishFrameResults() {
         result.statistics.wmoDraws = wmoRenderer->getDrawCallCount();
         result.statistics.wmoShadows = wmoRenderer->getShadowDrawCallCount();
         result.statistics.wmoBlendedDraws = wmoRenderer->getBlendedDrawCallCount();
+        // The GPU's cull counts, of the frames that finished last.
+        const auto& counted = wmoRenderer->cullCounts();
+        result.statistics.wmoDistanceCulled = counted.distanceCulled;
+        result.statistics.wmoPortalCulled = counted.portalCulled;
+        result.statistics.wmoFrustumCulled = counted.frustumCulled;
     }
     if (characterRenderer) result.statistics.characterDraws = characterRenderer->getDrawCallCount();
-    if (frameInputs_.scene && frameInputs_.scene->buildings) {
-        const auto& view = frameInputs_.scene->buildings->view;
-        result.statistics.wmoDistanceCulled = view.distanceCulled;
-        result.statistics.wmoPortalCulled = view.portalCulled;
-        result.statistics.wmoFrustumCulled = view.frustumCulled;
-    }
     if (rtScene_) {
         const auto stats = rtScene_->stats();
         result.statistics.rtMeshes = stats.meshes;

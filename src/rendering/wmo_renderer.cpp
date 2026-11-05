@@ -79,10 +79,13 @@ constexpr uint8_t kWmoNormalMapStrengthKey = static_cast<uint8_t>(kWmoNormalMapS
 // samples it. That pass only draws the scene with multisampling off.
 constexpr VkFrontFace kWmoFrontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 
-// Where an alpha-keyed WMO material (MOMT blend mode 1) is cut, in 255ths: the
-// original client's 224, which wmo.frag uses too. The shadow pass is handed it
-// so a cutout casts the same shape it draws.
-constexpr int kWmoAlphaKeyRef = 224;
+// What wmo_shadow.vert is pushed: the map's matrix and the call's first
+// caster place.
+struct WmoShadowPush {
+    glm::mat4 lightSpace{1.0f};
+    glm::uvec4 call{0u};
+};
+static_assert(sizeof(WmoShadowPush) <= 128, "the push block every device must take");
 } // namespace
 
 using collision::rayIntersectsAABB;
@@ -241,52 +244,41 @@ bool WMORenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayou
 
     VkDevice device = vkCtx_->getDevice();
 
-    // --- Create material descriptor set layout (set 1) ---
-    // binding 0: sampler2D (diffuse texture)
-    // binding 1: uniform buffer (WMOMaterial)
-    // binding 2: sampler2D (normal+height map)
-    std::vector<VkDescriptorSetLayoutBinding> materialBindings(3);
-    materialBindings[0] = {};
-    materialBindings[0].binding = 0;
-    materialBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    materialBindings[0].descriptorCount = 1;
-    materialBindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    materialBindings[1] = {};
-    materialBindings[1].binding = 1;
-    materialBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    materialBindings[1].descriptorCount = 1;
-    materialBindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    materialBindings[2] = {};
-    materialBindings[2].binding = 2;
-    materialBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    materialBindings[2].descriptorCount = 1;
-    materialBindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-
-    materialSetLayout_ = createDescriptorSetLayout(device, materialBindings);
-    if (!materialSetLayout_) {
-        core::Logger::getInstance().error("WMORenderer: failed to create material set layout");
-        return false;
+    // Set 1 is the device's texture table (TextureTable); a batch's textures
+    // are handles in its material row. Set 2 is the material table, read by
+    // the vertex shader (cloth) and the fragment shader, and what the cull
+    // wrote for the draws.
+    materialTable_.initialize(*vkCtx_);
+    layout_.initialize(*vkCtx_);
+    if (!drawPass_.initialize(*vkCtx_)) return false;
+    {
+        // Binding 0 the material table; what the cull wrote: 1 the draws'
+        // records, 2 the groups' lights; 3 the group table, 4 the instance
+        // table (wmo.vert).
+        std::vector<VkDescriptorSetLayoutBinding> bindings(5);
+        for (uint32_t b = 0; b < 5; ++b)
+            bindings[b] = {.binding = b, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
+                           .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | (b == 0 ? VkShaderStageFlags(VK_SHADER_STAGE_FRAGMENT_BIT) : VkShaderStageFlags(0))};
+        materialSetLayout_ = createDescriptorSetLayout(device, bindings);
+        const VkDescriptorPoolSize size{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 10};
+        VkDescriptorPoolCreateInfo poolInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        poolInfo.maxSets = 2;
+        poolInfo.poolSizeCount = 1;
+        poolInfo.pPoolSizes = &size;
+        if (!materialSetLayout_ || vkCreateDescriptorPool(device, &poolInfo, nullptr, &materialDescPool_) != VK_SUCCESS) {
+            LOG_ERROR("WMORenderer: could not make the material table's set layout or pool; no buildings are drawn");
+            return false;
+        }
+        const VkDescriptorSetLayout layouts[2] = {materialSetLayout_, materialSetLayout_};
+        VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        ai.descriptorPool = materialDescPool_;
+        ai.descriptorSetCount = 2;
+        ai.pSetLayouts = layouts;
+        if (vkCtx_->allocateDescriptorSets(ai, materialSet_) != VK_SUCCESS) {
+            LOG_ERROR("WMORenderer: could not allocate the material table's sets; no buildings are drawn");
+            return false;
+        }
     }
-
-    // --- Create descriptor pool ---
-    VkDescriptorPoolSize poolSizes[] = {
-        { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = MAX_MATERIAL_SETS * 2 },  // diffuse + normal/height
-        { .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = MAX_MATERIAL_SETS },
-    };
-
-    VkDescriptorPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    poolInfo.maxSets = MAX_MATERIAL_SETS;
-    poolInfo.poolSizeCount = 2;
-    poolInfo.pPoolSizes = poolSizes;
-
-    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &materialDescPool_) != VK_SUCCESS) {
-        core::Logger::getInstance().error("WMORenderer: failed to create descriptor pool");
-        return false;
-    }
-    materialSlots_ = UniformSlotPool::forDevice(vkCtx_->getAllocator(), vkCtx_->getPhysicalDevice(),
-                                                sizeof(WMOMaterialUBO), 1024, "WMO materials");
 
     // --- Create pipeline layout ---
     VkPushConstantRange pushRange{};
@@ -294,7 +286,13 @@ bool WMORenderer::initialize(VkContext* ctx, VkDescriptorSetLayout perFrameLayou
     pushRange.offset = 0;
     pushRange.size = sizeof(WMOPushConstants);
 
-    std::vector<VkDescriptorSetLayout> setLayouts = { perFrameLayout, materialSetLayout_ };
+    std::vector<VkDescriptorSetLayout> setLayouts = {perFrameLayout, vkCtx_->textureTable().layout(),
+                                                     materialSetLayout_};
+    {
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(vkCtx_->getPhysicalDevice(), &properties);
+        maxDrawsPerCall_ = std::max(1u, properties.limits.maxDrawIndirectCount);
+    }
     pipelineLayout_ = createPipelineLayout(device, setLayouts, { pushRange });
     if (!pipelineLayout_) {
         core::Logger::getInstance().error("WMORenderer: failed to create pipeline layout");
@@ -358,7 +356,6 @@ void WMORenderer::shutdown() {
     }
 
     VkDevice device = vkCtx_->getDevice();
-    VmaAllocator allocator = vkCtx_->getAllocator();
 
     vkCtx_->waitIdle();
 
@@ -391,13 +388,15 @@ void WMORenderer::shutdown() {
     if (collision_) collision_->clearWmo();
     scene_->instanceIndexById.clear();
 
-    // destroyGroupGPU defers its frees, and those lambdas release descriptor
-    // sets from the pool destroyed just below. Drain them here, while the pool
-    // is still valid and before the pipelines and pools go: no further frames
-    // will run to drain the queue, so anything left in it either leaks or is
-    // run later against a dead pool.
+    // destroyGroupGPU defers its frees. Drain them here, before the tables
+    // they give rows back to go: no further frames will run to drain the
+    // queue.
     vkCtx_->flushDeferredCleanup();
-    if (materialSlots_) materialSlots_->release();
+    materialTable_.destroy();
+    materialRows_.reset();
+    drawPass_.destroy();
+    layout_.reset();
+    vkCtx_->flushDeferredCleanup();
     geometry_.destroy();
 
     // Destroy pipelines
@@ -412,9 +411,8 @@ void WMORenderer::shutdown() {
     // Destroy shadow resources
     destroy(device, shadowPipeline_);
     destroy(device, shadowPipelineLayout_);
-    shadowTexSetCache_.clear();
-    for (auto& pool : shadowTexPool_) destroy(device, pool);
-    destroyShadowParamsSet(device, allocator, shadowParams_);
+    destroy(device, shadowDescPool_);
+    destroy(device, shadowSetLayout_);
 
     vkCtx_ = nullptr;
     initialized_ = false;
@@ -629,6 +627,8 @@ WMORenderer::ModelLoadResult WMORenderer::loadPreparedIncremental(WmoModelPrep& 
             }
             GroupResources::MergedBatch mb;
             mb.texture = tex;
+            mb.textureHandle = tex == whiteTexture_.get() ? whiteTexture_.tableHandle()
+                                                          : modelData.textures[texIndex].tableHandle();
             mb.pendingTextureIndex = pendingTexture;
             mb.hasTexture = tex != whiteTexture_.get();
             mb.alphaTest = state.blendMode == 1;
@@ -701,6 +701,8 @@ WMORenderer::ModelLoadResult WMORenderer::loadPreparedIncremental(WmoModelPrep& 
     loadedModels[id] = std::move(modelData);
     scene_->loadingModels_.erase(id);
     // Instances placed while it loaded had no groups to answer from.
+    layout_.setModel(id, describeDraws(loadedModels[id]));
+    scene_->slots.modelChanged(id);
     markContentChanged();
     retryPendingTextures();
     core::Logger::getInstance().debug("WMO model ", id, " loaded successfully (", loadedGroupCount, " groups)");
@@ -721,7 +723,7 @@ void WMORenderer::unloadModel(uint32_t id) {
     // Free GPU resources - defer because in-flight command buffers may
     // still reference this model's vertex/index buffers and descriptors.
     for (auto& group : it->second.groups) {
-        destroyGroupGPU(group, /*defer=*/true);
+        destroyGroupGPU(group);
     }
     // Its groups, GPU handles handed to the deferred deletion above, are
     // collision geometry and grids now - the bulk of a city model, let go on
@@ -731,6 +733,8 @@ void WMORenderer::unloadModel(uint32_t id) {
         std::make_unique<std::vector<GroupResources>>(std::move(it->second.groups)));
 
     loadedModels.erase(it);
+    layout_.removeModel(id);
+    scene_->slots.modelChanged(id);
     markContentChanged();
     core::Logger::getInstance().info("WMO model ", id, " unloaded");
 }
@@ -1057,9 +1061,10 @@ void WMORenderer::clearInstances() {
     // already uploaded groups retire behind the same fences as full models.
     for (auto& [id, model] : scene_->loadingModels_) {
         releaseRtModel(id);
-        for (auto& group : model.groups) destroyGroupGPU(group, true);
+        for (auto& group : model.groups) destroyGroupGPU(group);
     }
     *scene_ = InstanceState{};
+    layout_.clearInstances();
     if (collision_) collision_->clearWmo();
     // The preparations of those unfinished loads have handed over the
     // groups uploaded so far; a load begun again starts from a new one.
@@ -1077,7 +1082,7 @@ void WMORenderer::clearAll() {
         for (auto& [id, model] : loadedModels) {
             releaseRtModel(id);
             for (auto& group : model.groups) {
-                destroyGroupGPU(group, /*defer=*/true);
+                destroyGroupGPU(group);
             }
         }
 
@@ -1087,6 +1092,7 @@ void WMORenderer::clearAll() {
 
     // The models' textures go back to the shared cache with them, to be found
     // again by the next map or evicted when room is wanted.
+    for (const auto& [id, model] : loadedModels) layout_.removeModel(id);
     loadedModels.clear();
     markContentChanged();
     failedTextureRetryAt_.clear();
@@ -1104,418 +1110,341 @@ void WMORenderer::rebuildIndexById() {
     }
 }
 
-void WMORenderer::prepareRender() {
-    if (recording_->materialVersion == appliedMaterialVersion_) return;
-    appliedMaterialVersion_ = recording_->materialVersion;
-    // These material slots are shared by frame slots. A settings change is
-    // infrequent and must wait for every earlier draw before overwriting them.
-    vkCtx_->waitIdle();
-    for (const auto& entry : recording_->depth.drawn()) for (const auto& kept : entry.groups)
-        for (const auto& mb : kept.gpu->mergedBatches) {
-            if (!mb.materialSlot) continue;
-            auto* ubo = static_cast<WMOMaterialUBO*>(mb.materialSlot.mapped);
-            ubo->enableNormalMap = recording_->normalMap;
-            ubo->enablePOM = recording_->pom;
-            ubo->pomScale = 0.012f;
-            ubo->pomMaxSamples = recording_->samples;
-            ubo->heightMapVariance = mb.heightMapVariance;
-            ubo->normalMapStrength = recording_->normalStrength;
+void WMORenderer::prepareDraws(VkCommandBuffer cmd, uint32_t frameIndex, ::VkBuffer lights, uint32_t lightCount) {
+    if (frameIndex >= 2) return;
+    drawsReady_[frameIndex] = false;
+    if (!recording_) return;
+    const Frame& frame = *recording_;
+    // The material rows first: the cull names them in its records.
+    if (frame.materialRowCount == 0 || !materialTable_.reserve(cmd, frame.materialRowCount)) return;
+    // Not acknowledged when it fails, so the same rows come with the next frame.
+    if (!materialTable_.write(cmd, frameIndex, frame.materialUpdateSlots, frame.materialUpdateRows.data())) return;
+    if (!drawPass_.prepare(cmd, frameIndex, frame.draws, lights, lightCount)) return;
+    pendingSerial_ = frame.serial;
+
+    const uint32_t drawVersion = drawPass_.drawVersion(frameIndex);
+    if (materialSetVersion_[frameIndex] != materialTable_.version() ||
+        materialSetDrawVersion_[frameIndex] != drawVersion) {
+        const VkDescriptorBufferInfo infos[5] = {
+            {.buffer = materialTable_.buffer(), .offset = 0, .range = materialTable_.bytes()},
+            {.buffer = drawPass_.colourRecords(frameIndex), .offset = 0, .range = VK_WHOLE_SIZE},
+            {.buffer = drawPass_.groupLights(frameIndex), .offset = 0, .range = VK_WHOLE_SIZE},
+            {.buffer = drawPass_.groups().buffer(), .offset = 0, .range = drawPass_.groups().bytes()},
+            {.buffer = drawPass_.instances().buffer(), .offset = 0, .range = drawPass_.instances().bytes()}};
+        VkWriteDescriptorSet writes[5] = {};
+        for (uint32_t b = 0; b < 5; ++b) {
+            writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[b].dstSet = materialSet_[frameIndex];
+            writes[b].dstBinding = b;
+            writes[b].descriptorCount = 1;
+            writes[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[b].pBufferInfo = &infos[b];
         }
+        vkUpdateDescriptorSets(vkCtx_->getDevice(), 5, writes, 0, nullptr);
+        materialSetVersion_[frameIndex] = materialTable_.version();
+        materialSetDrawVersion_[frameIndex] = drawVersion;
+    }
+    if (shadowSet_[frameIndex] && shadowSetVersion_[frameIndex] != drawVersion) {
+        const VkDescriptorBufferInfo infos[3] = {
+            {.buffer = drawPass_.casterRecords(frameIndex), .offset = 0, .range = VK_WHOLE_SIZE},
+            {.buffer = drawPass_.groups().buffer(), .offset = 0, .range = drawPass_.groups().bytes()},
+            {.buffer = drawPass_.instances().buffer(), .offset = 0, .range = drawPass_.instances().bytes()}};
+        VkWriteDescriptorSet writes[3] = {};
+        for (uint32_t b = 0; b < 3; ++b) {
+            writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[b].dstSet = shadowSet_[frameIndex];
+            writes[b].dstBinding = b;
+            writes[b].descriptorCount = 1;
+            writes[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[b].pBufferInfo = &infos[b];
+        }
+        vkUpdateDescriptorSets(vkCtx_->getDevice(), 3, writes, 0, nullptr);
+        shadowSetVersion_[frameIndex] = drawVersion;
+    }
+    drawsReady_[frameIndex] = true;
 }
 
-WMORenderer::GroupDraw WMORenderer::extractGroup(const GroupResources& group,
-                                               const WMOInstance& instance, uint32_t index) const {
-    GroupDraw out;
-    if (!group.drawData) {
-        auto data = std::make_shared<GroupDrawData>();
-        data->geometry = group.geometry;
-        data->boundingBoxMin = group.boundingBoxMin;
-        data->boundingBoxMax = group.boundingBoxMax;
-        data->groupFlags = group.groupFlags;
-        data->isLOD = group.isLOD;
-        data->mergedBatches = group.mergedBatches;
-        group.drawData = std::move(data);
-    }
-    out.gpu = group.drawData;
-    if (index < instance.worldGroupBounds.size()) {
-        out.worldMin = instance.worldGroupBounds[index].first;
-        out.worldMax = instance.worldGroupBounds[index].second;
-    } else {
-        const glm::vec3 centre = glm::vec3(instance.modelMatrix * glm::vec4(
-            (group.boundingBoxMin + group.boundingBoxMax) * 0.5f, 1.0f));
-        const float radius = 0.5f * glm::length(group.boundingBoxMax - group.boundingBoxMin) * instance.scale;
-        out.worldMin = centre - glm::vec3(radius);
-        out.worldMax = centre + glm::vec3(radius);
-    }
-    if (frameLights_) out.lights = pickLocalLights(*frameLights_, (out.worldMin + out.worldMax) * 0.5f,
-                                                 glm::length(out.worldMax - out.worldMin) * 0.5f);
-    return out;
+void WMORenderer::frameSubmitted() {
+    if (pendingSerial_ == 0) return;
+    frameApplied_.store(pendingSerial_, std::memory_order_release);
+    pendingSerial_ = 0;
 }
 
 void WMORenderer::Frame::clear() noexcept {
-    for (auto* list : {&view, &reflection, &depth}) {
-        // Keep each entry's group capacity, but no resource from the completed
-        // frame. Entries past `used` can belong to an earlier, larger scene.
-        for (auto& entry : list->entries) entry.groups.clear();
-        list->portalGroups.clear();
-        list->clear();
+    wireframe = false;
+    serial = 0;
+    materialRowCount = 0;
+    materialUpdateSlots.clear();
+    materialUpdateRows.clear();
+    draws.clear();
+}
+
+std::vector<WmoGroupDraws> WMORenderer::describeDraws(const ModelData& model) const {
+    constexpr uint32_t kAntiportal = 0x4000000;
+    std::vector<WmoGroupDraws> out(model.groups.size());
+    for (size_t gi = 0; gi < model.groups.size(); ++gi) {
+        const GroupResources& group = model.groups[gi];
+        WmoGroupDraws& draws = out[gi];
+        if (!group.geometry.placed()) continue;
+        draws.page = group.geometry.page;
+        draws.localCentre = (group.boundingBoxMin + group.boundingBoxMax) * 0.5f;
+        draws.swayReach = group.swayReach;
+        draws.shell = group.isLOD;
+        draws.antiportal = (group.groupFlags & kAntiportal) != 0;
+        for (const auto& mb : group.mergedBatches) {
+            const uint32_t kind = wmoColourKind(mb.isTransparent, mb.alphaTest, mb.twoSided);
+            const bool drawn = mb.materialRow != GpuRowStore<WmoMaterialGPU>::kNoRow;
+            // An alpha-keyed material casts what it draws: Dalaran's lattice
+            // windows, grates, fences. Until its texture is in, it casts
+            // nothing rather than the solid quad.
+            const bool casts = !(mb.alphaTest && !mb.hasTexture);
+            for (const auto& dr : mb.draws) {
+                if (dr.indexCount == 0) continue;
+                WmoRangeGPU range;
+                range.indexCount = dr.indexCount;
+                range.firstIndex = group.geometry.firstIndex + dr.firstIndex;
+                range.baseVertex = group.geometry.baseVertex;
+                range.material = drawn ? mb.materialRow : WmoRangeGPU::kNone;
+                range.place = kind | (draws.kindCounts[kind]++ << 3);
+                if (casts) {
+                    range.caster = draws.casterCount++;
+                    range.texture = drawn ? materialRows_.at(mb.materialRow).texture : whiteTexture_.tableHandle();
+                    range.casterFlags = mb.alphaTest ? 3u : 0u;
+                }
+                draws.ranges.push_back(range);
+            }
+        }
+    }
+    return out;
+}
+
+void WMORenderer::catchUpLayout() {
+    scene_->slots.catchUp(InstanceSlots::Mirror::GpuCull, [&](uint32_t slot, uint32_t id) {
+        if (id == InstanceSlots::invalid) {
+            layout_.free(slot);
+            return;
+        }
+        const auto index = scene_->instanceIndexById.find(id);
+        if (index == scene_->instanceIndexById.end()) return;
+        WMOInstance& instance = scene_->instances[index->second];
+        const auto model = loadedModels.find(instance.modelId);
+        // Placed before its model finished loading: its groups' boxes come
+        // with the model.
+        if (model != loadedModels.end() && instance.worldGroupBounds.size() != model->second.groups.size())
+            refreshInstanceBounds(instance);
+        layout_.place(slot, WmoDrawLayout::Placement{.model = instance.modelId,
+                                                     .matrix = instance.modelMatrix,
+                                                     .scale = instance.scale,
+                                                     .shown = !instance.hidden,
+                                                     .groupBounds = instance.worldGroupBounds});
+    });
+}
+
+void WMORenderer::walkPortals(const Camera& camera, const glm::vec3& viewer, std::vector<uint32_t>& culled) const {
+    culled.assign((layout_.groupRowCount() + 31) / 32, 0u);
+    Frustum frustum;
+    frustum.extractFromMatrix(camera.getProjectionMatrix() * camera.getViewMatrix());
+    const glm::vec3 camPos = camera.getPosition();
+    std::unordered_set<uint32_t> visible;
+    for (const WMOInstance& instance : scene_->instances) {
+        if (instance.hidden) continue;
+        const auto modelIt = loadedModels.find(instance.modelId);
+        if (modelIt == loadedModels.end()) continue;
+        const ModelData& model = modelIt->second;
+        if (model.portals.empty() || model.portalRefs.empty()) continue;
+        const std::span<const uint32_t> rows = layout_.groupRows(scene_->slots.slotOf(instance.id));
+        if (rows.empty()) continue;
+
+        // If the camera is outside all groups, skip portal culling entirely.
+        // This is what makes it safe for the traversal below to start from
+        // the camera: an orbiting third-person camera that has left the
+        // building never reaches the walk at all.
+        const glm::vec3 localRealCam = glm::vec3(instance.invModelMatrix * glm::vec4(camPos, 1.0f));
+        const int camGroup = findContainingGroup(model, localRealCam);
+        if (camGroup < 0) continue;
+        // Entranceways and awnings: the best-fit AABB often claims an
+        // interior group while the camera is visually outside (interior
+        // boxes spill past the doorway). Only trust portal traversal when
+        // the camera group is interior-only - the same rule
+        // getVisibleGroupsViaPortals applies to the viewer position.
+        constexpr uint32_t WMO_GROUP_FLAG_OUTDOOR = 0x8;
+        constexpr uint32_t WMO_GROUP_FLAG_INDOOR = 0x2000;
+        const uint32_t gFlags = model.groups[camGroup].groupFlags;
+        if ((gFlags & WMO_GROUP_FLAG_INDOOR) == 0 || (gFlags & WMO_GROUP_FLAG_OUTDOOR) != 0) continue;
+        // Doorway thresholds sit inside both the interior box and an outdoor
+        // street group's box - treat those as outdoors too (second half of
+        // the viewer-side rule).
+        bool atThreshold = false;
+        for (size_t gi = 0; gi < model.groups.size() && !atThreshold; ++gi) {
+            if (static_cast<int>(gi) == camGroup) continue;
+            const auto& g = model.groups[gi];
+            if (!(g.groupFlags & WMO_GROUP_FLAG_OUTDOOR)) continue;
+            atThreshold = localRealCam.x >= g.boundingBoxMin.x && localRealCam.x <= g.boundingBoxMax.x &&
+                          localRealCam.y >= g.boundingBoxMin.y && localRealCam.y <= g.boundingBoxMax.y &&
+                          localRealCam.z >= g.boundingBoxMin.z && localRealCam.z <= g.boundingBoxMax.z;
+        }
+        if (atThreshold) continue;
+
+        // Both viewpoints seed the walk. The frustum belongs to the camera,
+        // so its group is the principled start - but at a doorway or in a
+        // hallway the camera and the character stand in different groups,
+        // and seeding from one while testing doors against the other's view
+        // is how the interior emptied out. Neither is reliably right on its
+        // own, so take both.
+        //
+        // Ironforge shows this worst because of what rescues everywhere
+        // else: exterior groups are seeded unconditionally below, which in a
+        // city WMO means the streets and facades stay drawn however the walk
+        // goes. Ironforge is interior throughout, that seed contributes
+        // almost nothing, and the entire result rests on the traversal.
+        const glm::vec3 localViewer = glm::vec3(instance.invModelMatrix * glm::vec4(viewer, 1.0f));
+        visible.clear();
+        getVisibleGroupsViaPortals(model, localRealCam, localViewer, frustum, instance.modelMatrix, visible);
+        for (size_t gi = 0; gi < rows.size(); ++gi) {
+            const uint32_t row = rows[gi];
+            if (row == GpuRowStore<WmoGroupGPU>::kNoRow || visible.contains(static_cast<uint32_t>(gi))) continue;
+            culled[row >> 5] |= 1u << (row & 31u);
+        }
     }
 }
 
-std::shared_ptr<const WMORenderer::Frame> WMORenderer::extract(const Camera& camera,
-        const glm::vec3& viewer, const std::vector<LocalLight>& lights, const WaterReflectionView* mirror) {
+std::shared_ptr<const WMORenderer::Frame> WMORenderer::extract(const Camera& camera, const glm::vec3& viewer,
+                                                               const WaterReflectionView* mirror) {
     auto frame = framePool_.acquire();
-    frameLights_ = &lights;
-    cullView(camera, viewer, frame->view, mirror, &frame->reflection);
-    extractDepth(frame->depth);
-    frameLights_ = nullptr;
     frame->wireframe = wireframeMode;
-    if (std::exchange(materialSettingsDirty_, false)) ++extractedMaterialVersion_;
-    frame->materialVersion = extractedMaterialVersion_;
-    frame->normalMap = normalMappingEnabled_ ? 1 : 0;
-    frame->pom = pomEnabled_ ? 1 : 0;
-    frame->samples = pomSamplesFor(pomQuality_);
-    frame->normalStrength = normalMapStrength_;
+    // The settings are in every row; changed, every row is written again.
+    if (std::exchange(materialSettingsDirty_, false)) rewriteMaterialRows();
+    catchUpLayout();
+
+    // The rows ride from the first frame extracted after they were written
+    // until one that carried them is on the GPU.
+    frame->serial = ++frameSerial_;
+    const uint32_t applied = frameApplied_.load(std::memory_order_acquire);
+    materialRows_.carry(frame->serial, applied, frame->materialUpdateSlots, frame->materialUpdateRows);
+    frame->materialRowCount = materialRows_.count();
+    WmoDrawFrame& draws = frame->draws;
+    layout_.carry(frame->serial, applied, draws);
+    draws.pages.resize(draws.cull.shape.x);
+    for (size_t page = 0; page < draws.pages.size(); ++page)
+        draws.pages[page] = {.vertices = geometry_.vertices(static_cast<int32_t>(page)),
+                             .indices = geometry_.indices(static_cast<int32_t>(page))};
+
+    // The cull's view: the camera's volume, the mirror's, the distances.
+    WmoCullFrameGPU& cull = draws.cull;
+    Frustum frustum;
+    frustum.extractFromMatrix(camera.getProjectionMatrix() * camera.getViewMatrix());
+    const auto planeOf = [](const Plane& p) { return glm::vec4(p.normal, p.distance); };
+    for (int i = 0; i < 6; ++i) cull.viewPlanes[i] = planeOf(frustum.getPlane(static_cast<Frustum::Side>(i)));
+    if (mirror) {
+        for (int i = 0; i < 6; ++i) cull.mirrorPlanes[i] = planeOf(mirror->seen.getPlane(static_cast<Frustum::Side>(i)));
+    }
+    cull.camera = glm::vec4(camera.getPosition(), viewDistance_);
+    // The nearer group distance and the portal walk run only when asked for
+    // (WOWEE_WMO_CULL): they have removed nearby interiors before.
+    const float groupDistance = distanceCulling ? std::min(viewDistance_, maxGroupDistance) : viewDistance_;
+    cull.limits = glm::vec4(cullingEnabled_ ? groupDistance : -1.0f, mirror ? mirror->height : 0.0f,
+                            mirror ? 1.0f : 0.0f, 0.0f);
+    const bool walk = portalCulling && cullingEnabled_;
+    cull.shape.y = walk ? 1u : 0u;
+    if (walk) walkPortals(camera, viewer, draws.portalCulled);
     return frame;
 }
 
-void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const Camera& camera,
-                         const glm::vec3*, Pass pass, Layer layer) {
-    if (!opaquePipeline_) return;
-    const uint32_t draws = recordView(cmd, perFrameSet, camera.getPosition(),
-        pass == Pass::Reflection ? recording_->reflection : recording_->view, layer);
-    if (pass != Pass::View) return;
-    if (layer == Layer::Blended) {
-        viewBlendedDrawCallCount_ = draws;
-    } else {
-        viewDrawCallCount_ = draws;
-        if (layer == Layer::All) viewBlendedDrawCallCount_ = 0;
-    }
-}
+void WMORenderer::render(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, Pass pass, Layer layer) {
+    if (!opaquePipeline_ || !recording_) return;
+    const uint32_t frameIndex = vkCtx_->getCurrentFrame();
+    if (!drawsReady_[frameIndex] || !drawPass_.ready(frameIndex)) return;
+    const WmoDrawFrame& draws = recording_->draws;
+    const auto pages = static_cast<uint32_t>(draws.pages.size());
+    const ::VkBuffer commands = drawPass_.commands(frameIndex);
 
-void WMORenderer::cullView(const Camera& camera, const glm::vec3& portalViewerPos, DrawList& list,
-                           const WaterReflectionView* mirror, DrawList* mirrorList) const {
-    list.clear();
-    if (mirrorList) mirrorList->clear();
-    if (!mirror) mirrorList = nullptr;
-
-    // Extract frustum planes for proper culling
-    glm::mat4 viewProj = camera.getProjectionMatrix() * camera.getViewMatrix();
-    Frustum frustum;
-    frustum.extractFromMatrix(viewProj);
-
-    const glm::vec3 camPos = camera.getPosition();
-    const bool doPortalCull = portalCulling && cullingEnabled_;
-    const bool doDistanceCull = distanceCulling && cullingEnabled_;
-
-    for (const WMOInstance& instance : scene_->instances) {
-        // Somewhere else entirely - see setInstanceHidden.
-        if (instance.hidden) continue;
-        auto mdlIt = loadedModels.find(instance.modelId);
-        if (mdlIt == loadedModels.end()) continue;
-        const ModelData& model = mdlIt->second;
-
-        DrawEntry& entry = list.add();
-        entry.modelMatrix = instance.modelMatrix;
-        entry.scale = instance.scale;
-        DrawEntry* mirrored = mirrorList ? &mirrorList->add() : nullptr;
-        if (mirrored) {
-            mirrored->modelMatrix = instance.modelMatrix;
-            mirrored->scale = instance.scale;
-        }
-
-        // Portal-based visibility, into the pass's own scratch set.
-        bool usePortalCulling = doPortalCull && !model.portals.empty() && !model.portalRefs.empty();
-        const glm::vec3 localRealCam =
-            glm::vec3(instance.invModelMatrix * glm::vec4(camPos, 1.0f));
-        if (usePortalCulling) {
-            // If the camera is outside all groups, skip portal culling entirely.
-            // This is what makes it safe for the traversal below to start from
-            // the camera: an orbiting third-person camera that has left the
-            // building never reaches the walk at all.
-            int camGroup = findContainingGroup(model, localRealCam);
-            if (camGroup < 0) {
-                usePortalCulling = false;
-            } else {
-                // Entranceways and awnings: the best-fit AABB often claims an
-                // interior group while the camera is visually outside (interior
-                // boxes spill past the doorway). Only trust portal traversal
-                // when the camera group is interior-only - the same rule
-                // getVisibleGroupsViaPortals applies to the viewer position.
-                constexpr uint32_t WMO_GROUP_FLAG_OUTDOOR = 0x8;
-                constexpr uint32_t WMO_GROUP_FLAG_INDOOR = 0x2000;
-                const uint32_t gFlags = model.groups[camGroup].groupFlags;
-                const bool isIndoor = (gFlags & WMO_GROUP_FLAG_INDOOR) != 0;
-                const bool isOutdoor = (gFlags & WMO_GROUP_FLAG_OUTDOOR) != 0;
-                if (!isIndoor || isOutdoor) {
-                    usePortalCulling = false;
-                } else {
-                    // Doorway thresholds sit inside both the interior box and
-                    // an outdoor street group's box - treat those as outdoors
-                    // too (second half of the viewer-side rule).
-                    for (size_t gi = 0; gi < model.groups.size(); ++gi) {
-                        if (static_cast<int>(gi) == camGroup) continue;
-                        const auto& g = model.groups[gi];
-                        if (!(g.groupFlags & WMO_GROUP_FLAG_OUTDOOR)) continue;
-                        if (localRealCam.x >= g.boundingBoxMin.x && localRealCam.x <= g.boundingBoxMax.x &&
-                            localRealCam.y >= g.boundingBoxMin.y && localRealCam.y <= g.boundingBoxMax.y &&
-                            localRealCam.z >= g.boundingBoxMin.z && localRealCam.z <= g.boundingBoxMax.z) {
-                            usePortalCulling = false;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        if (usePortalCulling) {
-            list.portalGroups.clear();
-            // Both viewpoints seed the walk. The frustum belongs to the camera,
-            // so its group is the principled start - but at a doorway or in a
-            // hallway the camera and the character stand in different groups,
-            // and seeding from one while testing doors against the other's view
-            // is how the interior emptied out. Neither is reliably right on its
-            // own, so take both.
-            //
-            // Ironforge shows this worst because of what rescues everywhere
-            // else: exterior groups are seeded unconditionally below, which in a
-            // city WMO means the streets and facades stay drawn however the walk
-            // goes. Ironforge is interior throughout, that seed contributes
-            // almost nothing, and the entire result rests on the traversal.
-            const glm::vec3 localViewer =
-                glm::vec3(instance.invModelMatrix * glm::vec4(portalViewerPos, 1.0f));
-            getVisibleGroupsViaPortals(model, localRealCam, localViewer, frustum,
-                                       instance.modelMatrix, list.portalGroups);
-            // Use the unordered_set directly - was copying into portalVisibleGroups_,
-            // sorting it, and binary-searching per group. The set lookup is O(1)
-            // per group and skips the per-instance copy + sort.
-        }
-
-        for (size_t gi = 0; gi < model.groups.size(); ++gi) {
-            if (usePortalCulling && !list.portalGroups.contains(static_cast<uint32_t>(gi))) {
-                list.portalCulled++;
-                continue;
-            }
-
-            if (gi < instance.worldGroupBounds.size()) {
-                const auto& [gMin, gMax] = instance.worldGroupBounds[gi];
-                const glm::vec2 nearest = glm::clamp(glm::vec2(camPos),
-                                                    glm::vec2(gMin), glm::vec2(gMax));
-                const glm::vec2 delta = nearest - glm::vec2(camPos);
-                if (glm::dot(delta, delta) > viewDistance_ * viewDistance_) {
-                    list.distanceCulled++;
-                    continue;
-                }
-            }
-
-            // Optional tighter 3D distance culling, independent of the shared
-            // horizontal world limit above. Keep nearby interiors unaffected.
-            if (cullingEnabled_ && gi < instance.worldGroupBounds.size()) {
-                const auto& [gMin, gMax] = instance.worldGroupBounds[gi];
-
-                glm::vec3 closestPoint = glm::clamp(camPos, gMin, gMax);
-                float distSq = glm::dot(closestPoint - camPos, closestPoint - camPos);
-                const float groupViewDistance = doDistanceCull
-                    ? std::min(viewDistance_, maxGroupDistance)
-                    : viewDistance_;
-                if (distSq > groupViewDistance * groupViewDistance) {
-                    list.distanceCulled++;
-                    continue;
-                }
-            }
-
-            // The view keeps what is in the camera's volume: outside it the
-            // GPU would clip every triangle, and recording it costs the draws
-            // and their vertices - outside a city's buildings, with no portal
-            // walk, two of every three groups were behind or beside the
-            // camera. The reflection keeps what stands where the mirror
-            // shows it, banners swung as far as they go, in view or not.
-            bool inView = true;
-            bool inMirror = false;
-            if (gi < instance.worldGroupBounds.size()) {
-                const auto& [gMin, gMax] = instance.worldGroupBounds[gi];
-                inView = frustum.intersectsAABB(gMin, gMax);
-                if (mirrored) {
-                    const glm::vec3 sway(model.groups[gi].swayReach * instance.scale);
-                    inMirror = mirror->canSee(gMin - sway, gMax + sway);
-                }
-            }
-            if (!inView) list.frustumCulled++;
-            if (!inView && !inMirror) continue;
-            GroupDraw draw = extractGroup(model.groups[gi], instance, static_cast<uint32_t>(gi));
-            if (inMirror) mirrored->groups.push_back(draw);
-            if (inView) entry.groups.push_back(std::move(draw));
-        }
-        if (mirrored && mirrored->groups.empty()) mirrorList->dropLast();
-        if (entry.groups.empty()) list.dropLast();
-    }
-}
-
-uint32_t WMORenderer::recordView(VkCommandBuffer cmd, VkDescriptorSet perFrameSet, const glm::vec3& camPos,
-                             const DrawList& list, Layer layer) const {
-    if (list.used == 0) return 0;
-    uint32_t drawCalls = 0;
+    // The per-frame set (0), the device's texture table (1), and the
+    // material table with what the draws read (2).
+    const VkDescriptorSet sets[3] = {perFrameSet, vkCtx_->textureTable().set(), materialSet_[frameIndex]};
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 3, sets, 0, nullptr);
     FaceCulling faces(*vkCtx_, cmd);
+    const VkPipeline drawnWith = recording_->wireframe && wireframePipeline_ ? wireframePipeline_ : opaquePipeline_;
 
-    // Select pipeline based on wireframe mode
-    VkPipeline activePipeline = (recording_->wireframe && wireframePipeline_) ? wireframePipeline_ : opaquePipeline_;
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, activePipeline);
-
-    // Bind per-frame descriptor set (set 0)
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_,
-                             0, 1, &perFrameSet, 0, nullptr);
-
-    // Track which pipeline is currently bound: 0=opaque, 1=transparent,
-    // 3=alpha-tested
-    int currentPipelineKind = 0;
-
-    for (const DrawEntry& entry : list.drawn()) {
-
-        // Push model matrix. The cloth half is written per batch below; this
-        // sets the instance's matrix and clears the cloth for everything that
-        // is not one.
-        WMOPushConstants push{};
-        push.model = entry.modelMatrix;
-        push.cloth = glm::vec4(0.0f);
-        vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
-                            0, sizeof(WMOPushConstants), &push);
-        glm::vec4 pushedCloth(0.0f);
-
-        // LOD shell groups render only beyond this distance squared (190 units)
-        static constexpr float LOD_SHELL_DIST_SQ = 196.0f * 196.0f;
-
-        // Render visible groups
-        for (const auto& kept : entry.groups) {
-            const auto& group = *kept.gpu;
-
-            // Only skip antiportal geometry
-            if (group.groupFlags & 0x4000000) continue;
-
-            // Skip distance-only LOD shell groups when camera is close to the group
-            if (group.isLOD) {
-                glm::vec3 groupCenter = entry.modelMatrix * glm::vec4(
-                    (group.boundingBoxMin + group.boundingBoxMax) * 0.5f, 1.0f);
-                float groupDistSq = glm::dot(camPos - groupCenter, camPos - groupCenter);
-                if (groupDistSq < LOD_SHELL_DIST_SQ) continue;
+    // The layer's kinds, opaque ones first, each a call a page: the view's
+    // list first, the reflection's after it.
+    const uint32_t firstKind = layer == Layer::Blended ? kWmoBlendedKinds : 0u;
+    const uint32_t endKind = layer == Layer::Opaque ? kWmoBlendedKinds : kWmoColourKinds;
+    const uint32_t listBase = pass == Pass::Reflection ? draws.colourPlaces : 0u;
+    for (uint32_t kind = firstKind; kind < endKind; ++kind) {
+        // 0 opaque, 2 opaque with the alpha test compiled in (in wireframe,
+        // the wireframe pipeline), 4 blended without depth writes.
+        const VkPipeline pipeline = kind >= kWmoBlendedKinds ? transparentPipeline_
+                                    : kind >= 2 && !recording_->wireframe ? alphaTestPipeline_
+                                                                          : drawnWith;
+        bool bound = false;
+        for (uint32_t page = 0; page < pages; ++page) {
+            const uint32_t bucket = page * kWmoColourKinds + kind;
+            const uint32_t size = draws.bucketSizes[bucket];
+            if (size == 0 || !draws.pages[page].vertices || !pipeline) continue;
+            if (!bound) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+                faces.pipelineBound();
+                faces.show((kind & 1u) != 0u);
+                bound = true;
             }
-
-            // Skip groups with invalid GPU resources
-            if (!group.geometry.placed()) continue;
-
-            // A batch is in the layer being recorded, or it waits for the other.
-            const auto inLayer = [layer](const auto& mb) { return wmoBatchInLayer(mb.isTransparent, layer); };
-            if (layer != Layer::All &&
-                std::none_of(group.mergedBatches.begin(), group.mergedBatches.end(), inLayer)) {
-                continue;
-            }
-
-            geometry_.bind(cmd, group.geometry);
-
-            vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
-                               offsetof(WMOPushConstants, localLights), sizeof(LocalLightSet), &kept.lights);
-
-            // Render each merged batch
-            for (const auto& mb : group.mergedBatches) {
-                if (!mb.materialSet || !inLayer(mb)) continue;
-
-                // Determine which pipeline this batch needs
-                int neededPipeline = 0; // opaque
-                if (mb.isTransparent && transparentPipeline_) {
-                    neededPipeline = 1; // transparent (alpha blend, no depth write)
-                } else if (mb.alphaTest && !recording_->wireframe) {
-                    neededPipeline = 3; // opaque, with the alpha test compiled in
-                }
-
-                // Switch pipeline if needed (descriptor sets and push constants
-                // are preserved across compatible pipeline layout switches)
-                if (neededPipeline != currentPipelineKind) {
-                    VkPipeline targetPipeline = activePipeline;
-                    if (neededPipeline == 1) targetPipeline = transparentPipeline_;
-                    else if (neededPipeline == 3) targetPipeline = alphaTestPipeline_;
-                    if (targetPipeline == VK_NULL_HANDLE) continue;
-
-                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, targetPipeline);
-                    faces.pipelineBound();
-                    currentPipelineKind = neededPipeline;
-                }
-                faces.show(mb.twoSided);
-
-                // Bind material descriptor set (set 1)
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_,
-                                         1, 1, &mb.materialSet, 0, nullptr);
-
-                // Where this batch's cloth hangs, when it is cloth. Written
-                // only when it changes: most batches are walls and share the
-                // zero that says "not cloth".
-                const glm::vec4 wantCloth(mb.clothTop, mb.clothDrop,
-                                          mb.clothCentreX, mb.clothCentreY);
-                if (wantCloth != pushedCloth) {
-                    pushedCloth = wantCloth;
-                    vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT,
-                                       offsetof(WMOPushConstants, cloth),
-                                       sizeof(glm::vec4), &pushedCloth);
-                }
-
-                // Issue draw calls for each range in this merged batch
-                for (const auto& dr : mb.draws) {
-                    if (dr.indexCount == 0) continue;
-                    vkCmdDrawIndexed(cmd, dr.indexCount, 1, group.geometry.firstIndex + dr.firstIndex,
-                                     group.geometry.baseVertex, 0);
-                    ++drawCalls;
-                }
+            geometry_.bind(cmd, GeometryPool::Range{.page = static_cast<int32_t>(page),
+                                                    .vertices = draws.pages[page].vertices,
+                                                    .indices = draws.pages[page].indices});
+            for (uint32_t first = 0; first < size; first += maxDrawsPerCall_) {
+                const WMOPushConstants push{.drawBase = draws.bucketStarts[bucket] + first};
+                vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
+                vkCmdDrawIndexedIndirect(cmd, commands,
+                                         VkDeviceSize(listBase + push.drawBase) * sizeof(VkDrawIndexedIndirectCommand),
+                                         std::min(maxDrawsPerCall_, size - first),
+                                         sizeof(VkDrawIndexedIndirectCommand));
             }
         }
     }
-    return drawCalls;
 }
 
 bool WMORenderer::initializeShadow(VkRenderPass shadowRenderPass) {
     if (!vkCtx_ || shadowRenderPass == VK_NULL_HANDLE) return false;
     VkDevice device = vkCtx_->getDevice();
 
-    // The set the shadow pass binds, built the same way for all four renderers.
-    if (!createShadowParamsSet(device, vkCtx_->getAllocator(), sizeof(ShadowParamsUBO),
-                               whiteTexture_->getImageView(),
-                              whiteTexture_->getSampler(), "WMORenderer", shadowParams_)) {
-        return false;
-    }
-
+    // Set 1: the frame slot's caster records, the group and instance tables.
     {
-        VkDescriptorPoolSize texPoolSizes[2]{};
-        texPoolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        texPoolSizes[0].descriptorCount = 256;
-        texPoolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        texPoolSizes[1].descriptorCount = 256;
-        VkDescriptorPoolCreateInfo texPoolCI{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-        texPoolCI.maxSets = 256;
-        texPoolCI.poolSizeCount = 2;
-        texPoolCI.pPoolSizes = texPoolSizes;
-        for (uint32_t f = 0; f < kShadowTexPoolFrames; ++f) {
-            if (vkCreateDescriptorPool(device, &texPoolCI, nullptr, &shadowTexPool_[f]) != VK_SUCCESS) {
-                LOG_ERROR("WMORenderer: failed to create shadow texture pool ", f);
-                return false;
-            }
+        std::vector<VkDescriptorSetLayoutBinding> bindings(3);
+        for (uint32_t b = 0; b < 3; ++b)
+            bindings[b] = {.binding = b, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1,
+                           .stageFlags = VK_SHADER_STAGE_VERTEX_BIT};
+        shadowSetLayout_ = createDescriptorSetLayout(device, bindings);
+        const VkDescriptorPoolSize size{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 6};
+        VkDescriptorPoolCreateInfo poolInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        poolInfo.maxSets = 2;
+        poolInfo.poolSizeCount = 1;
+        poolInfo.pPoolSizes = &size;
+        const VkDescriptorSetLayout layouts[2] = {shadowSetLayout_, shadowSetLayout_};
+        VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        ai.descriptorSetCount = 2;
+        ai.pSetLayouts = layouts;
+        if (!shadowSetLayout_ || vkCreateDescriptorPool(device, &poolInfo, nullptr, &shadowDescPool_) != VK_SUCCESS ||
+            (ai.descriptorPool = shadowDescPool_, vkCtx_->allocateDescriptorSets(ai, shadowSet_)) != VK_SUCCESS) {
+            LOG_ERROR("WMORenderer: could not make the shadow casters' sets; buildings cast no shadow");
+            return false;
         }
     }
 
-    // Create shadow pipeline layout: set 1 = shadowParams_.layout, push constants = 128 bytes
-    VkPushConstantRange pc{};
-    // The fragment stage reads the alpha-test flags out of the same block.
-    pc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    pc.offset = 0;
-    pc.size = sizeof(ShadowPush);  // one combined matrix and the flags
-    shadowPipelineLayout_ = createPipelineLayout(device, {shadowParams_.layout}, {pc});
+    // Set 0: the texture table the records name alpha-keyed textures in.
+    const VkPushConstantRange pc{.stageFlags = VK_SHADER_STAGE_VERTEX_BIT, .offset = 0, .size = sizeof(WmoShadowPush)};
+    shadowPipelineLayout_ = createPipelineLayout(device, {vkCtx_->textureTable().layout(), shadowSetLayout_}, {pc});
     if (!shadowPipelineLayout_) {
         core::Logger::getInstance().error("WMORenderer: failed to create shadow pipeline layout");
         return false;
     }
 
-    // Load shadow shaders
+    // The doodads' fragment shader: a batch's alpha-keyed texture cuts its
+    // shadow by the record's handle.
     VkShaderModule vertShader, fragShader;
-    if (!vertShader.loadFromFile(device, "assets/shaders/shadow.vert.spv")) {
+    if (!vertShader.loadFromFile(device, "assets/shaders/wmo_shadow.vert.spv")) {
         core::Logger::getInstance().error("WMORenderer: failed to load shadow vertex shader");
         return false;
     }
-    if (!fragShader.loadFromFile(device, "assets/shaders/shadow.frag.spv")) {
+    if (!fragShader.loadFromFile(device, "assets/shaders/m2_shadow.frag.spv")) {
         core::Logger::getInstance().error("WMORenderer: failed to load shadow fragment shader");
         return false;
     }
@@ -1542,154 +1471,41 @@ bool WMORenderer::initializeShadow(VkRenderPass shadowRenderPass) {
     return true;
 }
 
-void WMORenderer::extractDepth(DrawList& list) const {
-    list.clear();
-    for (const WMOInstance& instance : scene_->instances) {
-        // Not in the world, so not between the sun and anything in it - a
-        // ship whose route is on the other map darkened the sea it had left.
-        if (instance.hidden) continue;
-        auto modelIt = loadedModels.find(instance.modelId);
-        if (modelIt == loadedModels.end()) continue;
-        const ModelData& model = modelIt->second;
-
-        DrawEntry& entry = list.add();
-        entry.modelMatrix = instance.modelMatrix;
-        entry.scale = instance.scale;
-        for (size_t gi = 0; gi < model.groups.size(); ++gi) {
-            const auto& group = model.groups[gi];
-            if (!group.geometry.placed()) continue;
-
-            // Skip antiportal geometry
-            if (group.groupFlags & 0x4000000) continue;
-
-            // Skip LOD groups in shadow pass (they overlap real geometry)
-            if (group.isLOD) continue;
-
-            entry.groups.push_back(extractGroup(group, instance, static_cast<uint32_t>(gi)));
-        }
-        if (entry.groups.empty()) list.dropLast();
-    }
-}
-
-void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix,
-                               const glm::vec3& shadowCenter, float shadowRadius, bool resetDescriptors) {
-    if (!shadowPipeline_ || !shadowParams_.set) return;
-
-    // Once a frame, by the frame's first depth-only pass: the sets a later
-    // one reuses are still in this frame's command buffer.
+std::optional<uint32_t> WMORenderer::cullShadowMap(VkCommandBuffer cmd, const glm::vec3& centre, float radius) {
+    if (!shadowPipeline_) return std::nullopt;
     const uint32_t frameIndex = vkCtx_->getCurrentFrame();
-    if (resetDescriptors) {
-        shadowDrawCalls_ = 0;
-        if (frameIndex < kShadowTexPoolFrames && shadowTexPool_[frameIndex]) {
-            vkCtx_->resetDescriptorPool(shadowTexPool_[frameIndex]);
-        }
-        shadowTexSetCache_.clear();
-    }
-
-    // WMO shadow cull uses the ortho half-extent (shadow map coverage) rather than
-    // the proximity radius so that distant buildings whose shadows reach the player
-    // are still rendered into the shadow map.
-    const auto& shadowList_ = recording_->depth;
-    if (shadowList_.used == 0) return;
-    const float radius = std::max(shadowRadius, 180.0f);
-
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_,
-        0, 1, &shadowParams_.set, 0, nullptr);
-
-    for (const DrawEntry& entry : shadowList_.drawn()) {
-
-        // A building does not sway, so the sway slot stays zero.
-        ShadowPush push{.lightSpaceModel = lightSpaceMatrix * entry.modelMatrix};
-        vkCmdPushConstants(cmd, shadowPipelineLayout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(ShadowPush), &push);
-        bool cutoutBound = false;
-
-        for (const auto& kept : entry.groups) {
-            const glm::vec3 nearest = glm::clamp(shadowCenter, kept.worldMin, kept.worldMax);
-            if (glm::dot(nearest - shadowCenter, nearest - shadowCenter) > radius * radius) continue;
-            const auto& group = *kept.gpu;
-            geometry_.bind(cmd, group.geometry);
-
-            for (const auto& mb : group.mergedBatches) {
-                // An alpha-keyed material casts what it draws: Dalaran's
-                // lattice windows, grates, fences. Until its texture is in, it
-                // casts nothing rather than the solid quad.
-                if (mb.alphaTest) {
-                    if (!mb.hasTexture) continue;
-                    const VkDescriptorSet texSet = shadowTexSet(mb.texture, frameIndex);
-                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                        shadowPipelineLayout_, 0, 1, &texSet, 0, nullptr);
-                }
-                if (mb.alphaTest != cutoutBound) {
-                    cutoutBound = mb.alphaTest;
-                    if (!cutoutBound) {
-                        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            shadowPipelineLayout_, 0, 1, &shadowParams_.set, 0, nullptr);
-                    }
-                    push.flags = cutoutBound ? glm::ivec4(1, 1, 0, kWmoAlphaKeyRef) : glm::ivec4(0);
-                    vkCmdPushConstants(cmd, shadowPipelineLayout_,
-                                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                                       0, sizeof(ShadowPush), &push);
-                }
-                for (const auto& dr : mb.draws) {
-                    vkCmdDrawIndexed(cmd, dr.indexCount, 1, group.geometry.firstIndex + dr.firstIndex,
-                                     group.geometry.baseVertex, 0);
-                    ++shadowDrawCalls_;
-                }
-            }
-        }
-        if (cutoutBound) {
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                shadowPipelineLayout_, 0, 1, &shadowParams_.set, 0, nullptr);
-        }
-    }
+    if (!drawsReady_[frameIndex]) return std::nullopt;
+    // The map's square, at least: distant buildings whose shadows reach the
+    // player are cast into it too.
+    return drawPass_.cullShadowMap(cmd, frameIndex, centre, std::max(radius, 180.0f));
 }
 
-VkDescriptorSet WMORenderer::shadowTexSet(VkTexture* tex, uint32_t frameIndex) {
-    // A texture whose upload failed has a null view; binding it to a sampled
-    // descriptor is undefined, so it casts as a solid pane instead.
-    if (!tex || !tex->isValid()) return shadowParams_.set;
-    if (frameIndex >= kShadowTexPoolFrames || !shadowTexPool_[frameIndex]) return shadowParams_.set;
-
-    const VkImageView view = tex->getImageView();
-    if (auto it = shadowTexSetCache_.find(view); it != shadowTexSetCache_.end()) return it->second;
-
-    VkDescriptorSetAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    ai.descriptorPool = shadowTexPool_[frameIndex];
-    ai.descriptorSetCount = 1;
-    ai.pSetLayouts = &shadowParams_.layout;
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    if (vkCtx_->allocateDescriptorSets(ai, &set) != VK_SUCCESS) {
-        return shadowParams_.set;
+void WMORenderer::renderShadow(VkCommandBuffer cmd, const glm::mat4& lightSpaceMatrix, uint32_t map) {
+    if (!shadowPipeline_ || !recording_) return;
+    const uint32_t frameIndex = vkCtx_->getCurrentFrame();
+    if (!drawsReady_[frameIndex]) return;
+    const WmoDrawFrame& draws = recording_->draws;
+    const auto pages = static_cast<uint32_t>(draws.pages.size());
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
+    const VkDescriptorSet sets[2] = {vkCtx_->textureTable().set(), shadowSet_[frameIndex]};
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipelineLayout_, 0, 2, sets, 0, nullptr);
+    const uint32_t mapBase = 2 * draws.colourPlaces + map * draws.casterPlaces;
+    for (uint32_t page = 0; page < pages; ++page) {
+        const uint32_t bucket = pages * kWmoColourKinds + page;
+        const uint32_t size = draws.bucketSizes[bucket];
+        if (size == 0 || !draws.pages[page].vertices) continue;
+        geometry_.bind(cmd, GeometryPool::Range{.page = static_cast<int32_t>(page),
+                                                .vertices = draws.pages[page].vertices,
+                                                .indices = draws.pages[page].indices});
+        for (uint32_t first = 0; first < size; first += maxDrawsPerCall_) {
+            const WmoShadowPush push{.lightSpace = lightSpaceMatrix,
+                                     .call = glm::uvec4(draws.bucketStarts[bucket] + first, 0u, 0u, 0u)};
+            vkCmdPushConstants(cmd, shadowPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(push), &push);
+            vkCmdDrawIndexedIndirect(cmd, drawPass_.commands(frameIndex),
+                                     VkDeviceSize(mapBase + push.call.x) * sizeof(VkDrawIndexedIndirectCommand),
+                                     std::min(maxDrawsPerCall_, size - first), sizeof(VkDrawIndexedIndirectCommand));
+        }
     }
-
-    VkDescriptorImageInfo imgInfo{};
-    imgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    imgInfo.imageView = view;
-    imgInfo.sampler = tex->getSampler();
-    VkDescriptorBufferInfo bufInfo{};
-    bufInfo.buffer = shadowParams_.ubo;
-    bufInfo.offset = 0;
-    bufInfo.range = sizeof(ShadowParamsUBO);
-    VkWriteDescriptorSet writes[2]{};
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = set;
-    writes[0].dstBinding = 0;
-    writes[0].descriptorCount = 1;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[0].pImageInfo = &imgInfo;
-    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = set;
-    writes[1].dstBinding = 1;
-    writes[1].descriptorCount = 1;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    writes[1].pBufferInfo = &bufInfo;
-    vkUpdateDescriptorSets(vkCtx_->getDevice(), 2, writes, 0, nullptr);
-
-    shadowTexSetCache_[view] = set;
-    return set;
 }
 
 uint32_t WMORenderer::getTotalTriangleCount() const {
@@ -1705,47 +1521,15 @@ uint32_t WMORenderer::getTotalTriangleCount() const {
 
 // renderGroup removed - draw calls are inlined in render()
 
-void WMORenderer::destroyGroupGPU(GroupResources& group, bool defer) {
+void WMORenderer::destroyGroupGPU(GroupResources& group) {
     if (!vkCtx_) return;
     // Its ranges come back after the frames in flight; a frame still being
     // recorded holds the group's draw data, range and all.
     geometry_.release(group.geometry);
     group.geometry = {};
-
-    if (!defer) {
-        // Immediate destruction (safe after vkDeviceWaitIdle)
-        for (auto& mb : group.mergedBatches) {
-            if (mb.materialSet) {
-                vkCtx_->freeDescriptorSets(materialDescPool_, 1, &mb.materialSet);
-                mb.materialSet = VK_NULL_HANDLE;
-            }
-            if (materialSlots_) materialSlots_->free(mb.materialSlot);
-            mb.materialSlot = {};
-        }
-    } else {
-        // Deferred destruction - previous frame's command buffer may still
-        // reference these descriptor sets.
-        // Snapshot material handles (::VkBuffer = raw Vulkan handle, not RAII wrapper)
-        struct MatSnapshot { VkDescriptorSet set; UniformSlotPool::Slot slot; };
-        std::vector<MatSnapshot> mats;
-        mats.reserve(group.mergedBatches.size());
-        for (auto& mb : group.mergedBatches) {
-            mats.push_back({.set = mb.materialSet, .slot = mb.materialSlot});
-            mb.materialSet = VK_NULL_HANDLE;
-            mb.materialSlot = {};
-        }
-
-        VkDescriptorPool pool = materialDescPool_;
-        vkCtx_->deferAfterAllFrameFences([ctx = vkCtx_, pool, slots = materialSlots_, mats = std::move(mats)]() {
-            for (auto& m : mats) {
-                if (m.set) {
-                    VkDescriptorSet s = m.set;
-                    ctx->freeDescriptorSets(pool, 1, &s);
-                }
-                if (slots) slots->free(m.slot);
-            }
-        });
-    }
+    // And its material rows, after the frames that may draw with them.
+    for (auto& mb : group.mergedBatches)
+        materialRows_.release(*vkCtx_, std::exchange(mb.materialRow, GpuRowStore<WmoMaterialGPU>::kNoRow));
 }
 
 void WMORenderer::attachNormalHeightMap(const ModelData& model, uint32_t texIndex,
@@ -1754,12 +1538,12 @@ void WMORenderer::attachNormalHeightMap(const ModelData& model, uint32_t texInde
     if (texIndex >= model.normalMaps.size() || !model.normalMaps[texIndex]) return;
     const TextureRef& normals = model.normalMaps[texIndex];
     mb.normalHeightMap = normals.get();
+    mb.normalHandle = normals.tableHandle();
     mb.heightMapVariance = normals.info().heightVariance;
 }
 
 void WMORenderer::createMergedBatchMaterial(const ModelData& model, const GroupResources& group,
                                             GroupResources::MergedBatch& mb) {
-    group.drawData.reset();
     // The baseline probe reproduces the lighting from before a portal-interior
     // group could be sunlit at all: every batch of one baked, and unshadowed.
     const bool portalInterior = (group.groupFlags & 0x2000) != 0;
@@ -1769,16 +1553,27 @@ void WMORenderer::createMergedBatchMaterial(const ModelData& model, const GroupR
         ? WmoBatchLighting{ .light = WmoLight::VertexColour }
         : mb.lighting;
 
-    // Its parameters, in a slot rather than a buffer of its own.
-    mb.materialSlot = materialSlots_ ? materialSlots_->allocate() : UniformSlotPool::Slot{};
-    if (!mb.materialSlot) {
-        // The pool has said why; a batch with no parameters is not drawn.
-        mb.materialSet = VK_NULL_HANDLE;
+    // Its textures' places, its own where they are valid and the fallbacks
+    // where not - not merely non-null: a texture whose upload or view failed
+    // sampled through a live descriptor is undefined behaviour that reaches
+    // an NVIDIA driver as a lost device (#123). A batch even whose fallback
+    // has no place is not drawn: an unlit wall costs a wall, a null view the
+    // device.
+    const auto handle = [](const VkTexture* wanted, TextureHandle wantedHandle, const TextureRef& fallback) {
+        return wanted && wanted->isValid() && wantedHandle != kNoTextureHandle ? wantedHandle
+                                                                               : fallback.tableHandle();
+    };
+    WmoMaterialGPU matData{};
+    matData.texture = handle(mb.texture, mb.textureHandle, whiteTexture_);
+    matData.normalHeight = handle(mb.normalHeightMap, mb.normalHandle, flatNormalTexture_);
+    if (matData.texture == kNoTextureHandle || matData.normalHeight == kNoTextureHandle) {
+        static core::LogBudget budget(8, "WMO batches with no texture place");
+        if (budget.take())
+            LOG_WARNING("WMO ", model.id, ": a batch's texture has no place in the texture table - the batch is "
+                        "not drawn");
+        materialRows_.release(*vkCtx_, std::exchange(mb.materialRow, GpuRowStore<WmoMaterialGPU>::kNoRow));
         return;
     }
-
-    // Write material params
-    WMOMaterialUBO matData{};
     matData.hasTexture = mb.hasTexture ? 1 : 0;
     matData.alphaTest = mb.alphaTest ? 1 : 0;
     matData.light = static_cast<int32_t>(lighting.light);
@@ -1788,9 +1583,9 @@ void WMORenderer::createMergedBatchMaterial(const ModelData& model, const GroupR
     matData.hasVertexColors = (group.groupFlags & pipeline::kWMOGroupHasVertexColors) != 0 ? 1 : 0;
     matData.specularIntensity = 0.5f;
     // MOMT colours are BGRA bytes.
-    matData.sidnR = static_cast<float>((mb.sidnColor >> 16) & 0xffu) / 255.0f;
-    matData.sidnG = static_cast<float>((mb.sidnColor >> 8) & 0xffu) / 255.0f;
-    matData.sidnB = static_cast<float>(mb.sidnColor & 0xffu) / 255.0f;
+    matData.sidn = glm::vec4(static_cast<float>((mb.sidnColor >> 16) & 0xffu) / 255.0f,
+                             static_cast<float>((mb.sidnColor >> 8) & 0xffu) / 255.0f,
+                             static_cast<float>(mb.sidnColor & 0xffu) / 255.0f, 0.0f);
     matData.enableNormalMap = normalMappingEnabled_ ? 1 : 0;
     matData.enablePOM = pomEnabled_ ? 1 : 0;
     matData.pomScale = 0.012f;
@@ -1798,67 +1593,23 @@ void WMORenderer::createMergedBatchMaterial(const ModelData& model, const GroupR
     matData.heightMapVariance = mb.heightMapVariance;
     matData.normalMapStrength = normalMapStrength_;
     matData.isLava = mb.isLava ? 1 : 0;
-    matData.wmoAmbientR = model.wmoAmbientColor.r;
-    matData.wmoAmbientG = model.wmoAmbientColor.g;
-    matData.wmoAmbientB = model.wmoAmbientColor.b;
+    matData.ambient = glm::vec4(model.wmoAmbientColor, 0.0f);
     matData.emissive = static_cast<int32_t>(mb.emissiveLevel);
-    memcpy(mb.materialSlot.mapped, &matData, sizeof(matData));
+    matData.cloth = glm::vec4(mb.clothTop, mb.clothDrop, mb.clothCentreX, mb.clothCentreY);
+    if (mb.materialRow == GpuRowStore<WmoMaterialGPU>::kNoRow) mb.materialRow = materialRows_.place();
+    materialRows_.write(mb.materialRow, matData);
+}
 
-    // Allocate and write descriptor set
-    mb.materialSet = allocateMaterialSet();
-    // Valid, not merely non-null. descriptorInfo() returns the
-    // texture's handles as they are, so one whose upload or view
-    // creation failed writes VK_NULL_HANDLE into a live descriptor and
-    // declares SHADER_READ_ONLY_OPTIMAL over it - undefined behaviour
-    // that reaches an NVIDIA driver as a lost device. See #123.
-    //
-    // The set is dropped rather than written when even the fallback is
-    // unsampleable, and the render pass already skips a batch with no
-    // set: an unlit wall costs a wall, a null view costs the device.
-    const auto pick = [](VkTexture* wanted, VkTexture* fallback) -> VkTexture* {
-        if (wanted && wanted->isValid()) return wanted;
-        return (fallback && fallback->isValid()) ? fallback : nullptr;
-    };
-    VkTexture* texToUse = pick(mb.texture, whiteTexture_.get());
-    VkTexture* nhMap = pick(mb.normalHeightMap, flatNormalTexture_.get());
-    if ((!texToUse || !nhMap) && mb.materialSet) {
-        vkCtx_->freeDescriptorSets(materialDescPool_, 1, &mb.materialSet);
-        mb.materialSet = VK_NULL_HANDLE;
+void WMORenderer::rewriteMaterialRows() {
+    for (auto* models : {&loadedModels, &scene_->loadingModels_}) {
+        for (auto& [id, model] : *models) {
+            for (auto& group : model.groups)
+                for (auto& mb : group.mergedBatches) createMergedBatchMaterial(model, group, mb);
+        }
     }
-    if (!mb.materialSet) return;
-
-    VkDescriptorImageInfo imgInfo = texToUse->descriptorInfo();
-
-    VkDescriptorBufferInfo bufInfo{};
-    bufInfo.buffer = mb.materialSlot.buffer;
-    bufInfo.offset = mb.materialSlot.offset;
-    bufInfo.range = sizeof(WMOMaterialUBO);
-
-    VkDescriptorImageInfo nhImgInfo = nhMap->descriptorInfo();
-
-    VkWriteDescriptorSet writes[3] = {};
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = mb.materialSet;
-    writes[0].dstBinding = 0;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[0].descriptorCount = 1;
-    writes[0].pImageInfo = &imgInfo;
-
-    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = mb.materialSet;
-    writes[1].dstBinding = 1;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    writes[1].descriptorCount = 1;
-    writes[1].pBufferInfo = &bufInfo;
-
-    writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[2].dstSet = mb.materialSet;
-    writes[2].dstBinding = 2;
-    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[2].descriptorCount = 1;
-    writes[2].pImageInfo = &nhImgInfo;
-
-    vkUpdateDescriptorSets(vkCtx_->getDevice(), 3, writes, 0, nullptr);
+    // A batch whose row came or went draws from it, or stops, from now on.
+    for (const auto& [id, model] : loadedModels)
+        if (layout_.setModel(id, describeDraws(model))) scene_->slots.modelChanged(id);
 }
 
 void WMORenderer::retryPendingTextures() {
@@ -1871,6 +1622,7 @@ void WMORenderer::retryPendingTextures() {
         }
         ModelData& model = it->second;
         auto& pending = model.pendingTextureBatches;
+        const size_t pendingBefore = pending.size();
         for (size_t p = 0; p < pending.size();) {
             const auto [groupIndex, batchIndex] = pending[p];
             if (groupIndex >= model.groups.size() ||
@@ -1895,11 +1647,10 @@ void WMORenderer::retryPendingTextures() {
                 continue;
             }
 
-            // The old set and buffer may still be read by a frame in flight, so
-            // the batch gets new ones and the old go once every slot has fenced.
-            const VkDescriptorSet oldSet = mb.materialSet;
-            const UniformSlotPool::Slot oldSlot = mb.materialSlot;
+            // Its row is rewritten: the frames in flight draw with the row as
+            // they carried it.
             mb.texture = loaded.diffuse.get();
+            mb.textureHandle = loaded.diffuse.tableHandle();
             model.textures[texIndex] = std::move(loaded.diffuse);
             if (texIndex < model.normalMaps.size()) model.normalMaps[texIndex] = std::move(loaded.normalHeight);
             mb.hasTexture = true;
@@ -1907,19 +1658,14 @@ void WMORenderer::retryPendingTextures() {
             attachNormalHeightMap(model, texIndex, mb);
             createMergedBatchMaterial(model, group, mb);
             group.allUntextured = false;
-            VkDescriptorPool pool = materialDescPool_;
-            vkCtx_->deferAfterAllFrameFences([ctx = vkCtx_, pool, oldSet, oldSlot, slots = materialSlots_]() {
-                if (oldSet) {
-                    VkDescriptorSet set = oldSet;
-                    ctx->freeDescriptorSets(pool, 1, &set);
-                }
-                if (slots) slots->free(oldSlot);
-            });
             core::Logger::getInstance().info("WMO ", model.id, " got texture '",
                                              model.textureNames[texIndex], "' on a retry");
             pending[p] = pending.back();
             pending.pop_back();
         }
+        // The batches given their texture draw and cast with it.
+        if (pending.size() != pendingBefore && layout_.setModel(model.id, describeDraws(model)))
+            scene_->slots.modelChanged(model.id);
         if (pending.empty()) {
             modelsWithPendingTextures_[m] = modelsWithPendingTextures_.back();
             modelsWithPendingTextures_.pop_back();
@@ -1929,22 +1675,6 @@ void WMORenderer::retryPendingTextures() {
     }
 }
 
-VkDescriptorSet WMORenderer::allocateMaterialSet() {
-    if (!materialDescPool_ || !materialSetLayout_) return VK_NULL_HANDLE;
-
-    VkDescriptorSetAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocInfo.descriptorPool = materialDescPool_;
-    allocInfo.descriptorSetCount = 1;
-    allocInfo.pSetLayouts = &materialSetLayout_;
-
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    if (vkCtx_->allocateDescriptorSets(allocInfo, &set) != VK_SUCCESS) {
-        core::Logger::getInstance().warning("WMORenderer: failed to allocate material descriptor set");
-        return VK_NULL_HANDLE;
-    }
-    return set;
-}
 
 bool WMORenderer::isGroupVisible(const GroupResources& group, const glm::mat4& modelMatrix,
                                  const Camera& camera) const {
